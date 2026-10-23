@@ -1,9 +1,12 @@
-// /dash/call — voice call page (desktop typing mode first; phone speech input comes later).
+// /dash/call — voice call page. Typing everywhere; in the Elpis Canary shell (P2E) the mic
+// turns it into a hands-free call: she speaks, ~2s of silence ends the sentence, it is sent.
+// The microphone is off while he speaks and comes back 1.5s after his last line finished.
 // backend: /api/call/* via lib/voiceCall.ts; his lines stream over SSE and are spoken one by one.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { HttpError } from '../lib/http';
+import { nativeSpeech, type SpeechEvent } from '../lib/nativeSpeech';
 import { ROUTES } from '../navigation';
 import {
   FINAL_CALL_STATES,
@@ -20,6 +23,9 @@ import './CallScreen.css';
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const IDLE_POLL_MS = 5000;
 const STREAM_RETRY_MS = 2000;
+const SPEECH_LANGUAGE = 'zh-CN';
+const RESUME_AFTER_HIM_MS = 1500;
+const REPLY_TIMEOUT_MS = 45000;
 
 function isFinal(call: VoiceCall | null): boolean {
   return !!call && FINAL_CALL_STATES.indexOf(call.state) !== -1;
@@ -41,6 +47,11 @@ export function CallScreen() {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [voiceless, setVoiceless] = useState<Record<number, true>>({});
+  const [speechSupported] = useState(() => nativeSpeech.supported());
+  const [micOn, setMicOn] = useState(false);
+  const [hearing, setHearing] = useState(false);
+  const [partial, setPartial] = useState('');
+  const [speaking, setSpeaking] = useState(false);
 
   const callRef = useRef<VoiceCall | null>(null);
   const linesRef = useRef<CallLine[]>([]);
@@ -51,6 +62,13 @@ export function CallScreen() {
   const retryRef = useRef<number | null>(null);
   const composingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const micOnRef = useRef(false);
+  const listeningRef = useRef(false);
+  const awaitingReplyRef = useRef(false);
+  const resumeTimerRef = useRef<number | null>(null);
+  const replyTimerRef = useRef<number | null>(null);
+  const onDrainedRef = useRef<() => void>(() => undefined);
+  const onHimLineRef = useRef<() => void>(() => undefined);
 
   callRef.current = call;
   linesRef.current = lines;
@@ -73,6 +91,7 @@ export function CallScreen() {
       if (failed) setVoiceless((prev) => ({ ...prev, [seq]: true }));
       playingRef.current = null;
       playNext();
+      if (playingRef.current === null && !queueRef.current.length) onDrainedRef.current();
     };
     audio.onended = () => done(false);
     audio.onerror = () => done(true);
@@ -84,6 +103,7 @@ export function CallScreen() {
   const stopSpeaking = useCallback(() => {
     queueRef.current = [];
     playingRef.current = null;
+    setSpeaking(false);
     const audio = audioRef.current;
     if (audio) {
       audio.onended = null;
@@ -101,11 +121,170 @@ export function CallScreen() {
     if (!speak) return;
     const known: Record<number, true> = {};
     for (const line of before) known[line.seq] = true;
+    let heardHim = false;
     for (const line of incoming) {
-      if (line.speaker === 'him' && !known[line.seq]) queueRef.current.push(line.seq);
+      if (line.speaker === 'him' && !known[line.seq]) {
+        queueRef.current.push(line.seq);
+        heardHim = true;
+      }
     }
+    if (heardHim) onHimLineRef.current();
     playNext();
   }, [playNext]);
+
+  // ── speech (Canary shell only) ──────────────────────────
+  const clearTimer = (ref: { current: number | null }) => {
+    if (ref.current !== null) {
+      window.clearTimeout(ref.current);
+      ref.current = null;
+    }
+  };
+
+  const stopListening = useCallback(() => {
+    if (listeningRef.current) nativeSpeech.cancel();
+    listeningRef.current = false;
+    setHearing(false);
+    setPartial('');
+  }, []);
+
+  const listen = useCallback(() => {
+    const current = callRef.current;
+    if (!micOnRef.current || listeningRef.current || !current || current.state !== 'active') return;
+    // The shell destroys the recognizer when the app is paused; never start one while hidden.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (awaitingReplyRef.current || playingRef.current !== null || queueRef.current.length) return;
+    listeningRef.current = true;
+    setHearing(true);
+    nativeSpeech.start(SPEECH_LANGUAGE);
+  }, []);
+
+  const resumeListening = useCallback((delayMs: number) => {
+    clearTimer(resumeTimerRef);
+    if (!micOnRef.current) return;
+    resumeTimerRef.current = window.setTimeout(() => {
+      resumeTimerRef.current = null;
+      listen();
+    }, delayMs);
+  }, [listen]);
+
+  onHimLineRef.current = () => {
+    awaitingReplyRef.current = false;
+    clearTimer(replyTimerRef);
+    clearTimer(resumeTimerRef);
+    stopListening();
+    setSpeaking(true);
+  };
+  onDrainedRef.current = () => {
+    setSpeaking(false);
+    resumeListening(RESUME_AFTER_HIM_MS);
+  };
+
+  /** Shared by typing and speech; not gated by `busy` so a recognized sentence is never dropped. */
+  const sayText = useCallback((text: string) => {
+    const current = callRef.current;
+    if (!current || current.state !== 'active' || !text.trim()) return;
+    stopSpeaking();
+    stopListening();
+    clearTimer(resumeTimerRef);
+    awaitingReplyRef.current = true;
+    clearTimer(replyTimerRef);
+    replyTimerRef.current = window.setTimeout(() => {
+      replyTimerRef.current = null;
+      awaitingReplyRef.current = false;
+      listen();
+    }, REPLY_TIMEOUT_MS);
+    setError('');
+    voiceCall.say(current.id, text.trim()).then((line) => {
+      addLines([line], false);
+    }).catch((err) => {
+      setError(describeError(err));
+      awaitingReplyRef.current = false;
+      clearTimer(replyTimerRef);
+      resumeListening(1000);
+    });
+  }, [addLines, listen, resumeListening, stopListening, stopSpeaking]);
+
+  useEffect(() => {
+    if (!speechSupported) return undefined;
+    return nativeSpeech.subscribe((event: SpeechEvent) => {
+      if (!micOnRef.current) return;
+      if (event.type === 'partial') {
+        setPartial(event.text || '');
+      } else if (event.type === 'final') {
+        listeningRef.current = false;
+        setHearing(false);
+        setPartial('');
+        if ((event.text || '').trim()) sayText(event.text || '');
+        else resumeListening(300);
+      } else if (event.type === 'error') {
+        listeningRef.current = false;
+        setHearing(false);
+        setPartial('');
+        if (event.code === 'no_permission' || event.code === 'unavailable') {
+          micOnRef.current = false;
+          setMicOn(false);
+          setError(event.code === 'no_permission' ? '需要麦克风权限才能直接说话' : '这台手机没有可用的语音识别，先打字吧');
+        } else if (event.code !== 'paused') {
+          // 'paused': the shell released the recognizer in onPause; 'resumed' brings it back.
+          resumeListening(event.code === 'busy' || event.code === 'client' ? 800 : 300);
+        }
+      } else if (event.type === 'resumed') {
+        resumeListening(300);
+      }
+    });
+  }, [speechSupported, sayText, resumeListening]);
+
+  // Keep the page's idea of "listening" in step with the native recognizer, which the shell
+  // releases in onPause (screen locked, app backgrounded). Hidden: forget the listen in
+  // flight. Visible again with the mic on: listen anew, unless he is speaking or replying.
+  useEffect(() => {
+    if (!speechSupported) return undefined;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        clearTimer(resumeTimerRef);
+        stopListening();
+        return;
+      }
+      if (micOnRef.current) resumeListening(300);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [speechSupported, stopListening, resumeListening]);
+
+  const turnMicOff = useCallback(() => {
+    micOnRef.current = false;
+    setMicOn(false);
+    clearTimer(resumeTimerRef);
+    stopListening();
+  }, [stopListening]);
+
+  const toggleMic = () => {
+    if (micOnRef.current) {
+      turnMicOff();
+      return;
+    }
+    nativeSpeech.requestPermission().then((granted) => {
+      if (!granted) {
+        setError('需要麦克风权限才能直接说话');
+        return;
+      }
+      setError('');
+      micOnRef.current = true;
+      setMicOn(true);
+      listen();
+    }).catch(() => undefined);
+  };
+
+  /** She wants to talk now: drop the rest of what he is saying and listen. */
+  const interruptHim = () => {
+    const current = callRef.current;
+    stopSpeaking();
+    if (current) voiceCall.interrupt(current.id).catch(() => undefined);
+    awaitingReplyRef.current = false;
+    clearTimer(replyTimerRef);
+    clearTimer(resumeTimerRef);
+    listen();
+  };
 
   // ── stream ──────────────────────────────────────────────
   const closeStream = useCallback(() => {
@@ -204,6 +383,13 @@ export function CallScreen() {
     return undefined;
   }, [call && call.id, call && call.state, openStream, closeStream, stopSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (call && call.state === 'active') return;
+    turnMicOff();
+    awaitingReplyRef.current = false;
+    clearTimer(replyTimerRef);
+  }, [call && call.state, turnMicOff]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Timer tick while talking.
   useEffect(() => {
     if (!call || call.state !== 'active') return undefined;
@@ -223,13 +409,16 @@ export function CallScreen() {
       onPageHide();
       closeStream();
       stopSpeaking();
+      nativeSpeech.cancel();
+      clearTimer(resumeTimerRef);
+      clearTimer(replyTimerRef);
     };
   }, [closeStream, stopSpeaking]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [lines.length]);
+  }, [lines.length, partial]);
 
   // ── actions ─────────────────────────────────────────────
   const run = async (action: () => Promise<void>) => {
@@ -245,12 +434,17 @@ export function CallScreen() {
     }
   };
 
-  const answer = () => {
-    if (!call) return;
+  /** Inside a tap: lets his lines play later without another gesture. */
+  const unlockAudio = () => {
     const audio = ensureAudio();
     audio.src = SILENT_WAV;
     const unlocked = audio.play();
     if (unlocked && typeof unlocked.catch === 'function') unlocked.catch(() => undefined);
+  };
+
+  const answer = () => {
+    if (!call) return;
+    unlockAudio();
     void run(async () => {
       setNow(Date.now());
       setCall(await voiceCall.answer(call.id));
@@ -279,20 +473,31 @@ export function CallScreen() {
   const send = () => {
     const text = draft.trim();
     if (!call || call.state !== 'active' || !text) return;
-    stopSpeaking();
     setDraft('');
+    sayText(text);
+  };
+
+  const resetForNewCall = () => {
+    setRecord('');
+    setVoiceless({});
+    linesRef.current = [];
+    setLines([]);
+  };
+
+  /** She calls him: ring and pick up at once, so the call opens already connected. */
+  const dial = () => {
+    unlockAudio();
     void run(async () => {
-      const line = await voiceCall.say(call.id, text);
-      addLines([line], false);
+      resetForNewCall();
+      const ringing = await voiceCall.ring();
+      setNow(Date.now());
+      setCall(await voiceCall.answer(ringing.id));
     });
   };
 
   const testRing = () => {
     void run(async () => {
-      setRecord('');
-      setVoiceless({});
-      linesRef.current = [];
-      setLines([]);
+      resetForNewCall();
       setCall(await voiceCall.ring());
     });
   };
@@ -322,6 +527,11 @@ export function CallScreen() {
               {line.speaker === 'him' && voiceless[line.seq] ? <span className="call-voiceless">仅文字</span> : null}
             </div>
           ))}
+          {partial ? (
+            <div className="call-line call-line--her call-line--pending">
+              <span className="call-bubble">{partial}</span>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -339,6 +549,16 @@ export function CallScreen() {
               className="call-composer hstack hstack-8"
               onSubmit={(event) => { event.preventDefault(); send(); }}
             >
+              {speechSupported ? (
+                <button
+                  type="button"
+                  className={`call-mic${micOn ? ' is-on' : ''}${hearing ? ' is-hearing' : ''}`}
+                  onClick={toggleMic}
+                  aria-pressed={micOn}
+                >
+                  {micOn ? (hearing ? '在听…' : '麦已开') : '开麦'}
+                </button>
+              ) : null}
               <input
                 className="call-input"
                 value={draft}
@@ -354,12 +574,16 @@ export function CallScreen() {
               />
               <button type="submit" className="call-send" disabled={busy || !draft.trim()}>发送</button>
             </form>
-            <div className="call-buttons hstack">
+            <div className="call-buttons hstack hstack-26">
+              {speaking ? (
+                <button type="button" className="call-btn call-btn--interrupt" onClick={interruptHim}>打断</button>
+              ) : null}
               <button type="button" className="call-btn call-btn--decline" onClick={hangup} disabled={busy}>挂断</button>
             </div>
           </div>
         ) : (
-          <div className="call-buttons hstack">
+          <div className="call-buttons hstack hstack-12">
+            <button type="button" className="call-dial" onClick={dial} disabled={busy}>拨给费佳</button>
             <button type="button" className="call-test" onClick={testRing} disabled={busy}>测试来电</button>
           </div>
         )}

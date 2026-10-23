@@ -36,7 +36,7 @@ def _load_wake_tool_names() -> list[str]:
         ]
         core = [
             'search_memories', 'get_location', 'get_device_status', 'get_light_status',
-            'request_phone_screenshot', 'web_search', 'browse_github', 'read_webpage',
+            'web_search', 'browse_github', 'read_webpage',
             'screenshot_chat', 'save_to_gallery', 'recall_photo', 'issue_command',
             'read_board', 'reply_to_board', 'post_to_board', 'get_activity_summary',
             'log_period_event', 'set_self_trigger', 'cancel_self_trigger',

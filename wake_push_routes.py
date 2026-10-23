@@ -32,32 +32,32 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
 
     @bp.get('/api/wake_log/pending_notification')
     def pending_notification():
-        """供 app 拉取费奥多尔自主发出、还没送达的消息（以及截屏指令）。
-        不带 protocol 是旧协议（领取即消费，仅为已安装的旧客户端保留）；
-        protocol=ack 需要 Health Bridge 设备凭证，只发绑定该设备的租约，
+        """供 app 拉取费奥多尔自主发出、还没送达的消息。
+        只支持 protocol=ack：需要 Health Bridge 设备凭证，只发绑定该设备的租约，
         客户端展示后 POST /api/wake_log/ack 才算送达。
+        旧的“领取即消费”协议已停用（#625），不带 protocol 的请求返回 410、不动任何状态。
         带 ?wait=N（最多 25 秒）时挂住请求直到有可投递内容或超时。"""
-        if request.args.get('protocol') == wake_push.ACK_PROTOCOL:
-            device_id = device_id_from_request()
-            if device_id is None:
-                return _unauthorized()
-            # ?since= from older Canary builds is accepted and ignored (see wake_push).
-            want_screenshot = 'screenshot' in (request.args.get('commands') or '').split(',')
+        if request.args.get('protocol') != wake_push.ACK_PROTOCOL:
+            return jsonify({
+                'ok': False,
+                'error': 'legacy consume-on-read protocol retired; use protocol=ack with a device credential',
+            }), 410
+        device_id = device_id_from_request()
+        if device_id is None:
+            return _unauthorized()
+        # ?since= from older Canary builds and ?commands= (phone screenshots, retired)
+        # are accepted and ignored (see wake_push).
 
-            def take(conn):
-                return wake_push.lease_pending_payload(
-                    conn, fetch_row, soft_window_enabled(), clock(), device_id,
-                    want_screenshot=want_screenshot,
-                )
-        else:
-            def take(conn):
-                return wake_push.take_pending_payload(conn, fetch_row, soft_window_enabled())
+        def take(conn):
+            return wake_push.lease_pending_payload(
+                conn, fetch_row, soft_window_enabled(), clock(), device_id,
+            )
 
         return jsonify(wake_push.poll(get_db, take, wake_push.parse_wait(request.args.get('wait'))))
 
     @bp.post('/api/wake_log/ack')
     def ack_notification():
-        """设备确认已展示/已接收；幂等。body: {"ids": ["wake-12", "cap-3"]}
+        """设备确认已展示/已接收；幂等。body: {"ids": ["wake-12"]}
         只能确认本设备领取过的 id；任何一个不是，就整批 403、不改任何状态。"""
         device_id = device_id_from_request()
         if device_id is None:

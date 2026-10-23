@@ -196,18 +196,18 @@ class WakePushRouteTests(unittest.TestCase):
         self.assertEqual(self.wake_state(w11)[0], 0)
 
     # ── commands, rotation, compatibility ─────────────────────
-    def test_screenshot_only_for_authenticated_declaring_device(self):
+    def test_screenshot_commands_are_retired(self):
         cap = self.add_screenshot()
         self.assertEqual(self.get(query='protocol=ack&commands=screenshot').status_code, 401)
-        self.assertEqual(self.get(self.headers(self.a)).get_json(), {'has_message': False})
+        self.assertEqual(self.get(self.headers(self.a), 'protocol=ack&commands=screenshot').get_json(),
+                         {'has_message': False})
         self.assertEqual(self.cap_state(cap), ('pending', None))
+        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.a)).status_code, 403)
+        self.assertEqual(self.cap_state(cap), ('pending', None))
+        wake = self.add_message()
         body = self.get(self.headers(self.a), 'protocol=ack&commands=screenshot').get_json()
-        self.assertEqual(body['command_id'], 'cap-%d' % cap)
-        self.assertEqual(self.cap_state(cap), ('dispatched', self.a['deviceId']))
-        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.b)).status_code, 403)
-        self.assertEqual(self.cap_state(cap), ('dispatched', self.a['deviceId']))
-        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.a)).status_code, 200)
-        self.assertEqual(self.cap_state(cap)[0], 'received')
+        self.assertEqual(body['id'], 'wake-%d' % wake)
+        self.assertNotIn('command_id', body)
 
     def test_reenrolled_device_old_credential_stops_working(self):
         old = dict(self.a)
@@ -217,11 +217,19 @@ class WakePushRouteTests(unittest.TestCase):
         self.assertEqual(self.get(self.headers(old)).status_code, 401)
         self.assertEqual(self.get(self.headers(self.a)).status_code, 200)
 
-    def test_legacy_protocol_still_serves_installed_clients(self):
-        wake = self.add_message('legacy')
-        body = self.get(query='').get_json()
-        self.assertEqual(body['id'], 'wake-%d' % wake)
-        self.assertEqual(self.wake_state(wake)[0], 1)
+    def test_legacy_protocol_is_retired_and_changes_nothing(self):
+        wake = self.add_message('would have been consumed')
+        cap = self.add_screenshot()
+        for query in ('', 'wait=25', 'protocol=legacy'):
+            started = time.monotonic()
+            response = self.get(query=query)
+            self.assertEqual(response.status_code, 410)
+            self.assertLess(time.monotonic() - started, 2)
+        # even with a valid credential, no protocol means no delivery
+        self.assertEqual(self.get(self.headers(self.a), query='').status_code, 410)
+        self.assertEqual(self.wake_state(wake), (0, None, None))
+        self.assertEqual(self.cap_state(cap), ('pending', None))
+        self.assertEqual(self.get(self.headers(self.a)).get_json()['id'], 'wake-%d' % wake)
 
 
 if __name__ == '__main__':
