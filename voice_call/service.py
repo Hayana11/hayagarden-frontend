@@ -5,6 +5,7 @@ after the last seq it has, so a reconnect replays only what it missed. When she
 starts a new utterance while he is still answering, the rest of his answer is
 dropped from the call (it stays in chat history, it is just not spoken).
 """
+import http.client
 import itertools
 import threading
 import time
@@ -113,6 +114,7 @@ class CallService:
         self._on_end = on_end
         self._changed = threading.Condition()
         self._turns = {}  # call_id -> generation counter of the current reply
+        self._brain_turns = {}  # call_id -> (generation, cancellable reply handle)
         self._replied = set()  # call_ids that already had a first turn
         self._record_lock = threading.Lock()
         self._utter_lock = threading.Lock()
@@ -159,23 +161,37 @@ class CallService:
             raise call_store.CallStateError('empty utterance', 400)
         if self.get(call_id)['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
+        line = self._commit_her_line(call_id, text)
+        self._start_reply(call_id, text)
+        return line
+
+    def _commit_her_line(self, call_id, text):
+        """Persist one ordered transcript immediately, independently of brain batching."""
         line = self._store.add_line(call_id, HER, text)
+        self._notify()
+        return line
+
+    def _start_reply(self, call_id, text):
+        """Start one brain turn for an already-visible HER utterance or speech burst."""
         with self._changed:
+            previous = self._brain_turns.pop(call_id, None)
             generation = self._turns.get(call_id, 0) + 1
             self._turns[call_id] = generation
             first_turn = call_id not in self._replied
             self._replied.add(call_id)
             self._changed.notify_all()
+        self._cancel_brain_handle(previous)
         self._spawn(lambda: self._run_reply(call_id, text, first_turn, generation))
-        return line
 
     def hear(self, call_id, audio, mime, language=None, utterance=None, prev=None):
         """Transcribe one finished VAD utterance with strict, idempotent ordering.
 
         The client number is allocated at speech_start. Scribe may finish out
-        of order, but only the next number is handed to say(). A duplicate
-        upload waits for an in-flight request or returns its saved result, so
-        a retry never calls Scribe or creates another her line.
+        of order, but only ordered transcripts are committed. Each committed
+        transcript becomes a visible HER line immediately; consecutive speech
+        is still batched into one later brain turn. A duplicate upload waits
+        for an in-flight request or returns its saved result, so a retry never
+        calls Scribe or creates another her line.
 
         A number that began (speech_start / interrupt) but whose audio never
         arrives stops holding the queue after STALE_UTTERANCE_S; a call-scoped
@@ -236,7 +252,8 @@ class CallService:
             with self._utter_lock:
                 queue.in_flight.discard(number)
                 queue.results[number] = text
-                line = self._hand_on(call_id, queue)
+                committed_lines = self._hand_on(call_id, queue)
+                line = committed_lines.get(number)
                 response = {
                     'utterance': number,
                     'text': text,
@@ -253,8 +270,8 @@ class CallService:
         return response
 
     def _hand_on(self, call_id, queue):
-        """Hand on every transcript whose turn has come (caller holds _utter_lock)."""
-        said = None
+        """Commit ordered transcripts now; batch only the later brain turn (caller holds _utter_lock)."""
+        committed_lines = {}
         now = self._clock()
         while True:
             number = queue.committed + 1
@@ -284,14 +301,24 @@ class CallService:
             text = queue.results.pop(number)
             queue.started_at.pop(number, None)
             queue.committed = number
-            if text:
+            active = self.get(call_id)['state'] == call_store.ACTIVE
+            if text and active:
+                # Visibility follows spoken-order commit, not brain flush.  A user
+                # should see what Scribe heard even while a later utterance is open.
+                line = self._commit_her_line(call_id, text)
+                committed_lines[number] = line
+                previous_response = queue.responses.get(number)
+                if previous_response is not None:
+                    previous_response['line'] = line
                 queue.carry.append(text)
             if queue.carry and queue.started <= number:
                 joined = ' '.join(queue.carry)
                 queue.carry = []
-                if self.get(call_id)['state'] == call_store.ACTIVE:
-                    said = self.say(call_id, joined)
-        return said
+                if active:
+                    # One brain turn for the complete speech burst; HER lines above
+                    # are already durable, so do not add a second joined HER line.
+                    self._start_reply(call_id, joined)
+        return committed_lines
 
     def _wake_when_stale(self, call_id, queue, delay_s):
         """Re-run _hand_on once the waited-for utterance goes stale (caller holds _utter_lock).
@@ -333,9 +360,14 @@ class CallService:
                 queue = self._utterances.setdefault(call_id, _Utterances())
                 queue.link(int(utterance), prev, self._clock())
                 queue.begin(int(utterance), self._clock())
+        # Invalidate the old generation before closing its stream. The close
+        # then propagates through the client's HTTP response and lets gateway
+        # cleanup release the generation lease naturally.
         with self._changed:
+            previous = self._brain_turns.pop(call_id, None)
             self._turns[call_id] = self._turns.get(call_id, 0) + 1
             self._changed.notify_all()
+        self._cancel_brain_handle(previous)
 
     def lines_after(self, call_id, after_seq, wait_s=0):
         deadline = self._clock() + wait_s
@@ -360,19 +392,68 @@ class CallService:
         return data
 
     # ── internals ────────────────────────────────────────────
+    @staticmethod
+    def _cancel_brain_handle(entry):
+        if not entry:
+            return
+        handle = entry[1] if isinstance(entry, tuple) else entry
+        cancel = getattr(handle, 'cancel', None)
+        if not callable(cancel):
+            cancel = getattr(handle, 'close', None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                pass
+
+    def _register_brain_handle(self, call_id, generation, handle):
+        with self._changed:
+            if self._turns.get(call_id, 0) == generation:
+                self._brain_turns[call_id] = (generation, handle)
+                return True
+        # interrupt() or hangup() won the race while start_reply() was opening
+        # the response; close it immediately instead of letting a stale turn
+        # acquire the gateway lease.
+        self._cancel_brain_handle(handle)
+        return False
+
+    def _unregister_brain_handle(self, call_id, generation, handle):
+        with self._changed:
+            current = self._brain_turns.get(call_id)
+            if current and current[0] == generation and current[1] is handle:
+                self._brain_turns.pop(call_id, None)
+
     def _current_generation(self, call_id):
         with self._changed:
             return self._turns.get(call_id, 0)
 
     def _run_reply(self, call_id, text, first_turn, generation):
         splitter = SentenceSplitter()
+        handle = None
         try:
-            for chunk in self._brain.reply(text, first_turn):
+            start_reply = getattr(self._brain, 'start_reply', None)
+            if callable(start_reply):
+                handle = start_reply(text, first_turn)
+                if not self._register_brain_handle(call_id, generation, handle):
+                    return
+                stream = handle
+            else:
+                # Keep the old injected-brain contract for unit tests and
+                # non-HTTP implementations; only ChatPipelineBrain exposes a
+                # cancellable handle.
+                stream = self._brain.reply(text, first_turn)
+            for chunk in stream:
                 if not self._emit(call_id, generation, splitter.feed(chunk)):
                     return
             self._emit(call_id, generation, splitter.flush())
-        except (BrainError, OSError, ValueError):
-            self._emit(call_id, generation, ['（信号不太好，刚才那句我没接住。）'])
+        except (BrainError, OSError, ValueError, EOFError, http.client.HTTPException):
+            # A cancelled stale stream is intentionally silent: its generation
+            # has already been superseded, so it must not revive a fallback.
+            if self._current_generation(call_id) == generation:
+                self._emit(call_id, generation, ['（信号不太好，刚才那句我没接住。）'])
+        finally:
+            if handle is not None:
+                self._unregister_brain_handle(call_id, generation, handle)
 
     def _emit(self, call_id, generation, sentences):
         for sentence in sentences:
@@ -392,6 +473,11 @@ class CallService:
 
     def _finish(self, call_id, state):
         call = self._change(call_id, state)
+        with self._changed:
+            previous = self._brain_turns.pop(call_id, None)
+            self._turns[call_id] = self._turns.get(call_id, 0) + 1
+            self._changed.notify_all()
+        self._cancel_brain_handle(previous)
         with self._utter_lock:
             queue = self._utterances.pop(call_id, None)
             if queue is not None and queue.timer is not None:

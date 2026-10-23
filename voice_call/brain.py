@@ -5,6 +5,7 @@ The call is not a second AI: her words are stored as an ordinary chat message
 same /chat/stream turn as any typed message, so it is remembered afterwards.
 """
 import json
+import threading
 import urllib.request
 
 APP_BASE = 'http://127.0.0.1:5050'
@@ -59,12 +60,76 @@ def _http_send_message(content, timeout=15):
     return payload.get('message_id')
 
 
+class _HTTPStream:
+    """Own the HTTP response so a caller can abort one chat turn only."""
+
+    def __init__(self, request, timeout):
+        self._lock = threading.Lock()
+        self._response = urllib.request.urlopen(request, timeout=timeout)
+        self._closed = False
+
+    def __iter__(self):
+        with self._lock:
+            response = self._response
+        try:
+            yield from parse_sse_text(response)
+        finally:
+            self.close()
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            response = self._response
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
+class CancellableReply:
+    """An iterable reply whose close aborts only its underlying stream."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def __iter__(self):
+        try:
+            for chunk in self._stream:
+                if self._cancelled.is_set():
+                    return
+                yield chunk
+        except Exception:
+            if self._cancelled.is_set():
+                return
+            raise
+        finally:
+            self.cancel()
+
+    def cancel(self):
+        self._cancelled.set()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream = self._stream
+        close = getattr(stream, 'close', None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
 def _http_stream_reply(message_id, timeout=320):
     body = json.dumps({'user_message_id': message_id}).encode('utf-8')
     req = urllib.request.Request(GATEWAY_BASE + '/chat/stream', data=body, method='POST',
                                  headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        yield from parse_sse_text(resp)
+    return _HTTPStream(req, timeout)
 
 
 class ChatPipelineBrain:
@@ -72,6 +137,13 @@ class ChatPipelineBrain:
         self._send_message = send_message
         self._stream_reply = stream_reply
 
-    def reply(self, text, first_turn):
+    def start_reply(self, text, first_turn):
         message_id = self._send_message(format_utterance(text, first_turn))
-        yield from self._stream_reply(message_id)
+        return CancellableReply(self._stream_reply(message_id))
+
+    def reply(self, text, first_turn):
+        handle = self.start_reply(text, first_turn)
+        try:
+            yield from handle
+        finally:
+            handle.cancel()

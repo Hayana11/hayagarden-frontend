@@ -13,7 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from moments_auth import OwnerAuthError
 from voice_call import store as call_store
 from voice_call.chat_record import record_call_in_chat
-from voice_call.brain import BrainError, ChatPipelineBrain, format_utterance, parse_sse_text, PHONE_STYLE
+from voice_call.brain import (
+    BrainError,
+    CancellableReply,
+    ChatPipelineBrain,
+    format_utterance,
+    parse_sse_text,
+    PHONE_STYLE,
+)
 from voice_call.sentences import SentenceSplitter
 from voice_call.service import MAX_CLIP_BYTES, STALE_UTTERANCE_S, CallService, format_duration
 from voice_call.stt import ElevenLabsSTT, STTError
@@ -63,6 +70,44 @@ class FakeBrain:
 
 def run_now(target):
     target()
+
+
+class CancellableHandle:
+    def __init__(self, chunks=(), wait_for_cancel=False, late_chunks=()):
+        self.chunks = list(chunks)
+        self.wait_for_cancel = wait_for_cancel
+        self.late_chunks = list(late_chunks)
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+        self.cancel_calls = 0
+
+    def __iter__(self):
+        self.started.set()
+        if self.wait_for_cancel:
+            self.cancelled.wait(5)
+            yield from self.late_chunks
+        else:
+            yield from self.chunks
+
+    def cancel(self):
+        self.cancel_calls += 1
+        self.cancelled.set()
+
+
+class CancellableBrain:
+    def __init__(self):
+        self.calls = []
+        self.handles = []
+
+    def start_reply(self, text, first_turn):
+        self.calls.append((text, first_turn))
+        handle = CancellableHandle(
+            wait_for_cancel=not self.handles,
+            late_chunks=['旧回复。\n'],
+            chunks=['新回复。\n'],
+        )
+        self.handles.append(handle)
+        return handle
 
 
 class SentenceSplitterTests(unittest.TestCase):
@@ -268,16 +313,52 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.interrupt(self.call_id, utterance=2)  # B begins while A is in Scribe
         self.stt.release(b'A')
         thread_a.join(5)
-        self.assertIsNone(self.results[b'A']['line'])
-        self.assertEqual(self.her_lines(), [])
-        self.assertEqual(self.brain.calls, [], 'A must not start a reply of its own')
+        self.assertEqual(self.results[b'A']['line']['text'], '你在吗')
+        self.assertEqual(self.her_lines(), ['你在吗'])
+        self.assertEqual(self.brain.calls, [], 'A is visible immediately but must not start a reply of its own')
 
         self.stt.expect(b'B', '我刚才在想你')
         self.stt.release(b'B')
         result = self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
-        self.assertEqual(self.her_lines(), ['你在吗 我刚才在想你'])
-        self.assertEqual(result['line']['text'], '你在吗 我刚才在想你')
+        self.assertEqual(self.her_lines(), ['你在吗', '我刚才在想你'])
+        self.assertEqual(result['line']['text'], '我刚才在想你')
         self.assertEqual([text for text, _ in self.brain.calls], ['你在吗 我刚才在想你'])
+
+    def test_committed_transcript_is_visible_before_the_speech_burst_flushes(self):
+        self.stt.expect(b'A', '先说这一句')
+        thread_a = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.service.interrupt(self.call_id, utterance=2)  # B began; its audio is still pending.
+        self.stt.release(b'A')
+        thread_a.join(5)
+
+        self.assertEqual(self.results[b'A']['line']['text'], '先说这一句')
+        self.assertEqual(self.her_lines(), ['先说这一句'])
+        self.assertEqual(self.brain.calls, [], 'visibility must not force an early brain reply')
+
+        self.stt.expect(b'B', '再补一句')
+        self.stt.release(b'B')
+        result_b = self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        self.assertEqual(result_b['line']['text'], '再补一句')
+        self.assertEqual(self.her_lines(), ['先说这一句', '再补一句'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['先说这一句 再补一句'])
+
+    def test_visible_transcript_does_not_wait_for_a_lost_successor_timeout(self):
+        self.stt.expect(b'A', '我先说完了')
+        thread_a = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.service.interrupt(self.call_id, utterance=2)  # B starts, but its upload is lost.
+        self.stt.release(b'A')
+        thread_a.join(5)
+
+        self.assertEqual(self.her_lines(), ['我先说完了'])
+        self.assertEqual(self.brain.calls, [], 'B still holds only the brain flush, not transcript visibility')
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['我先说完了'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['我先说完了'])
 
     def test_concurrent_sentences_keep_spoken_order_when_the_later_one_transcribes_first(self):
         self.stt.expect(b'A', '第一句')
@@ -291,7 +372,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [])
         self.stt.release(b'A')
         thread_a.join(5)
-        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual(self.her_lines(), ['第一句', '第二句'])
         self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
 
     def test_failed_or_discarded_utterance_does_not_block_the_queue(self):
@@ -323,7 +404,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.stt.expect(b'C', '听得到吗')
         self.stt.release(b'C')
         self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
-        self.assertEqual(self.her_lines(), ['喂 听得到吗'])
+        self.assertEqual(self.her_lines(), ['喂', '听得到吗'])
 
     def test_last_sentence_behind_a_lost_one_is_handed_on_by_the_stale_timer(self):
         self.service.interrupt(self.call_id, utterance=1)  # A began; its upload is lost
@@ -351,7 +432,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [], 'A is still in Scribe: B keeps waiting for it')
         self.stt.release(b'A')
         first.join(5)
-        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        self.assertEqual(self.her_lines(), ['慢慢说', '我在'])
         queue = self.service._utterances[self.call_id]
         self.assertEqual(queue.results, {}, 'no late transcript is left behind')
 
@@ -415,7 +496,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertIsNone(self.say_clip(b'B', '第二句', n + 1, n)['line'])
         self.service.interrupt(self.call_id, utterance=n, prev=0)  # late speech_start(N)
         self.say_clip(b'A', '第一句', n, 0)
-        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual(self.her_lines(), ['第一句', '第二句'])
         self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
         self.assertEqual(self.service._utterances[self.call_id].stale, set())
 
@@ -424,7 +505,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertIsNone(self.say_clip(b'C', '三', n + 2, n + 1)['line'])
         self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
         self.say_clip(b'A', '一', n, 0)
-        self.assertEqual(self.her_lines(), ['一 二 三'])
+        self.assertEqual(self.her_lines(), ['一', '二', '三'])
         self.assertEqual(self.service._utterances[self.call_id].stale, set())
 
     def test_lost_predecessor_is_released_by_the_stale_timer(self):
@@ -447,7 +528,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [], 'N is in Scribe: N+1 keeps waiting for it')
         self.stt.release(b'A')
         first.join(5)
-        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        self.assertEqual(self.her_lines(), ['慢慢说', '我在'])
 
     def test_same_prev_replays_and_a_conflicting_prev_is_refused(self):
         n = 50000
@@ -693,6 +774,108 @@ class BrainTests(unittest.TestCase):
         )
         self.assertEqual(list(brain.reply('喂', False)), ['id=42'])
         self.assertEqual(sent, ['〔电话〕她刚在电话里说：「喂」'])
+
+
+
+    def test_start_reply_can_close_only_its_underlying_stream(self):
+        class CloseableStream:
+            def __init__(self):
+                self.closed = False
+                self.started = threading.Event()
+                self.released = threading.Event()
+
+            def __iter__(self):
+                self.started.set()
+                self.released.wait(5)
+                return
+                yield  # keep this a generator
+
+            def close(self):
+                self.closed = True
+                self.released.set()
+
+        stream = CloseableStream()
+        brain = ChatPipelineBrain(
+            send_message=lambda _content: 42,
+            stream_reply=lambda _message_id: stream,
+        )
+        handle = brain.start_reply('喂', False)
+        thread = threading.Thread(target=lambda: list(handle))
+        thread.start()
+        self.assertTrue(stream.started.wait(5))
+        handle.cancel()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(stream.closed)
+
+
+class BargeInCancellationTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.brain = CancellableBrain()
+        self.service = CallService(
+            call_store.CallStore(self.path, time.time),
+            CachedTTS(FakeEngine(), self.tmp.name),
+            self.brain,
+        )
+        call = self.service.ring()
+        self.service.answer(call['id'])
+        self.call_id = call['id']
+
+    def tearDown(self):
+        self.service.hangup(self.call_id)
+        os.unlink(self.path)
+        self.tmp.cleanup()
+
+    def wait_until(self, predicate):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail('condition did not become true')
+
+    def test_interrupt_closes_old_stream_and_next_turn_gets_a_clean_generation(self):
+        self.service.say(self.call_id, '第一句')
+        self.wait_until(lambda: len(self.brain.handles) == 1)
+        first = self.brain.handles[0]
+        self.assertTrue(first.started.wait(5))
+
+        # A non-call stream registered under another owner is not touched by
+        # call-scoped cancellation (ordinary Chat/Wake never enters this map).
+        ordinary_stream = CancellableHandle(wait_for_cancel=True)
+        with self.service._changed:
+            self.service._brain_turns['ordinary-chat'] = (1, ordinary_stream)
+        self.service.interrupt(self.call_id, utterance=7, prev=0)
+        self.assertEqual(first.cancel_calls, 1)
+        self.assertEqual(ordinary_stream.cancel_calls, 0)
+
+        self.service.say(self.call_id, '第二句')
+        self.wait_until(lambda: len(self.brain.handles) == 2)
+        self.wait_until(lambda: any(
+            line['text'] == '新回复。'
+            for line in self.service.lines_after(self.call_id, 0)[0]
+        ))
+
+        texts = [line['text'] for line in self.service.lines_after(self.call_id, 0)[0]]
+        self.assertIn('第一句', texts)
+        self.assertIn('第二句', texts)
+        self.assertIn('新回复。', texts)
+        self.assertNotIn('旧回复。', texts)
+        self.assertNotIn('（信号不太好，刚才那句我没接住。）', texts)
+        self.wait_until(lambda: self.call_id not in self.service._brain_turns)
+        self.assertNotIn(self.call_id, self.service._brain_turns)
+
+    def test_hangup_closes_the_active_call_reply(self):
+        self.service.say(self.call_id, '挂断前')
+        self.wait_until(lambda: len(self.brain.handles) == 1)
+        handle = self.brain.handles[0]
+        self.assertTrue(handle.started.wait(5))
+        self.service.hangup(self.call_id)
+        self.assertEqual(handle.cancel_calls, 1)
+        self.assertNotIn(self.call_id, self.service._brain_turns)
 
 
 class ServiceTests(unittest.TestCase):
