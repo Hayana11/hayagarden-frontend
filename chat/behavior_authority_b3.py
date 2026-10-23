@@ -86,6 +86,11 @@ _SHARED_RENDERER_INSTRUCTIONS = (
     '只输出一个 JSON object：{"rendered_content": "..."}。'
 )
 
+_CALL_OPENING_NOTE = (
+    '\ncontent_target 为 call_opening 时：你正主动给她打电话，写的是她接起电话时你说的'
+    '第一句话——一两句口语短句，像真的在说话；不要列表、括号动作、表情或 Markdown。'
+)
+
 
 @dataclass(frozen=True)
 class RendererInput:
@@ -214,6 +219,7 @@ def build_renderer_input(
     get_db_fn: Callable,
     wake_run_id: str,
     decision_attempt_id: str,
+    content_target: str = _CONTENT_TARGET,
 ) -> RendererInput:
     from chat.relationship_context import build_relationship_context
     from chat.system_builder import read_persona
@@ -232,7 +238,7 @@ def build_renderer_input(
     return RendererInput(
         selected_intent=str(decision.get('intent') or ''),
         selected_action=str(decision.get('action_candidate') or 'message'),
-        content_target=_CONTENT_TARGET,
+        content_target=content_target,
         persona_context=read_persona(),
         continuity_facts=str(continuity.text or ''),
         decision_identity=decision_identity,
@@ -691,7 +697,7 @@ def invoke_renderer_relay(
     from relay.manager import RelayManager
 
     mgr = RelayManager()
-    system = _RENDERER_SYSTEM + '\n\n' + renderer_input.persona_context
+    system = _RENDERER_SYSTEM + _CALL_OPENING_NOTE + '\n\n' + renderer_input.persona_context
     payload = {
         'max_tokens': _RENDERER_MAX_TOKENS,
         'system': system,

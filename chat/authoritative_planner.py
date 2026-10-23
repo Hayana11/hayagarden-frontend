@@ -2,7 +2,7 @@
 
 This module is deliberately smaller than Shadow Planner.  It accepts only
 GuardClock facts, makes one bounded Claude Code call, and returns only the
-basic none/message Decision.  It never creates a resident, session, transcript
+basic none/message Decision (or call, while WAKE_CALL_ENABLED offers it).  It never creates a resident, session, transcript
 row, Wake log entry, or tool call.
 """
 from __future__ import annotations
@@ -39,9 +39,11 @@ def _main_chat_oauth_token() -> str:
 _SYSTEM_PROMPT = (
     'You are the authoritative basic Unified Wake Planner. '
     'Return exactly one JSON object and do not use tools. '
-    'Choose only action_candidate none or message. '
+    'Choose action_candidate only from allowed_actions in the payload. '
     'For none, intent is a short internal reason and content is empty. '
     'For message, intent is a short internal intent; do not write visible content. '
+    'call (only when listed) means phoning her right now instead of messaging; '
+    'its intent is a short internal reason; do not write what will be said. '
     'Do not infer emotion, drive, longing, internal state, history, or memory. '
     'If uncertain, return none with blocked true and a reason_codes list. '
     'The JSON keys must be intent, action_candidate, confidence, blocked, '
@@ -92,8 +94,15 @@ def make_basic_wake_planner_input(
         observed_at=observed_at,
         user_idle_hours=float(user_idle_hours),
         effective_idle_hours=float(effective_idle_hours),
+        allowed_actions=basic_allowed_actions(),
         extra_context=dict(extra_context or {}),
     )
+
+
+def basic_allowed_actions() -> tuple[str, ...]:
+    """none and message always; call only while WAKE_CALL_ENABLED is on."""
+    from chat.wake_call import call_enabled
+    return ('none', 'message', 'call') if call_enabled() else ('none', 'message')
 
 
 def _coerce_observed_at(value: Any) -> datetime.datetime:
@@ -241,9 +250,10 @@ def _validate_decision(
     value: dict[str, Any],
     *,
     wake_run_id: str,
+    allowed_actions: tuple[str, ...] = ('none', 'message'),
 ) -> dict[str, Any]:
     action = str(value.get('action_candidate') or '').strip()
-    if action not in ('none', 'message'):
+    if action not in allowed_actions:
         raise ValueError('action_not_in_basic_capability')
     intent = str(value.get('intent') or '').strip()
     if not intent:
@@ -312,7 +322,9 @@ def run_authoritative_cc_planner(
         else:
             text = result
         parsed = _json_object(text)
-        return 'valid', _validate_decision(parsed, wake_run_id=wake_run_id)
+        return 'valid', _validate_decision(
+            parsed, wake_run_id=wake_run_id, allowed_actions=tuple(basic_input.allowed_actions),
+        )
     except Exception as exc:
         return 'error', {
             'error': str(exc)[:500],
