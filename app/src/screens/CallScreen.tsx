@@ -434,12 +434,17 @@ export function CallScreen() {
     }
   };
 
-  const answer = () => {
-    if (!call) return;
+  /** Inside a tap: lets his lines play later without another gesture. */
+  const unlockAudio = () => {
     const audio = ensureAudio();
     audio.src = SILENT_WAV;
     const unlocked = audio.play();
     if (unlocked && typeof unlocked.catch === 'function') unlocked.catch(() => undefined);
+  };
+
+  const answer = () => {
+    if (!call) return;
+    unlockAudio();
     void run(async () => {
       setNow(Date.now());
       setCall(await voiceCall.answer(call.id));
@@ -472,12 +477,27 @@ export function CallScreen() {
     sayText(text);
   };
 
+  const resetForNewCall = () => {
+    setRecord('');
+    setVoiceless({});
+    linesRef.current = [];
+    setLines([]);
+  };
+
+  /** She calls him: ring and pick up at once, so the call opens already connected. */
+  const dial = () => {
+    unlockAudio();
+    void run(async () => {
+      resetForNewCall();
+      const ringing = await voiceCall.ring();
+      setNow(Date.now());
+      setCall(await voiceCall.answer(ringing.id));
+    });
+  };
+
   const testRing = () => {
     void run(async () => {
-      setRecord('');
-      setVoiceless({});
-      linesRef.current = [];
-      setLines([]);
+      resetForNewCall();
       setCall(await voiceCall.ring());
     });
   };
@@ -562,7 +582,8 @@ export function CallScreen() {
             </div>
           </div>
         ) : (
-          <div className="call-buttons hstack">
+          <div className="call-buttons hstack hstack-12">
+            <button type="button" className="call-dial" onClick={dial} disabled={busy}>拨给费佳</button>
             <button type="button" className="call-test" onClick={testRing} disabled={busy}>测试来电</button>
           </div>
         )}

@@ -159,7 +159,21 @@
   cursor: pointer;
 }
 
+.call-dial {
+  flex-shrink: 0;
+  height: 44px;
+  padding: 0 22px;
+  border-radius: 22px;
+  border: 0;
+  background: var(--color-green);
+  color: #FFFFFF;
+  font-size: 15px;
+  cursor: pointer;
+  box-shadow: var(--shadow-fab);
+}
+
 .call-send:disabled,
+.call-dial:disabled,
 .call-test:disabled { opacity: 0.5; cursor: default; }
 
 .call-line--pending .call-bubble {
