@@ -100,14 +100,17 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
         discard=1 (the shell threw this utterance away: no body).
         """
         utterance = _utterance_arg()
+        length = request.content_length
+        if length is not None and length > MAX_CLIP_BYTES:
+            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         if request.args.get('discard') == '1':
+            discarded_body = request.stream.read(MAX_CLIP_BYTES + 1)
+            if len(discarded_body) > MAX_CLIP_BYTES:
+                return jsonify({'ok': False, 'error': 'clip too large'}), 413
             return jsonify({'ok': True, **service.hear(call_id, None, None, utterance=utterance)})
         mime = (request.mimetype or '').lower()
         if mime not in AUDIO_TYPES:
             return jsonify({'ok': False, 'error': 'unsupported audio type'}), 415
-        length = request.content_length
-        if length is not None and length > MAX_CLIP_BYTES:
-            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         # Never buffer more than the cap, even without (or with a lying) Content-Length.
         audio = request.stream.read(MAX_CLIP_BYTES + 1)
         if len(audio) > MAX_CLIP_BYTES:
