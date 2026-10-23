@@ -365,6 +365,23 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertTrue(timer.cancelled)
         self.assertNotIn(self.call_id, self.service._utterances)
 
+    def test_interrupt_rejects_non_active_and_late_calls_without_recreating_queue(self):
+        self.service.hangup(self.call_id)
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(self.call_id, utterance=3)
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(self.call_id)
+        self.assertNotIn(self.call_id, self.service._utterances)
+
+        ringing = self.service.ring()
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(ringing['id'], utterance=1)
+        self.assertNotIn(ringing['id'], self.service._utterances)
+
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.interrupt('missing-call', utterance=1)
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertNotIn('missing-call', self.service._utterances)
     def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
         self.stt.release(b'A')
