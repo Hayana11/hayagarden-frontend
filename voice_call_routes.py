@@ -64,7 +64,18 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
     @bp.post('/ring')
     def ring():
-        return jsonify({'ok': True, 'call': service.ring()}), 201
+        """Body (optional): {"language": "<code from GET /languages>"}."""
+        data = request.get_json(silent=True) or {}
+        language = None
+        if isinstance(data, dict) and 'language' in data:
+            language = data['language']
+            if not isinstance(language, str) or not language:
+                raise CallStateError('language must be a configured code', 400)
+        return jsonify({'ok': True, 'call': service.ring(language)}), 201
+
+    @bp.get('/languages')
+    def languages():
+        return jsonify({'ok': True, 'languages': service.languages()})
 
     @bp.get('/current')
     def current():

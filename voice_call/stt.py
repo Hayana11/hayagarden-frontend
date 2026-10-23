@@ -5,13 +5,14 @@ clip; this turns it into text for CallService.say. Same key as the voice
 (ELEVENLABS_API_KEY), read through tts.read_env_value so it is never logged.
 """
 import json
+import re
 import uuid
 
 from voice_call.tts import _urllib_post, read_env_value
 
 DEFAULT_MODEL_ID = 'scribe_v2'
 DEFAULT_LANGUAGE = 'zho'
-LANGUAGES = ('zho', 'eng')
+LANGUAGE_CODE = re.compile(r'^[a-z]{3}$')  # Scribe takes ISO 639-3 codes
 AUDIO_TYPES = {
     'audio/wav': 'clip.wav',
     'audio/x-wav': 'clip.wav',
@@ -58,7 +59,7 @@ class ElevenLabsSTT:
             raise STTError('ELEVENLABS_API_KEY is not configured')
         if mime not in AUDIO_TYPES:
             raise STTError('unsupported audio type')
-        if language not in LANGUAGES:
+        if not isinstance(language, str) or not LANGUAGE_CODE.match(language):
             language = DEFAULT_LANGUAGE
         boundary, body = _multipart(
             [('model_id', self.model_id), ('language_code', language), ('tag_audio_events', 'false')],

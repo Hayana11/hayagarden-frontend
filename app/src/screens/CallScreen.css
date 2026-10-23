@@ -181,6 +181,30 @@
   box-shadow: var(--shadow-fab);
 }
 
+.call-langs {
+  justify-content: center;
+}
+
+.call-lang {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.call-lang.is-on {
+  border-color: var(--color-green);
+  background: var(--color-green);
+  color: #FFFFFF;
+}
+
+.call-lang:disabled { opacity: 0.5; cursor: default; }
+
 .call-send:disabled,
 .call-dial:disabled,
 .call-test:disabled { opacity: 0.5; cursor: default; }

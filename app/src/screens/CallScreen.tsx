@@ -18,6 +18,7 @@ import {
   startUtterance,
   utterancePrev,
   voiceCall,
+  type CallLanguage,
   type CallLine,
   type VoiceCall,
 } from '../lib/voiceCall';
@@ -48,6 +49,11 @@ function describeError(err: unknown): string {
   return '网络不太好，稍后再试';
 }
 
+/** The fallback recognizer's locale for this call: the one frozen with it at ring, else Chinese. */
+function speechLanguageOf(call: VoiceCall | null): string {
+  return (call && call.speech) || SPEECH_LANGUAGE;
+}
+
 export function CallScreen() {
   const navigate = useNavigate();
   const [call, setCall] = useState<VoiceCall | null>(null);
@@ -67,6 +73,8 @@ export function CallScreen() {
   const [hearing, setHearing] = useState(false);
   const [partial, setPartial] = useState('');
   const [speaking, setSpeaking] = useState(false);
+  const [languages, setLanguages] = useState<CallLanguage[]>([]);
+  const [language, setLanguage] = useState('');
 
   const callRef = useRef<VoiceCall | null>(null);
   const utteranceChainRef = useRef(newUtteranceChain());
@@ -172,7 +180,7 @@ export function CallScreen() {
     if (awaitingReplyRef.current || playingRef.current !== null || queueRef.current.length) return;
     listeningRef.current = true;
     setHearing(true);
-    nativeSpeech.start(SPEECH_LANGUAGE);
+    nativeSpeech.start(speechLanguageOf(current));
   }, [voiceSupported]);
 
   const resumeListening = useCallback((delayMs: number) => {
@@ -222,6 +230,17 @@ export function CallScreen() {
       resumeListening(1000);
     });
   }, [addLines, listen, resumeListening, stopListening, stopSpeaking, voiceSupported]);
+
+  // Which languages can be dialed; none (or a failed load) keeps today's single Chinese call.
+  useEffect(() => {
+    let cancelled = false;
+    voiceCall.languages().then((list) => {
+      if (cancelled) return;
+      setLanguages(list);
+      setLanguage((prev) => prev || (list.length ? list[0].code : ''));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!voiceSupported) return undefined;
@@ -583,7 +602,7 @@ export function CallScreen() {
     unlockAudio();
     void run(async () => {
       resetForNewCall();
-      const ringing = await voiceCall.ring();
+      const ringing = await voiceCall.ring(language || undefined);
       setNow(Date.now());
       setCall(await voiceCall.answer(ringing.id));
     });
@@ -592,7 +611,7 @@ export function CallScreen() {
   const testRing = () => {
     void run(async () => {
       resetForNewCall();
-      setCall(await voiceCall.ring());
+      setCall(await voiceCall.ring(language || undefined));
     });
   };
 
@@ -679,9 +698,28 @@ export function CallScreen() {
             </div>
           </div>
         ) : (
-          <div className="call-buttons hstack hstack-12">
-            <button type="button" className="call-dial" onClick={dial} disabled={busy}>拨给费佳</button>
-            <button type="button" className="call-test" onClick={testRing} disabled={busy}>测试来电</button>
+          <div className="vstack vstack-10">
+            {languages.length ? (
+              <div className="call-langs hstack hstack-8" role="radiogroup" aria-label="通话语言">
+                {languages.map((entry) => (
+                  <button
+                    key={entry.code}
+                    type="button"
+                    role="radio"
+                    aria-checked={entry.code === language}
+                    className={`call-lang${entry.code === language ? ' is-on' : ''}`}
+                    onClick={() => setLanguage(entry.code)}
+                    disabled={busy}
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div className="call-buttons hstack hstack-12">
+              <button type="button" className="call-dial" onClick={dial} disabled={busy}>拨给费佳</button>
+              <button type="button" className="call-test" onClick={testRing} disabled={busy}>测试来电</button>
+            </div>
           </div>
         )}
       </footer>

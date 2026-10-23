@@ -171,10 +171,13 @@ def _create_voice_call_service():
     from voice_call.service import CallService
     from voice_call.store import CallStore
     from voice_call.stt import ElevenLabsSTT
+    from voice_call.tts import MODEL_CONFIG_KEY as TTS_MODEL_CONFIG_KEY
     from voice_call.tts import CachedTTS, ElevenLabsTTS, read_env_value
 
     voice_id = read_env_value('ELEVENLABS_VOICE_ID') or None
-    engine = ElevenLabsTTS(voice_id=voice_id) if voice_id else ElevenLabsTTS()
+    model = lambda: config_store.get(TTS_MODEL_CONFIG_KEY, '')  # noqa: E731 - read per request
+    engine = (ElevenLabsTTS(voice_id=voice_id, model_id=model) if voice_id
+              else ElevenLabsTTS(model_id=model))
     return CallService(
         CallStore(DB_PATH, _time.time),
         CachedTTS(engine, '/opt/frontend/voice_call_cache'),
