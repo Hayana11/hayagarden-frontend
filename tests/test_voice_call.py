@@ -974,6 +974,8 @@ class RouteTests(unittest.TestCase):
         self.client.post('/api/call/%s/answer' % call_id)
         self.assertEqual(self.hear(call_id, body=b'').status_code, 413)
         self.assertEqual(self.hear(call_id, body=b'0' * (MAX_CLIP_BYTES + 1)).status_code, 413)
+        self.assertEqual(self.hear(call_id, body=b'0' * (MAX_CLIP_BYTES + 1),
+                                   query='?seq=1&discard=1').status_code, 413)
         self.assertEqual(self.hear(call_id, mime='video/avi').status_code, 415)
         self.assertEqual(self.hear(call_id, query='?utt=abc').status_code, 400)
         self.assertEqual(self.hear(call_id, query='?utt=0').status_code, 400)
