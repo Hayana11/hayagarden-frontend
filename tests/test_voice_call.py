@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from flask import Flask
@@ -13,7 +15,8 @@ from voice_call import store as call_store
 from voice_call.chat_record import record_call_in_chat
 from voice_call.brain import BrainError, ChatPipelineBrain, format_utterance, parse_sse_text, PHONE_STYLE
 from voice_call.sentences import SentenceSplitter
-from voice_call.service import CallService, format_duration
+from voice_call.service import MAX_CLIP_BYTES, STALE_UTTERANCE_S, CallService, format_duration
+from voice_call.stt import ElevenLabsSTT, STTError
 from voice_call.tts import CachedTTS, ElevenLabsTTS, TTSError, read_env_value
 from voice_call_routes import create_voice_call_blueprint
 
@@ -145,6 +148,424 @@ class TTSTests(unittest.TestCase):
             self.assertEqual(read_env_value('MISSING_KEY_X', env.name), '')
         finally:
             os.unlink(env.name)
+
+
+class FakeSTT:
+    def __init__(self, text='你在干嘛', error=None):
+        self.text = text
+        self.error = error
+        self.calls = []
+
+    def transcribe(self, audio, mime, language):
+        self.calls.append((len(audio), mime, language))
+        if self.error:
+            raise self.error
+        return self.text
+
+
+class GatedSTT:
+    """Each transcription blocks until the test releases that clip."""
+
+    def __init__(self):
+        self.gates = {}
+        self.texts = {}
+        self.errors = {}
+        self.calls = []
+
+    def expect(self, clip, text, error=None):
+        self.gates[clip] = threading.Event()
+        self.texts[clip] = text
+        self.errors[clip] = error
+
+    def release(self, clip):
+        self.gates[clip].set()
+
+    def transcribe(self, audio, mime, language):
+        self.calls.append(audio)
+        self.gates[audio].wait(5)
+        if self.errors[audio]:
+            raise self.errors[audio]
+        return self.texts[audio]
+
+
+class FakeScheduler:
+    """Stands in for threading.Timer: the test advances the clock and fires due timers."""
+
+    def __init__(self):
+        self.pending = []
+
+    def __call__(self, delay_s, callback):
+        timer = FakeTimer(delay_s, callback)
+        self.pending.append(timer)
+        return timer
+
+    def run_due(self):
+        due, self.pending = [t for t in self.pending if not t.cancelled], []
+        for timer in due:
+            timer.callback()
+        return len(due)
+
+
+class FakeTimer:
+    def __init__(self, delay_s, callback):
+        self.delay_s = delay_s
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class UtteranceOrderTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = Clock()
+        self.brain = FakeBrain()
+        self.stt = GatedSTT()
+        self.scheduler = FakeScheduler()
+        self.service = CallService(
+            call_store.CallStore(self.path, self.clock),
+            CachedTTS(FakeEngine(), self.tmp.name),
+            self.brain, clock=self.clock, spawn=run_now, stt=self.stt, schedule=self.scheduler,
+        )
+        call = self.service.ring()
+        self.service.answer(call['id'])
+        self.call_id = call['id']
+        self.results = {}
+
+    def tearDown(self):
+        os.unlink(self.path)
+        self.tmp.cleanup()
+
+    def hear_async(self, clip, utterance, prev=None):
+        def run():
+            try:
+                self.results[clip] = self.service.hear(self.call_id, clip, 'audio/wav', None, utterance, prev)
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                self.results[clip] = exc
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread
+
+    def her_lines(self):
+        lines, _ = self.service.lines_after(self.call_id, 0)
+        return [line['text'] for line in lines if line['speaker'] == 'her']
+
+    def wait_started(self, number):
+        for _ in range(500):
+            queue = self.service._utterances.get(self.call_id)
+            if queue and queue.started >= number:
+                return
+            time.sleep(0.01)
+        self.fail('utterance %d never started' % number)
+
+    def test_older_sentence_finishing_after_she_spoke_again_does_not_revive_a_reply(self):
+        self.stt.expect(b'A', '你在吗')
+        thread_a = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.service.interrupt(self.call_id, utterance=2)  # B begins while A is in Scribe
+        self.stt.release(b'A')
+        thread_a.join(5)
+        self.assertIsNone(self.results[b'A']['line'])
+        self.assertEqual(self.her_lines(), [])
+        self.assertEqual(self.brain.calls, [], 'A must not start a reply of its own')
+
+        self.stt.expect(b'B', '我刚才在想你')
+        self.stt.release(b'B')
+        result = self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        self.assertEqual(self.her_lines(), ['你在吗 我刚才在想你'])
+        self.assertEqual(result['line']['text'], '你在吗 我刚才在想你')
+        self.assertEqual([text for text, _ in self.brain.calls], ['你在吗 我刚才在想你'])
+
+    def test_concurrent_sentences_keep_spoken_order_when_the_later_one_transcribes_first(self):
+        self.stt.expect(b'A', '第一句')
+        self.stt.expect(b'B', '第二句')
+        thread_a = self.hear_async(b'A', 1)
+        thread_b = self.hear_async(b'B', 2)
+        self.wait_started(2)
+        self.stt.release(b'B')
+        thread_b.join(5)
+        self.assertIsNone(self.results[b'B']['line'], 'B waits for A')
+        self.assertEqual(self.her_lines(), [])
+        self.stt.release(b'A')
+        thread_a.join(5)
+        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
+
+    def test_failed_or_discarded_utterance_does_not_block_the_queue(self):
+        self.stt.expect(b'A', '', error=STTError('stt http 500'))
+        self.stt.expect(b'B', '还在吗')
+        thread_a = self.hear_async(b'A', 1)
+        thread_b = self.hear_async(b'B', 2)
+        self.wait_started(2)
+        self.stt.release(b'B')
+        thread_b.join(5)
+        self.stt.release(b'A')
+        thread_a.join(5)
+        self.assertIsInstance(self.results[b'A'], STTError)
+        self.assertEqual(self.her_lines(), ['还在吗'])
+
+        self.service.interrupt(self.call_id, utterance=3)
+        self.assertEqual(self.service.hear(self.call_id, None, None, utterance=3)['text'], '')
+        self.stt.expect(b'D', '好')
+        self.stt.release(b'D')
+        self.service.hear(self.call_id, b'D', 'audio/wav', None, 4)
+        self.assertEqual(self.her_lines(), ['还在吗', '好'])
+
+    def test_lost_utterance_stops_holding_the_queue_after_the_stale_window(self):
+        self.service.interrupt(self.call_id, utterance=1)  # began, upload never arrives
+        self.stt.expect(b'B', '喂')
+        self.stt.release(b'B')
+        self.assertIsNone(self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)['line'])
+        self.clock.now += STALE_UTTERANCE_S + 1
+        self.stt.expect(b'C', '听得到吗')
+        self.stt.release(b'C')
+        self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
+        self.assertEqual(self.her_lines(), ['喂 听得到吗'])
+
+    def test_last_sentence_behind_a_lost_one_is_handed_on_by_the_stale_timer(self):
+        self.service.interrupt(self.call_id, utterance=1)  # A began; its upload is lost
+        self.stt.expect(b'B', '晚安')
+        self.stt.release(b'B')
+        self.assertIsNone(self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)['line'])
+        self.assertEqual(self.her_lines(), [])
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+        # B is her last sentence: nothing else arrives, only time passes.
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['晚安'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['晚安'])
+        self.assertEqual(self.scheduler.pending, [])
+
+    def test_utterance_in_scribe_never_goes_stale(self):
+        self.stt.expect(b'A', '慢慢说')
+        first = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.stt.expect(b'B', '我在')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        self.clock.now += STALE_UTTERANCE_S * 2
+        self.scheduler.run_due()
+        self.assertEqual(self.her_lines(), [], 'A is still in Scribe: B keeps waiting for it')
+        self.stt.release(b'A')
+        first.join(5)
+        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual(queue.results, {}, 'no late transcript is left behind')
+
+    def test_hanging_up_cancels_the_stale_timer(self):
+        self.service.interrupt(self.call_id, utterance=1)
+        self.stt.expect(b'B', '喂')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        timer = self.scheduler.pending[0]
+        self.service.hangup(self.call_id)
+        self.assertTrue(timer.cancelled)
+        self.assertNotIn(self.call_id, self.service._utterances)
+
+    def test_interrupt_rejects_non_active_and_late_calls_without_recreating_queue(self):
+        self.service.hangup(self.call_id)
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(self.call_id, utterance=3)
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(self.call_id)
+        self.assertNotIn(self.call_id, self.service._utterances)
+
+        ringing = self.service.ring()
+        with self.assertRaises(call_store.CallStateError):
+            self.service.interrupt(ringing['id'], utterance=1)
+        self.assertNotIn(ringing['id'], self.service._utterances)
+
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.interrupt('missing-call', utterance=1)
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertNotIn('missing-call', self.service._utterances)
+
+    def test_call_opening_at_a_large_process_wide_seq_skips_the_gap_in_one_step(self):
+        self.stt.expect(b'A', '我回来了')
+        self.stt.release(b'A')
+        result = self.service.hear(self.call_id, b'A', 'audio/wav', None, 50001)
+        self.assertEqual(result['line']['text'], '我回来了')
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual(queue.committed, 50001)
+        self.assertEqual(queue.stale, set(), 'no O(N) stale slots for numbers this call never saw')
+        self.assertTrue(self.service.hear(self.call_id, b'old', 'audio/wav', None, 3)['stale'])
+        self.stt.expect(b'B', '接着说')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 50002)
+        self.assertEqual(self.her_lines(), ['我回来了', '接着说'])
+        self.assertEqual(self.stt.calls, [b'A', b'B'])
+
+    # ── prev: the predecessor chain (the shell's seq is process-wide) ──
+    def say_clip(self, clip, text, utterance, prev):
+        self.stt.expect(clip, text)
+        self.stt.release(clip)
+        return self.service.hear(self.call_id, clip, 'audio/wav', None, utterance, prev)
+
+    def test_call_root_with_prev_zero_skips_the_history_gap_in_one_step(self):
+        result = self.say_clip(b'A', '我回来了', 50001, 0)
+        self.assertEqual(result['line']['text'], '我回来了')
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual((queue.committed, queue.stale), (50001, set()))
+
+    def test_successor_arriving_first_cannot_skip_its_predecessor(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '第二句', n + 1, n)['line'])
+        self.service.interrupt(self.call_id, utterance=n, prev=0)  # late speech_start(N)
+        self.say_clip(b'A', '第一句', n, 0)
+        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, set())
+
+    def test_three_deep_reversed_chain_keeps_spoken_order(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'C', '三', n + 2, n + 1)['line'])
+        self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
+        self.say_clip(b'A', '一', n, 0)
+        self.assertEqual(self.her_lines(), ['一 二 三'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, set())
+
+    def test_lost_predecessor_is_released_by_the_stale_timer(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '晚安', n + 1, n)['line'])
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['晚安'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, {n}, 'only the lost one, no O(N) slots')
+
+    def test_predecessor_in_scribe_is_never_skipped(self):
+        n = 50000
+        self.stt.expect(b'A', '慢慢说')
+        first = self.hear_async(b'A', n, 0)
+        self.wait_started(n)
+        self.say_clip(b'B', '我在', n + 1, n)
+        self.clock.now += STALE_UTTERANCE_S * 2
+        self.scheduler.run_due()
+        self.assertEqual(self.her_lines(), [], 'N is in Scribe: N+1 keeps waiting for it')
+        self.stt.release(b'A')
+        first.join(5)
+        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+
+    def test_same_prev_replays_and_a_conflicting_prev_is_refused(self):
+        n = 50000
+        self.say_clip(b'A', '嗯', n, 0)
+        self.assertTrue(self.service.hear(self.call_id, b'A', 'audio/wav', None, n, 0)['duplicate'])
+        self.assertEqual(self.stt.calls, [b'A'])
+        for call in (lambda: self.service.hear(self.call_id, b'A', 'audio/wav', None, n, 7),
+                     lambda: self.service.interrupt(self.call_id, utterance=n, prev=3)):
+            with self.assertRaises(call_store.CallStateError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(self.her_lines(), ['嗯'])
+
+    def test_discard_closes_a_predecessor_slot(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
+        self.service.hear(self.call_id, None, None, utterance=n, prev=0)
+        self.assertEqual(self.her_lines(), ['二'])
+        self.assertEqual(self.stt.calls, [b'B'], 'a discarded utterance is never transcribed')
+
+    def test_prev_must_be_zero_or_an_earlier_seq(self):
+        for utterance, prev in ((5, 5), (5, 6), (5, -1), (None, 1)):
+            with self.assertRaises(call_store.CallStateError) as ctx:
+                self.service.hear(self.call_id, b'X', 'audio/wav', None, utterance, prev)
+            self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.interrupt(self.call_id, prev=1)
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(self.stt.calls, [])
+
+    def test_repeated_utterance_numbers_replay_idempotently(self):
+        self.stt.expect(b'A', '嗯')
+        self.stt.release(b'A')
+        self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        duplicate = self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        self.assertTrue(duplicate['duplicate'])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(self.her_lines(), ['嗯'])
+
+    def test_duplicate_in_flight_waits_and_replays_without_second_stt(self):
+        self.stt.expect(b'A', '只处理一次')
+        returned = []
+        errors = []
+
+        def hear_once():
+            try:
+                returned.append(self.service.hear(self.call_id, b'A', 'audio/wav', None, 1))
+            except Exception as exc:  # noqa: BLE001 - assertion below
+                errors.append(exc)
+
+        first = threading.Thread(target=hear_once)
+        duplicate = threading.Thread(target=hear_once)
+        first.start()
+        self.wait_started(1)
+        duplicate.start()
+        time.sleep(0.05)
+        self.assertTrue(duplicate.is_alive(), 'duplicate must wait for the in-flight Scribe call')
+        self.stt.release(b'A')
+        first.join(5)
+        duplicate.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(len(returned), 2)
+        self.assertEqual(self.her_lines(), ['只处理一次'])
+        self.assertTrue(any(result.get('duplicate') for result in returned))
+
+    def test_without_numbers_arrival_order_is_used(self):
+        self.stt.expect(b'A', '一')
+        self.stt.release(b'A')
+        self.stt.expect(b'B', '二')
+        self.stt.release(b'B')
+        self.assertEqual(self.service.hear(self.call_id, b'A', 'audio/wav')['utterance'], 1)
+        self.assertEqual(self.service.hear(self.call_id, b'B', 'audio/wav')['utterance'], 2)
+        self.assertEqual(self.her_lines(), ['一', '二'])
+
+
+class STTTests(unittest.TestCase):
+    def test_scribe_request_shape(self):
+        seen = {}
+
+        def post(url, headers, body, timeout):
+            seen.update(url=url, headers=headers, body=body)
+            return 200, json.dumps({'text': ' 小猫今天有没有好好吃饭？ ', 'language_code': 'zho'}).encode()
+
+        stt = ElevenLabsSTT(api_key='k', post=post)
+        self.assertEqual(stt.transcribe(b'RIFFdata', 'audio/wav', 'zho'), '小猫今天有没有好好吃饭？')
+        self.assertEqual(seen['url'], 'https://api.elevenlabs.io/v1/speech-to-text')
+        self.assertEqual(seen['headers']['xi-api-key'], 'k')
+        self.assertTrue(seen['headers']['content-type'].startswith('multipart/form-data; boundary='))
+        for part in (b'name="model_id"\r\n\r\nscribe_v2', b'name="language_code"\r\n\r\nzho',
+                     b'name="tag_audio_events"\r\n\r\nfalse', b'filename="clip.wav"', b'RIFFdata'):
+            self.assertIn(part, seen['body'])
+
+    def test_unknown_language_falls_back_to_chinese(self):
+        seen = {}
+
+        def post(url, headers, body, timeout):
+            seen['body'] = body
+            return 200, b'{"text": "hi"}'
+
+        ElevenLabsSTT(api_key='k', post=post).transcribe(b'x', 'audio/wav', 'klingon')
+        self.assertIn(b'name="language_code"\r\n\r\nzho', seen['body'])
+
+    def test_scribe_errors(self):
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='', post=lambda *a: (200, b'{}')).transcribe(b'x')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (200, b'{}')).transcribe(b'x', 'video/avi')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (401, b'no')).transcribe(b'x')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (200, b'<html>')).transcribe(b'x')
+
+        def explode(*args):
+            raise OSError('net down')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=explode).transcribe(b'x')
 
 
 class StoreTests(unittest.TestCase):
@@ -571,9 +992,10 @@ class RouteTests(unittest.TestCase):
         self.clock = Clock()
         self.engine = FakeEngine()
         self.allowed = True
+        self.stt = FakeSTT()
         service = CallService(call_store.CallStore(self.path, self.clock),
                               CachedTTS(self.engine, self.tmp.name),
-                              FakeBrain(), clock=self.clock, spawn=run_now)
+                              FakeBrain(), clock=self.clock, spawn=run_now, stt=self.stt)
 
         def guard(request):
             if not self.allowed:
@@ -631,6 +1053,77 @@ class RouteTests(unittest.TestCase):
         self.client.post('/api/call/%s/answer' % call_id)
         self.client.post('/api/call/%s/say' % call_id, json={'text': '喂'})
         self.assertEqual(self.client.get('/api/call/%s/audio/2' % call_id).status_code, 503)
+
+    def hear(self, call_id, body=b'RIFF....WAVE', mime='audio/wav', query=''):
+        return self.client.post('/api/call/%s/hear%s' % (call_id, query), data=body,
+                                headers={'Content-Type': mime})
+
+    def test_hear_transcribes_then_says(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.assertEqual(self.hear(call_id).status_code, 409)
+        self.assertEqual(self.stt.calls, [], 'a clip for a call that is not active is never billed')
+        self.client.post('/api/call/%s/answer' % call_id)
+
+        resp = self.hear(call_id, query='?lang=eng')
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body['text'], '你在干嘛')
+        self.assertEqual(body['line']['speaker'], 'her')
+        self.assertEqual(self.stt.calls, [(12, 'audio/wav', 'eng')])
+        stream = self.client.get('/api/call/%s/stream?after=0' % call_id).get_data(as_text=True)
+        self.assertIn('"text":"你在干嘛"', stream)
+        self.assertIn('"speaker":"him"', stream)
+
+    def test_hear_silence_says_nothing(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.stt.text = ''
+        body = self.hear(call_id).get_json()
+        self.assertEqual((body['text'], body['line']), ('', None))
+        stream = self.client.get('/api/call/%s/stream?after=0' % call_id).get_data(as_text=True)
+        self.assertNotIn('event: line', stream)
+
+    def test_hear_rejects_empty_oversized_and_failed_clips(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.assertEqual(self.hear(call_id, body=b'').status_code, 413)
+        self.assertEqual(self.hear(call_id, body=b'0' * (MAX_CLIP_BYTES + 1)).status_code, 413)
+        self.assertEqual(self.hear(call_id, body=b'0' * (MAX_CLIP_BYTES + 1),
+                                   query='?seq=1&discard=1').status_code, 413)
+        self.assertEqual(self.hear(call_id, mime='video/avi').status_code, 415)
+        self.assertEqual(self.hear(call_id, query='?utt=abc').status_code, 400)
+        self.assertEqual(self.hear(call_id, query='?utt=0').status_code, 400)
+        self.assertEqual(self.stt.calls, [])
+        self.stt.error = STTError('stt http 401')
+        resp = self.hear(call_id)
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(resp.get_json()['error'], 'stt http 401')
+
+    def test_hear_discard_and_numbered_interrupt(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.assertEqual(self.client.post('/api/call/%s/interrupt?utt=1' % call_id).status_code, 200)
+        body = self.client.post('/api/call/%s/hear?utt=1&discard=1' % call_id).get_json()
+        self.assertEqual((body['utterance'], body['text'], body['line']), (1, '', None))
+        self.assertEqual(self.stt.calls, [], 'a discarded utterance is never transcribed')
+        self.assertEqual(self.hear(call_id, query='?utt=2').get_json()['line']['text'], '你在干嘛')
+
+    def test_hear_and_interrupt_carry_prev(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.assertEqual(self.client.post('/api/call/%s/interrupt?seq=7&prev=x' % call_id).status_code, 400)
+        self.assertEqual(self.hear(call_id, query='?seq=7&prev=7').status_code, 400)
+        self.assertEqual(self.client.post('/api/call/%s/interrupt?seq=7&prev=0' % call_id).status_code, 200)
+        self.assertEqual(self.hear(call_id, query='?seq=7&prev=3').status_code, 409)
+        body = self.client.post('/api/call/%s/hear?seq=7&prev=0&discard=1' % call_id).get_json()
+        self.assertEqual((body['utterance'], body['line']), (7, None))
+        self.assertEqual(self.hear(call_id, query='?seq=9&prev=7').get_json()['line']['text'], '你在干嘛')
+        self.assertEqual(len(self.stt.calls), 1, 'the 409 and the discard never reach Scribe')
+
+    def test_hear_requires_owner(self):
+        self.allowed = False
+        self.assertEqual(self.hear('anything').status_code, 401)
+        self.assertEqual(self.stt.calls, [])
 
 
 if __name__ == '__main__':

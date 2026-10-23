@@ -170,6 +170,7 @@ def _create_voice_call_service():
     from voice_call.chat_record import record_call_in_chat
     from voice_call.service import CallService
     from voice_call.store import CallStore
+    from voice_call.stt import ElevenLabsSTT
     from voice_call.tts import CachedTTS, ElevenLabsTTS, read_env_value
 
     voice_id = read_env_value('ELEVENLABS_VOICE_ID') or None
@@ -179,6 +180,7 @@ def _create_voice_call_service():
         CachedTTS(engine, '/opt/frontend/voice_call_cache'),
         ChatPipelineBrain(),
         on_end=lambda summary: record_call_in_chat(DB_PATH, summary),
+        stt=ElevenLabsSTT(),
     )
 
 
