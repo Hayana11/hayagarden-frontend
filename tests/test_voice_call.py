@@ -395,6 +395,16 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/call/nope').status_code, 200)
         self.assertEqual(self.client.post('/api/call/nope/answer').status_code, 404)
 
+    def test_stream_resume_prefers_newest_of_query_and_last_event_id(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.client.post('/api/call/%s/say' % call_id, json={'text': '喂'})
+        body = self.client.get('/api/call/%s/stream?after=0' % call_id,
+                               headers={'Last-Event-ID': '2'}).get_data(as_text=True)
+        self.assertNotIn('"seq":1', body)
+        self.assertNotIn('"seq":2', body)
+        self.assertIn('"seq":3', body)
+
     def test_tts_failure_is_503_not_another_voice(self):
         self.engine.fail = True
         call_id = self.client.post('/api/call/ring').get_json()['call']['id']

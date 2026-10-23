@@ -80,10 +80,13 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
     @bp.get('/<call_id>/stream')
     def stream(call_id):
         service.get(call_id)
-        try:
-            after = int(request.args.get('after') or request.headers.get('Last-Event-ID') or 0)
-        except ValueError:
-            after = 0
+        # EventSource reconnects keep the original ?after= but send Last-Event-ID.
+        after = 0
+        for raw in (request.args.get('after'), request.headers.get('Last-Event-ID')):
+            try:
+                after = max(after, int(raw or 0))
+            except ValueError:
+                pass
 
         def generate():
             last = after
