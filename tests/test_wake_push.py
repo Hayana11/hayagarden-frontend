@@ -123,33 +123,6 @@ class ParseTests(unittest.TestCase):
 
 
 
-class LegacyProtocolTests(Base):
-    """Unchanged behaviour for clients that cannot ack (retired shell, installed Canary)."""
-
-    def take(self, conn):
-        return wake_push.take_pending_payload(conn, fetch_row, False)
-
-    def test_latest_is_returned_and_all_pending_consumed(self):
-        self.add_message('older')
-        latest = self.add_message('latest')
-        conn = self.open_conn()
-        payload = self.take(conn)
-        conn.close()
-        self.assertEqual(payload['content'], 'latest')
-        self.assertEqual(payload['id'], 'wake-%d' % latest)
-        conn = self.open_conn()
-        self.assertIsNone(self.take(conn))
-        conn.close()
-
-    def test_screenshot_command_is_dispatched(self):
-        cap = self.add_screenshot()
-        conn = self.open_conn()
-        payload = self.take(conn)
-        conn.close()
-        self.assertEqual(payload, {'has_message': False, 'command': 'screenshot', 'command_id': 'cap-%d' % cap})
-        self.assertEqual(self.screenshot_status(cap), 'dispatched')
-
-
 class AckProtocolTests(Base):
     def test_handing_out_does_not_consume(self):
         wake = self.add_message('晚安')

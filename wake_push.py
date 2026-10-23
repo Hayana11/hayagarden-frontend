@@ -1,12 +1,10 @@
 """Wake notification delivery to the Elpis app shell.
 
-Two protocols share ``GET /api/wake_log/pending_notification``:
-
-legacy (no ``protocol`` param, unauthenticated) — what the retired shell and
-already-installed Canary builds speak: the latest pending message (and a
-screenshot command) is returned and marked delivered in the same request. A
-response lost on the way loses the message. Kept only until the new Canary is
-installed and verified; then it is switched off separately.
+``GET /api/wake_log/pending_notification`` speaks one protocol. The legacy
+consume-on-read protocol (no ``protocol`` param: latest message returned and
+marked delivered in the same request, so a lost response lost the message) was
+retired after the new Canary was verified on the owner's phone (#625); such
+requests get 410 and change nothing.
 
 ack (``protocol=ack``) — requires the Health Bridge device credential
 (``X-Health-Device-ID`` + ``Authorization: Bearer``); the route rejects anything
@@ -96,31 +94,6 @@ def ensure_columns(conn):
     _add_column(conn, 'wake_log', 'push_lease_device', 'TEXT')
     _add_column(conn, 'wake_log', 'push_disposition', 'TEXT')
     _add_column(conn, 'screenshot_requests', 'dispatched_device', 'TEXT')
-
-
-# ── legacy protocol ──────────────────────────────────────────
-def take_pending_payload(conn, fetch_row, soft_window):
-    """Legacy: claim and immediately consume the latest message and a screenshot command."""
-    row = fetch_row(conn)
-    if row:
-        if soft_window:
-            # Only mark the matched current-window row; never wipe foreign wakes.
-            conn.execute(
-                "UPDATE wake_log SET notified=1 WHERE id=?",
-                (int(row['id']),),
-            )
-        else:
-            conn.execute(
-                "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
-            )
-
-    ensure_columns(conn)
-    sreq = _claim_screenshot(conn)
-    conn.commit()
-
-    if not row and not sreq:
-        return None
-    return _payload(row, sreq)
 
 
 # ── ack protocol (caller has authenticated device_id) ────────
@@ -235,7 +208,7 @@ def _newer_acked_exists(conn, wake_id):
 
 
 # ── shared ───────────────────────────────────────────────────
-def _claim_screenshot(conn, device_id=None):
+def _claim_screenshot(conn, device_id):
     # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
     sreq = conn.execute(
         "SELECT id FROM screenshot_requests "
@@ -244,18 +217,11 @@ def _claim_screenshot(conn, device_id=None):
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if sreq:
-        if device_id is None:
-            conn.execute(
-                "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours'), "
-                "dispatched_device=NULL WHERE id=?",
-                (int(sreq['id']),)
-            )
-        else:
-            conn.execute(
-                "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours'), "
-                "dispatched_device=? WHERE id=?",
-                (device_id, int(sreq['id']))
-            )
+        conn.execute(
+            "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours'), "
+            "dispatched_device=? WHERE id=?",
+            (device_id, int(sreq['id']))
+        )
     return sreq
 
 

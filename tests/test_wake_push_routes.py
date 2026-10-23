@@ -217,11 +217,19 @@ class WakePushRouteTests(unittest.TestCase):
         self.assertEqual(self.get(self.headers(old)).status_code, 401)
         self.assertEqual(self.get(self.headers(self.a)).status_code, 200)
 
-    def test_legacy_protocol_still_serves_installed_clients(self):
-        wake = self.add_message('legacy')
-        body = self.get(query='').get_json()
-        self.assertEqual(body['id'], 'wake-%d' % wake)
-        self.assertEqual(self.wake_state(wake)[0], 1)
+    def test_legacy_protocol_is_retired_and_changes_nothing(self):
+        wake = self.add_message('would have been consumed')
+        cap = self.add_screenshot()
+        for query in ('', 'wait=25', 'protocol=legacy'):
+            started = time.monotonic()
+            response = self.get(query=query)
+            self.assertEqual(response.status_code, 410)
+            self.assertLess(time.monotonic() - started, 2)
+        # even with a valid credential, no protocol means no delivery
+        self.assertEqual(self.get(self.headers(self.a), query='').status_code, 410)
+        self.assertEqual(self.wake_state(wake), (0, None, None))
+        self.assertEqual(self.cap_state(cap), ('pending', None))
+        self.assertEqual(self.get(self.headers(self.a)).get_json()['id'], 'wake-%d' % wake)
 
 
 if __name__ == '__main__':
