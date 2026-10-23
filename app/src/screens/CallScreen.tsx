@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { HttpError } from '../lib/http';
 import { nativeSpeech, type SpeechEvent, type SpeechStatus } from '../lib/nativeSpeech';
+import { nativeVoice, type VoiceEvent } from '../lib/nativeVoice';
 import { ROUTES } from '../navigation';
 import {
   FINAL_CALL_STATES,
@@ -24,6 +25,7 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 const IDLE_POLL_MS = 5000;
 const STREAM_RETRY_MS = 2000;
 const SPEECH_LANGUAGE = 'zh-CN';
+const P2F_LANGUAGE = 'zho';
 const RESUME_AFTER_HIM_MS = 1500;
 const REPLY_TIMEOUT_MS = 45000;
 
@@ -53,8 +55,11 @@ export function CallScreen() {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [voiceless, setVoiceless] = useState<Record<number, true>>({});
+  const [voiceStatus] = useState(() => nativeVoice.status());
+  const voiceSupported = voiceStatus === 'ready';
   const [speechStatus] = useState(() => nativeSpeech.status());
-  const speechSupported = speechStatus === 'ready';
+  const speechSupported = !voiceSupported && speechStatus === 'ready';
+  const micSupported = voiceSupported || speechSupported;
   const [micOn, setMicOn] = useState(false);
   const [hearing, setHearing] = useState(false);
   const [partial, setPartial] = useState('');
@@ -148,13 +153,14 @@ export function CallScreen() {
   };
 
   const stopListening = useCallback(() => {
-    if (listeningRef.current) nativeSpeech.cancel();
+    if (!voiceSupported && listeningRef.current) nativeSpeech.cancel();
     listeningRef.current = false;
     setHearing(false);
     setPartial('');
-  }, []);
+  }, [voiceSupported]);
 
   const listen = useCallback(() => {
+    if (voiceSupported) return;
     const current = callRef.current;
     if (!micOnRef.current || listeningRef.current || !current || current.state !== 'active') return;
     // The shell destroys the recognizer when the app is paused; never start one while hidden.
@@ -163,7 +169,7 @@ export function CallScreen() {
     listeningRef.current = true;
     setHearing(true);
     nativeSpeech.start(SPEECH_LANGUAGE);
-  }, []);
+  }, [voiceSupported]);
 
   const resumeListening = useCallback((delayMs: number) => {
     clearTimer(resumeTimerRef);
@@ -178,12 +184,12 @@ export function CallScreen() {
     awaitingReplyRef.current = false;
     clearTimer(replyTimerRef);
     clearTimer(resumeTimerRef);
-    stopListening();
+    if (!voiceSupported) stopListening();
     setSpeaking(true);
   };
   onDrainedRef.current = () => {
     setSpeaking(false);
-    resumeListening(RESUME_AFTER_HIM_MS);
+    if (!voiceSupported) resumeListening(RESUME_AFTER_HIM_MS);
   };
 
   /** Shared by typing and speech; not gated by `busy` so a recognized sentence is never dropped. */
@@ -191,8 +197,10 @@ export function CallScreen() {
     const current = callRef.current;
     if (!current || current.state !== 'active' || !text.trim()) return;
     stopSpeaking();
-    stopListening();
-    clearTimer(resumeTimerRef);
+    if (!voiceSupported) {
+      stopListening();
+      clearTimer(resumeTimerRef);
+    }
     awaitingReplyRef.current = true;
     clearTimer(replyTimerRef);
     replyTimerRef.current = window.setTimeout(() => {
@@ -209,7 +217,57 @@ export function CallScreen() {
       clearTimer(replyTimerRef);
       resumeListening(1000);
     });
-  }, [addLines, listen, resumeListening, stopListening, stopSpeaking]);
+  }, [addLines, listen, resumeListening, stopListening, stopSpeaking, voiceSupported]);
+
+  useEffect(() => {
+    if (!voiceSupported) return undefined;
+    return nativeVoice.subscribe((event: VoiceEvent) => {
+      const current = callRef.current;
+      if (event.type === 'speech_start' && event.seq !== undefined) {
+        setHearing(true);
+        setPartial('');
+        stopSpeaking();
+        setSpeaking(false);
+        awaitingReplyRef.current = false;
+        clearTimer(replyTimerRef);
+        clearTimer(resumeTimerRef);
+        if (current && current.state === 'active') {
+          void voiceCall.interrupt(current.id, event.seq).catch(() => undefined);
+        }
+      } else if (event.type === 'utterance_ready' && event.seq !== undefined) {
+        setHearing(false);
+        const wav = nativeVoice.takeUtterance(event.seq);
+        if (!wav) {
+          setError('utterance_unavailable');
+          return;
+        }
+        if (!current || current.state !== 'active') return;
+        void voiceCall.hear(current.id, wav, event.seq, P2F_LANGUAGE).then((result) => {
+          if (result.line && !result.stale) addLines([result.line], false);
+        }).catch((err) => {
+          // Scribe failure is recoverable; the native capture remains on for the next sentence.
+          setError(describeError(err));
+        });
+      } else if (event.type === 'error') {
+        setHearing(false);
+        setPartial('');
+        setError(event.code || 'capture_failed');
+        if (event.code === 'permission_denied' || event.code === 'no_permission') {
+          micOnRef.current = false;
+          setMicOn(false);
+        }
+      } else if (event.type === 'paused') {
+        setHearing(false);
+        setPartial('');
+        setMicOn(false);
+      } else if (event.type === 'resumed') {
+        if (micOnRef.current && current && current.state === 'active') {
+          setMicOn(true);
+          nativeVoice.start();
+        }
+      }
+    });
+  }, [addLines, stopSpeaking, voiceSupported]);
 
   useEffect(() => {
     if (!speechSupported) return undefined;
@@ -241,44 +299,58 @@ export function CallScreen() {
     });
   }, [speechSupported, sayText, resumeListening]);
 
-  // Keep the page's idea of "listening" in step with the native recognizer, which the shell
-  // releases in onPause (screen locked, app backgrounded). Hidden: forget the listen in
-  // flight. Visible again with the mic on: listen anew, unless he is speaking or replying.
+  // Activity/page pause stops native capture; a visible active call resumes the desired mic once.
   useEffect(() => {
-    if (!speechSupported) return undefined;
+    if (!voiceSupported && !speechSupported) return undefined;
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
         clearTimer(resumeTimerRef);
-        stopListening();
+        if (voiceSupported) {
+          nativeVoice.stop();
+          setHearing(false);
+          setMicOn(false);
+        } else {
+          stopListening();
+        }
         return;
       }
-      if (micOnRef.current) resumeListening(300);
+      if (micOnRef.current) {
+        if (voiceSupported) {
+          setMicOn(true);
+          nativeVoice.start();
+        } else {
+          resumeListening(300);
+        }
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [speechSupported, stopListening, resumeListening]);
+  }, [speechSupported, voiceSupported, stopListening, resumeListening]);
 
   const turnMicOff = useCallback(() => {
     micOnRef.current = false;
     setMicOn(false);
     clearTimer(resumeTimerRef);
-    stopListening();
-  }, [stopListening]);
+    if (voiceSupported) nativeVoice.cancel();
+    else stopListening();
+  }, [stopListening, voiceSupported]);
 
   const toggleMic = () => {
     if (micOnRef.current) {
       turnMicOff();
       return;
     }
-    nativeSpeech.requestPermission().then((granted) => {
+    const permission = voiceSupported ? nativeVoice.requestPermission() : nativeSpeech.requestPermission();
+    permission.then((granted) => {
       if (!granted) {
-        setError('需要麦克风权限才能直接说话');
+        setError('permission_denied');
         return;
       }
       setError('');
       micOnRef.current = true;
       setMicOn(true);
-      listen();
+      if (voiceSupported) nativeVoice.start();
+      else listen();
     }).catch(() => undefined);
   };
 
@@ -290,7 +362,7 @@ export function CallScreen() {
     awaitingReplyRef.current = false;
     clearTimer(replyTimerRef);
     clearTimer(resumeTimerRef);
-    listen();
+    if (!voiceSupported) listen();
   };
 
   // ── stream ──────────────────────────────────────────────
@@ -416,11 +488,12 @@ export function CallScreen() {
       onPageHide();
       closeStream();
       stopSpeaking();
-      nativeSpeech.cancel();
+      if (voiceSupported) nativeVoice.cancel();
+      else nativeSpeech.cancel();
       clearTimer(resumeTimerRef);
       clearTimer(replyTimerRef);
     };
-  }, [closeStream, stopSpeaking]);
+  }, [closeStream, stopSpeaking, voiceSupported]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -543,7 +616,7 @@ export function CallScreen() {
       </div>
 
       {error ? <div className="call-error">{error}</div> : null}
-      {state === 'active' && SPEECH_HINT[speechStatus] ? (
+      {state === 'active' && !voiceSupported && SPEECH_HINT[speechStatus] ? (
         <div className="call-hint" data-testid="call-speech-hint">{SPEECH_HINT[speechStatus]}</div>
       ) : null}
 
@@ -559,7 +632,7 @@ export function CallScreen() {
               className="call-composer hstack hstack-8"
               onSubmit={(event) => { event.preventDefault(); send(); }}
             >
-              {speechSupported ? (
+              {micSupported ? (
                 <button
                   type="button"
                   className={`call-mic${micOn ? ' is-on' : ''}${hearing ? ' is-hearing' : ''}`}
