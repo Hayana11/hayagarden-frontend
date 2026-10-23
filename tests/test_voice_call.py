@@ -296,12 +296,14 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
         self.assertEqual(self.her_lines(), ['喂 听得到吗'])
 
-    def test_repeated_or_old_utterance_numbers_are_refused(self):
+    def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
         self.stt.release(b'A')
         self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
-        with self.assertRaises(call_store.CallStateError):
-            self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        duplicate = self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        self.assertTrue(duplicate['duplicate'])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(self.her_lines(), ['嗯'])
 
     def test_duplicate_in_flight_waits_and_replays_without_second_stt(self):
         self.stt.expect(b'A', '只处理一次')
