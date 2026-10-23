@@ -745,12 +745,18 @@ class BrainTests(unittest.TestCase):
         class CloseableStream:
             def __init__(self):
                 self.closed = False
+                self.started = threading.Event()
+                self.released = threading.Event()
 
             def __iter__(self):
-                yield 'partial'
+                self.started.set()
+                self.released.wait(5)
+                return
+                yield  # keep this a generator
 
             def close(self):
                 self.closed = True
+                self.released.set()
 
         stream = CloseableStream()
         brain = ChatPipelineBrain(
@@ -758,9 +764,12 @@ class BrainTests(unittest.TestCase):
             stream_reply=lambda _message_id: stream,
         )
         handle = brain.start_reply('喂', False)
-        iterator = iter(handle)
-        self.assertEqual(next(iterator), 'partial')
+        thread = threading.Thread(target=lambda: list(handle))
+        thread.start()
+        self.assertTrue(stream.started.wait(5))
         handle.cancel()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
         self.assertTrue(stream.closed)
 
 
