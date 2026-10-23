@@ -30,7 +30,7 @@ class CallStateError(Exception):
         self.status = status
 
 
-_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at'
+_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at, language'
 
 
 class CallStore:
@@ -72,6 +72,9 @@ class CallStore:
             if 'recorded' not in cols:
                 # 1 once the call's chat record is confirmed written (set after, never before).
                 conn.execute("ALTER TABLE voice_calls ADD COLUMN recorded INTEGER NOT NULL DEFAULT 0")
+            if 'language' not in cols:
+                # The call's language code (see voice_call.languages); NULL is the default call.
+                conn.execute("ALTER TABLE voice_calls ADD COLUMN language TEXT")
 
     @contextlib.contextmanager
     def _connect(self):
@@ -83,7 +86,7 @@ class CallStore:
         finally:
             conn.close()
 
-    def create_if_none_open(self, call_id):
+    def create_if_none_open(self, call_id, language=None):
         """Atomically: expire stale rings, refuse if a call is open, else create one ringing."""
         with self._lock:
             conn = sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
@@ -97,8 +100,8 @@ class CallStore:
                     ).fetchone():
                         raise CallStateError('a call is already ringing or active')
                     conn.execute(
-                        "INSERT INTO voice_calls (id, state, created_at) VALUES (?, ?, ?)",
-                        (call_id, RINGING, self._clock()),
+                        "INSERT INTO voice_calls (id, state, created_at, language) VALUES (?, ?, ?, ?)",
+                        (call_id, RINGING, self._clock(), language),
                     )
                     conn.execute('COMMIT')
                 except sqlite3.IntegrityError:

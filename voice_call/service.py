@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from voice_call import languages as call_languages
 from voice_call import store as call_store
 from voice_call.brain import BrainError
 from voice_call.sentences import SentenceSplitter
@@ -104,8 +105,9 @@ def _spawn(target):
 
 class CallService:
     def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None, stt=None,
-                 schedule=_schedule):
+                 schedule=_schedule, languages=None):
         self._store = store
+        self._languages = languages or call_languages.load  # read per call: config edits apply live
         self._tts = tts
         self._stt = stt
         self._brain = brain
@@ -123,8 +125,11 @@ class CallService:
         self._schedule = schedule
 
     # ── lifecycle ────────────────────────────────────────────
-    def ring(self):
-        call = self._store.create_if_none_open(uuid.uuid4().hex)
+    def ring(self, language=None):
+        """Open a call; ``language`` is a configured code (see voice_call.languages) or None."""
+        if language is not None and language not in self._languages():
+            raise call_store.CallStateError('unknown call language', 400)
+        call = self._store.create_if_none_open(uuid.uuid4().hex, language)
         self._notify()
         return call
 
@@ -136,6 +141,14 @@ class CallService:
         if not call:
             raise call_store.CallStateError('no such call', 404)
         return call
+
+    def languages(self):
+        return call_languages.public(self._languages())
+
+    def _language(self, call):
+        """The call's language entry, or None for the default call (or one removed since)."""
+        code = call.get('language') if call else None
+        return self._languages().get(code) if code else None
 
     def answer(self, call_id):
         return self._change(call_id, call_store.ACTIVE)
@@ -208,8 +221,12 @@ class CallService:
             raise call_store.CallStateError('speech-to-text is not configured', 503)
         if audio is not None and (not audio or len(audio) > MAX_CLIP_BYTES):
             raise call_store.CallStateError('clip must be 1 byte to %d bytes' % MAX_CLIP_BYTES, 413)
-        if self.get(call_id)['state'] != call_store.ACTIVE:
+        call = self.get(call_id)
+        if call['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
+        entry = self._language(call)
+        if entry:
+            language = entry['stt']  # the call decides, not the page
         try:
             requested = int(utterance) if utterance is not None else None
         except (TypeError, ValueError):
@@ -386,7 +403,8 @@ class CallService:
         line = self._store.line(call_id, seq)
         if not line or line['speaker'] != HIM:
             raise call_store.CallStateError('no such spoken line', 404)
-        key, data = self._tts.get(line['text'])
+        entry = self._language(self._store.get(call_id))
+        key, data = self._tts.get(line['text'], entry['voice_id'] if entry else None)
         if line.get('audio_key') != key:
             self._store.set_audio_key(call_id, seq, key)
         return data
@@ -430,10 +448,12 @@ class CallService:
     def _run_reply(self, call_id, text, first_turn, generation):
         splitter = SentenceSplitter()
         handle = None
+        entry = self._language(self._store.get(call_id))
+        extra = {'language': entry['label']} if entry else {}
         try:
             start_reply = getattr(self._brain, 'start_reply', None)
             if callable(start_reply):
-                handle = start_reply(text, first_turn)
+                handle = start_reply(text, first_turn, **extra)
                 if not self._register_brain_handle(call_id, generation, handle):
                     return
                 stream = handle
@@ -441,7 +461,7 @@ class CallService:
                 # Keep the old injected-brain contract for unit tests and
                 # non-HTTP implementations; only ChatPipelineBrain exposes a
                 # cancellable handle.
-                stream = self._brain.reply(text, first_turn)
+                stream = self._brain.reply(text, first_turn, **extra)
             for chunk in stream:
                 if not self._emit(call_id, generation, splitter.feed(chunk)):
                     return

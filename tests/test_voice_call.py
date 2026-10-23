@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import sqlite3
 import tempfile
 import threading
 import time
@@ -11,6 +12,7 @@ from flask import Flask
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from moments_auth import OwnerAuthError
+from voice_call import languages as call_languages
 from voice_call import store as call_store
 from voice_call.chat_record import record_call_in_chat
 from voice_call.brain import (
@@ -42,10 +44,12 @@ class FakeEngine:
 
     def __init__(self, fail=False):
         self.calls = []
+        self.voices = []
         self.fail = fail
 
-    def synthesize(self, text):
+    def synthesize(self, text, voice_id=None):
         self.calls.append(text)
+        self.voices.append(voice_id)
         if self.fail:
             raise TTSError('boom')
         return ('mp3:' + text).encode('utf-8')
@@ -56,10 +60,12 @@ class FakeBrain:
         self.chunks = chunks or ['你好。\n', '我在', '听。\n']
         self.error = error
         self.calls = []
+        self.languages = []
         self.during = None
 
-    def reply(self, text, first_turn):
+    def reply(self, text, first_turn, language=None):
         self.calls.append((text, first_turn))
+        self.languages.append(language)
         for index, chunk in enumerate(self.chunks):
             if self.during:
                 self.during(index)
@@ -168,9 +174,33 @@ class TTSTests(unittest.TestCase):
         self.assertEqual(tts.synthesize('你好'), b'mp3')
         self.assertIn('/text-to-speech/TpHHy93T39MKuyQgrXh8?', seen['url'])
         self.assertEqual(seen['headers']['xi-api-key'], 'k')
-        self.assertEqual(seen['body']['model_id'], 'eleven_v3')
+        self.assertEqual(seen['body']['model_id'], 'eleven_v4_turbo')
         self.assertEqual(seen['body']['voice_settings']['stability'], 0.5)
+        self.assertNotIn('style', seen['body']['voice_settings'], 'v4 does not take style')
         self.assertEqual(seen['body']['text'], '你好')
+
+    def test_voice_override_and_live_model(self):
+        seen = []
+        model = ['eleven_v4']
+        tts = ElevenLabsTTS(api_key='k', model_id=lambda: model[0],
+                            post=lambda url, headers, body, timeout: seen.append((url, json.loads(body))) or (200, b'mp3'))
+        tts.synthesize('a', 'K7JxslCTelez3qaKj5SJ')
+        model[0] = ''  # cleared in runtime config: back to the default model
+        tts.synthesize('b')
+        self.assertIn('/text-to-speech/K7JxslCTelez3qaKj5SJ?', seen[0][0])
+        self.assertEqual(seen[0][1]['model_id'], 'eleven_v4')
+        self.assertIn('/text-to-speech/TpHHy93T39MKuyQgrXh8?', seen[1][0])
+        self.assertEqual(seen[1][1]['model_id'], 'eleven_v4_turbo')
+
+    def test_cache_keeps_each_voice_apart(self):
+        engine = FakeEngine()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(engine, tmp)
+            ja_key, _ = cache.get('はい', 'jaVoice0001')
+            en_key, _ = cache.get('はい', 'enVoice0001')
+            cache.get('はい', 'jaVoice0001')
+        self.assertNotEqual(ja_key, en_key)
+        self.assertEqual(engine.voices, ['jaVoice0001', 'enVoice0001'], 'one synthesis per voice')
 
     def test_elevenlabs_errors(self):
         with self.assertRaises(TTSError):
@@ -604,6 +634,136 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.service.hear(self.call_id, b'A', 'audio/wav')['utterance'], 1)
         self.assertEqual(self.service.hear(self.call_id, b'B', 'audio/wav')['utterance'], 2)
         self.assertEqual(self.her_lines(), ['一', '二'])
+
+
+JA_EN = json.dumps({
+    'ja': {'label': '日本語', 'voice_id': '0zi0ae2RvBmXaahlPt2n', 'stt': 'jpn', 'speech': 'ja-JP'},
+    'en': {'label': 'English', 'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'eng', 'speech': 'en-US'},
+})
+
+
+class LanguageConfigTests(unittest.TestCase):
+    def test_valid_entries_in_order_and_public_view_hides_voices(self):
+        langs = call_languages.load(lambda key: JA_EN)
+        self.assertEqual(list(langs), ['ja', 'en'])
+        self.assertEqual(langs['ja']['stt'], 'jpn')
+        self.assertEqual(call_languages.public(langs), [
+            {'code': 'ja', 'label': '日本語', 'speech': 'ja-JP'},
+            {'code': 'en', 'label': 'English', 'speech': 'en-US'},
+        ])
+
+    def test_malformed_config_or_entries_are_skipped(self):
+        for raw in ('', 'not json', '[]', '"ja"', None):
+            self.assertEqual(call_languages.load(lambda key, raw=raw: raw), {})
+        raw = json.dumps({
+            'ok': {'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'eng', 'speech': 'not a locale!'},
+            'nostt': {'voice_id': 'K7JxslCTelez3qaKj5SJ'},
+            'badstt': {'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'english'},
+            'badvoice': {'voice_id': '../../x', 'stt': 'eng'},
+            'Bad Code': {'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'eng'},
+            'notdict': 'eng',
+        })
+        langs = call_languages.load(lambda key: raw)
+        self.assertEqual(list(langs), ['ok'])
+        self.assertEqual((langs['ok']['label'], langs['ok']['speech']), ('ok', None))
+
+
+class CallLanguageTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = Clock()
+        self.engine = FakeEngine()
+        self.brain = FakeBrain()
+        self.stt = FakeSTT(text='もしもし')
+        self.config = JA_EN
+        self.service = CallService(
+            call_store.CallStore(self.path, self.clock), CachedTTS(self.engine, self.tmp.name),
+            self.brain, clock=self.clock, spawn=run_now, stt=self.stt,
+            languages=lambda: call_languages.load(lambda key: self.config),
+        )
+
+    def tearDown(self):
+        os.unlink(self.path)
+        self.tmp.cleanup()
+
+    def active_call(self, language=None):
+        call = self.service.ring(language)
+        self.service.answer(call['id'])
+        return call
+
+    def test_the_call_language_picks_voice_transcription_and_reply_language(self):
+        call = self.active_call('en')
+        self.assertEqual(call['language'], 'en')
+        result = self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)  # the page still says zho
+        self.assertEqual(self.stt.calls[-1][2], 'eng', 'the call decides, not the page')
+        self.assertEqual(result['line']['text'], 'もしもし')
+        self.assertEqual(self.brain.languages, ['English'])
+        lines, _ = self.service.lines_after(call['id'], 0)
+        self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][0]['seq'])
+        self.assertEqual(self.engine.voices, ['K7JxslCTelez3qaKj5SJ'])
+
+    def test_default_call_keeps_todays_voice_and_language(self):
+        call = self.active_call()
+        self.assertIsNone(call['language'])
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)
+        self.assertEqual(self.stt.calls[-1][2], 'zho')
+        self.assertEqual(self.brain.languages, [None])
+        lines, _ = self.service.lines_after(call['id'], 0)
+        self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][0]['seq'])
+        self.assertEqual(self.engine.voices, [None])
+
+    def test_unknown_language_is_refused(self):
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.ring('fr')
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIsNone(self.service.current())
+
+    def test_language_removed_mid_call_falls_back_to_default(self):
+        call = self.active_call('ja')
+        self.config = ''
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)
+        self.assertEqual(self.stt.calls[-1][2], 'zho')
+        self.assertEqual(self.brain.languages, [None])
+
+    def test_reply_instruction_names_the_language_every_turn(self):
+        first = format_utterance('もしもし', True, '日本語')
+        self.assertIn('这通电话用日本語', first)
+        self.assertIn('（用日本語回答）', first)
+        self.assertIn('（用日本語回答）', format_utterance('うん', False, '日本語'))
+        self.assertNotIn('回答）', format_utterance('喂', False))
+
+    def test_routes_offer_languages_and_ring_with_one(self):
+        app = Flask(__name__)
+        app.register_blueprint(create_voice_call_blueprint(self.service, owner_guard=lambda r: None,
+                                                           stream_window_s=0))
+        client = app.test_client()
+        body = client.get('/api/call/languages').get_json()
+        self.assertEqual([l['code'] for l in body['languages']], ['ja', 'en'])
+        self.assertNotIn('voice_id', json.dumps(body))
+        self.assertEqual(client.post('/api/call/ring', json={'language': 'fr'}).status_code, 400)
+        self.assertEqual(client.post('/api/call/ring', json={'language': 7}).status_code, 400)
+        resp = client.post('/api/call/ring', json={'language': 'ja'})
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.get_json()['call']['language'], 'ja')
+
+    def test_old_database_gains_the_language_column(self):
+        fd, path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE voice_calls (id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+                         "created_at REAL NOT NULL, answered_at REAL, ended_at REAL)")
+            conn.execute("INSERT INTO voice_calls VALUES ('old', 'ended', 1, 2, 3)")
+            conn.commit()
+            conn.close()
+            store = call_store.CallStore(path, self.clock)
+            self.assertIsNone(store.get('old')['language'])
+            store.create_if_none_open('new', 'en')
+            self.assertEqual(store.get('new')['language'], 'en')
+        finally:
+            os.unlink(path)
 
 
 class STTTests(unittest.TestCase):

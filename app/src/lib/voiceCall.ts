@@ -13,7 +13,12 @@ export type VoiceCall = {
   created_at: number;
   answered_at: number | null;
   ended_at: number | null;
+  /** A code from voiceCall.languages(); null is the default (Chinese) call. */
+  language?: string | null;
 };
+
+/** One configured call language; `speech` is the Android fallback recognizer's locale. */
+export type CallLanguage = { code: string; label: string; speech: string | null };
 
 export type CallLine = {
   seq: number;
@@ -43,7 +48,9 @@ const base = (callId: string) => `/api/call/${encodeURIComponent(callId)}`;
 
 export const voiceCall = {
   current: () => http.get<{ call: VoiceCall | null }>('/api/call/current').then((r) => r.call),
-  ring: () => http.post<{ call: VoiceCall }>('/api/call/ring').then((r) => r.call),
+  languages: () => http.get<{ languages: CallLanguage[] }>('/api/call/languages').then((r) => r.languages || []),
+  ring: (language?: string) =>
+    http.post<{ call: VoiceCall }>('/api/call/ring', language ? { language } : undefined).then((r) => r.call),
   load: (callId: string) => http.get<{ call: VoiceCall | null; lines: CallLine[] }>(base(callId)),
   answer: (callId: string) => http.post<{ call: VoiceCall }>(`${base(callId)}/answer`).then((r) => r.call),
   decline: (callId: string) => http.post<CallSummary>(`${base(callId)}/decline`),
