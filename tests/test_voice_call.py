@@ -798,9 +798,11 @@ class BargeInCancellationTests(unittest.TestCase):
         first = self.brain.handles[0]
         self.assertTrue(first.started.wait(5))
 
-        # This is deliberately a call-scoped assertion: a separate ordinary
-        # chat/wake stream is never present in CallService's handle registry.
+        # A non-call stream registered under another owner is not touched by
+        # call-scoped cancellation (ordinary Chat/Wake never enters this map).
         ordinary_stream = CancellableHandle(wait_for_cancel=True)
+        with self.service._changed:
+            self.service._brain_turns['ordinary-chat'] = (1, ordinary_stream)
         self.service.interrupt(self.call_id, utterance=7, prev=0)
         self.assertEqual(first.cancel_calls, 1)
         self.assertEqual(ordinary_stream.cancel_calls, 0)
