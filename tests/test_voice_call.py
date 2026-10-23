@@ -117,6 +117,21 @@ class CancellableBrain:
 
 
 class SentenceSplitterTests(unittest.TestCase):
+    def test_a_long_first_line_is_cut_at_its_first_pause(self):
+        splitter = SentenceSplitter()
+        self.assertEqual(splitter.feed('嗯，'), [])  # short so far: wait for more
+        self.assertEqual(splitter.feed('我在想你刚才说的那句话是什么意思'), [],
+                         'a pause before FIRST_MIN is too early to cut at')
+        splitter = SentenceSplitter()
+        self.assertEqual(splitter.feed('宝宝你刚才说的那件事，我想了很久才明白'), ['宝宝你刚才说的那件事，'])
+        self.assertEqual(splitter.feed('。\n第二句，也很长很长很长很长很长很长'), ['我想了很久才明白。'],
+                         'only the first line is cut early')
+        self.assertEqual(splitter.flush(), ['第二句，也很长很长很长很长很长很长'])
+
+    def test_a_short_first_line_is_left_whole(self):
+        splitter = SentenceSplitter()
+        self.assertEqual(splitter.feed('嗯，我在。\n'), ['嗯，我在。'])
+
     def test_newlines_are_boundaries_across_chunks(self):
         splitter = SentenceSplitter()
         self.assertEqual(splitter.feed('早'), [])
@@ -196,12 +211,65 @@ class TTSTests(unittest.TestCase):
         models = iter(['eleven_v4', 'eleven_v4_turbo'])  # the config flips between two reads
         seen = []
         tts = ElevenLabsTTS(api_key='k', model_id=lambda: next(models),
-                            post=lambda url, headers, body, timeout: seen.append(json.loads(body)) or (200, b'mp3'))
+                            open_stream=lambda url, headers, body, timeout: (
+                                seen.append(json.loads(body)) or (200, iter([b'mp3']))))
         with tempfile.TemporaryDirectory() as tmp:
             cache = CachedTTS(tts, tmp)
             key, _ = cache.get('はい')
             self.assertEqual(key, cache.key('はい', None, 'eleven_v4'))
         self.assertEqual([body['model_id'] for body in seen], ['eleven_v4'])
+
+    def test_stream_uses_the_stream_endpoint_and_yields_as_it_arrives(self):
+        seen = {}
+
+        def open_stream(url, headers, body, timeout):
+            seen['url'] = url
+            return 200, iter([b'ID3', b'', b'more'])
+
+        tts = ElevenLabsTTS(api_key='k', open_stream=open_stream)
+        self.assertEqual(list(tts.stream('你好', 'K7JxslCTelez3qaKj5SJ')), [b'ID3', b'more'])
+        self.assertIn('/text-to-speech/K7JxslCTelez3qaKj5SJ/stream?output_format=mp3_44100_128', seen['url'])
+        bad = ElevenLabsTTS(api_key='k', open_stream=lambda *a: (401, iter([b'no'])))
+        with self.assertRaises(TTSError):
+            list(bad.stream('你好'))
+
+    def test_readers_share_one_synthesis_and_only_a_whole_line_is_cached(self):
+        gate = threading.Event()
+        calls = []
+
+        class SlowEngine(FakeEngine):
+            def stream(self, text, voice_id=None, model_id=None):
+                calls.append(text)
+                yield b'ab'
+                gate.wait(5)
+                yield b'cd'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(SlowEngine(), tmp)
+            key, first = cache.stream('晚安')
+            self.assertEqual(next(first), b'ab', 'the page plays before the line is finished')
+            cache.warm('晚安')
+            _, second = cache.stream('晚安')
+            self.assertFalse(os.path.exists(cache.path(key)), 'not cached while unfinished')
+            gate.set()
+            self.assertEqual(b'ab' + b''.join(first), b'abcd')
+            self.assertEqual(b''.join(second), b'abcd')
+            self.assertEqual(calls, ['晚安'], 'synthesized once however many ask')
+            with open(cache.path(key), 'rb') as cached:
+                self.assertEqual(cached.read(), b'abcd')
+
+    def test_a_stream_that_breaks_is_not_cached(self):
+        class BrokenEngine(FakeEngine):
+            def stream(self, text, voice_id=None, model_id=None):
+                yield b'ab'
+                raise TTSError('tts stream broke: ConnectionResetError')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(BrokenEngine(), tmp, spawn=run_now)
+            _, chunks = cache.stream('晚安')
+            with self.assertRaises(TTSError):
+                b''.join(chunks)
+            self.assertEqual(os.listdir(tmp), [])
 
     def test_cache_keeps_each_voice_apart(self):
         engine = FakeEngine()
@@ -691,7 +759,7 @@ class CallLanguageTests(unittest.TestCase):
         self.stt = FakeSTT(text='もしもし')
         self.config = JA_EN
         self.service = CallService(
-            call_store.CallStore(self.path, self.clock), CachedTTS(self.engine, self.tmp.name),
+            call_store.CallStore(self.path, self.clock), CachedTTS(self.engine, self.tmp.name, spawn=run_now),
             self.brain, clock=self.clock, spawn=run_now, stt=self.stt,
             languages=lambda: call_languages.load(lambda key: self.config),
         )
@@ -714,7 +782,7 @@ class CallLanguageTests(unittest.TestCase):
         self.assertEqual(self.brain.languages, ['English'])
         lines, _ = self.service.lines_after(call['id'], 0)
         self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][0]['seq'])
-        self.assertEqual(self.engine.voices, ['K7JxslCTelez3qaKj5SJ'])
+        self.assertEqual(set(self.engine.voices), {'K7JxslCTelez3qaKj5SJ'}, 'every line in the call voice')
 
     def test_default_call_keeps_todays_voice_and_language(self):
         call = self.active_call()
@@ -724,7 +792,7 @@ class CallLanguageTests(unittest.TestCase):
         self.assertEqual(self.brain.languages, [None])
         lines, _ = self.service.lines_after(call['id'], 0)
         self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][0]['seq'])
-        self.assertEqual(self.engine.voices, [None])
+        self.assertEqual(set(self.engine.voices), {None})
 
     def test_unknown_language_is_refused(self):
         with self.assertRaises(call_store.CallStateError) as ctx:
@@ -743,7 +811,7 @@ class CallLanguageTests(unittest.TestCase):
         self.assertEqual(self.stt.calls[-1][2], 'jpn')
         lines, _ = self.service.lines_after(call['id'], 0)
         self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][-1]['seq'])
-        self.assertEqual(self.engine.voices, ['0zi0ae2RvBmXaahlPt2n'])
+        self.assertEqual(set(self.engine.voices), {'0zi0ae2RvBmXaahlPt2n'})
         self.service.hangup(call['id'])
         with self.assertRaises(call_store.CallStateError):
             self.service.ring('ja')  # the next call sees the edit
@@ -1106,7 +1174,7 @@ class ServiceTests(unittest.TestCase):
         self.ended = []
         self.service = CallService(
             call_store.CallStore(self.path, self.clock),
-            CachedTTS(self.engine, self.tmp.name),
+            CachedTTS(self.engine, self.tmp.name, spawn=run_now),
             self.brain, clock=self.clock, spawn=run_now, on_end=self.ended.append,
         )
 
@@ -1118,6 +1186,13 @@ class ServiceTests(unittest.TestCase):
         call = self.service.ring()
         self.service.answer(call['id'])
         return call['id']
+
+    def test_his_lines_are_voiced_before_the_page_asks(self):
+        call_id = self.active_call()
+        self.service.say(call_id, '在吗')
+        self.assertEqual(self.engine.calls, ['你好。', '我在听。'])
+        self.assertEqual(self.service.audio(call_id, 2), 'mp3:你好。'.encode('utf-8'))
+        self.assertEqual(self.engine.calls, ['你好。', '我在听。'], 'served from what was already made')
 
     def test_full_call(self):
         call_id = self.active_call()
@@ -1131,7 +1206,8 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(self.service.audio(call_id, 2), 'mp3:你好。'.encode('utf-8'))
         self.service.audio(call_id, 2)
-        self.assertEqual(self.engine.calls, ['你好。'])
+        self.assertEqual(self.engine.calls, ['你好。', '我在听。'],
+                         'each of his lines is voiced once, as soon as he says it')
         with self.assertRaises(call_store.CallStateError):
             self.service.audio(call_id, 1)  # her own line has no audio
 
@@ -1453,6 +1529,17 @@ class RouteTests(unittest.TestCase):
         self.client.post('/api/call/%s/answer' % call_id)
         self.client.post('/api/call/%s/say' % call_id, json={'text': '喂'})
         self.assertEqual(self.client.get('/api/call/%s/audio/2' % call_id).status_code, 503)
+
+    def test_audio_is_streamed_and_never_kept_by_the_browser(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.client.post('/api/call/%s/say' % call_id, json={'text': '喂'})
+        resp = self.client.get('/api/call/%s/audio/2' % call_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.is_streamed)
+        self.assertEqual(resp.headers['Cache-Control'], 'no-store')
+        self.assertEqual(resp.mimetype, 'audio/mpeg')
+        self.assertEqual(resp.get_data(), 'mp3:你好。'.encode('utf-8'))
 
     def hear(self, call_id, body=b'RIFF....WAVE', mime='audio/wav', query=''):
         return self.client.post('/api/call/%s/hear%s' % (call_id, query), data=body,
