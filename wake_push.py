@@ -23,15 +23,22 @@ else with 401 before touching wake or screenshot state. Then:
     idempotent;
   * an unacknowledged message is handed out again once its lease expires
     (dropped response, killed process, no notification permission);
-  * ``since=<n>``: "this device has shown everything up to wake-<n>". It acks
-    rows at or below n that were handed to this device, recovering an ack lost
-    before a reboot; never rows handed elsewhere or never handed out;
-  * acks mark only the acked rows delivered (``notified=1``,
-    ``push_disposition='acked'``). In non-soft-window mode only the latest
-    message is ever pushed (the legacy no-flood rule), so an ack of wake-<n>
-    also closes older still-pending rows as *superseded* (``notified=2``,
-    ``push_disposition='superseded'``): never shown, never counted as
-    delivered, and no longer pending, so they do not surface one by one;
+  * acks are explicit and per id: only ``pending`` rows become delivered
+    (``notified=1``, ``push_disposition='acked'``); acking an already acked row
+    is a no-op, and a late ack of a row that was meanwhile superseded leaves it
+    superseded (the response says so). There is no cursor: a "highest id seen"
+    cursor cannot prove that every lower id was shown when two pollers run
+    concurrently, so ``since`` is accepted for old builds and ignored. An ack
+    lost before a reboot is recovered instead by re-delivery after the lease:
+    the device ledger recognises the id as shown and acks just that id;
+  * in non-soft-window mode only the latest message is ever pushed (the legacy
+    no-flood rule). An ack of wake-<n> therefore closes older pending rows as
+    *superseded* (``notified=2``, ``push_disposition='superseded'``) — but not
+    rows whose lease is still live, which are in flight and wait for their own
+    ack. If such a lease then runs out unacknowledged, the next poll finds the
+    row older than an acked message and supersedes it instead of handing it
+    out late. Superseded rows were never counted as delivered and are no
+    longer pending;
   * screenshot commands go only to a device that passes ``commands=screenshot``
     and are bound to it; ``cap-<id>`` acks from that device move them to
     ``received``.
@@ -49,6 +56,8 @@ LEASE_S = 60
 ACK_PROTOCOL = 'ack'
 # wake_log.notified: 0/NULL pending, 1 delivered (ack, legacy read, or executor
 # audit row), 2 superseded by a newer delivered message (never delivered).
+# "Newer delivered" means push_disposition='acked', never a bare notified=1:
+# executor audit rows carry notified=1 without having been delivered.
 NOTIFIED_DELIVERED = 1
 NOTIFIED_SUPERSEDED = 2
 SCREENSHOT_LEASE_SQL = "datetime('now','+8 hours','-2 minutes')"
@@ -64,14 +73,6 @@ def parse_wait(raw):
     except (TypeError, ValueError):
         return 0
     return max(0, min(MAX_WAIT_S, value))
-
-
-def parse_since(raw):
-    try:
-        value = int(str(raw or '').replace('wake-', ''))
-    except (TypeError, ValueError):
-        return 0
-    return max(0, value)
 
 
 def _add_column(conn, table, column, decl):
@@ -120,17 +121,24 @@ def take_pending_payload(conn, fetch_row, soft_window):
 
 
 # ── ack protocol (caller has authenticated device_id) ────────
-def lease_pending_payload(conn, fetch_row, soft_window, now, device_id,
-                          since=0, want_screenshot=False):
+def lease_pending_payload(conn, fetch_row, soft_window, now, device_id, want_screenshot=False):
     """Lease (not consume) the latest message to device_id; optionally a screenshot command."""
     ensure_columns(conn)
-    if since:
-        conn.execute(
-            "UPDATE wake_log SET notified=1, push_disposition='acked' WHERE action='message' "
-            "AND (notified IS NULL OR notified=0) AND push_lease_device=? AND id<=?",
-            (device_id, since),
-        )
     row = fetch_row(conn)
+    for _ in range(100):
+        if not row or soft_window or not _newer_acked_exists(conn, int(row['id'])):
+            break
+        # Older than a message already delivered: supersede instead of pushing it
+        # late — unless its lease is live (in flight; it waits for its own ack).
+        cur = conn.execute(
+            "UPDATE wake_log SET notified=2, push_disposition='superseded' "
+            "WHERE id=? AND (notified IS NULL OR notified=0) "
+            "AND (push_lease_until IS NULL OR push_lease_until<=?)",
+            (int(row['id']), now),
+        )
+        if cur.rowcount != 1:
+            break
+        row = fetch_row(conn)
     leased = None
     if row:
         cur = conn.execute(
@@ -151,8 +159,12 @@ def lease_pending_payload(conn, fetch_row, soft_window, now, device_id,
     return payload
 
 
-def ack(conn, ids, soft_window, device_id):
-    """Acknowledge ids handed to device_id. All-or-nothing: raises AckRefused, changing nothing."""
+def ack(conn, ids, soft_window, device_id, now):
+    """Acknowledge ids handed to device_id.
+
+    All-or-nothing validation: raises AckRefused, changing nothing, if any id was
+    not handed to this device. Returns {id: 'acked' | 'superseded' | 'received'}.
+    """
     ensure_columns(conn)
     wake_ids, cap_ids = [], []
     for raw in ids or []:
@@ -176,16 +188,25 @@ def ack(conn, ids, soft_window, device_id):
         else:
             raise AckRefused(key)
 
+    results = {}
     for wake_id in wake_ids:
+        # Only pending -> delivered. Never turns superseded (or anything else) back.
         conn.execute(
-            "UPDATE wake_log SET notified=1, push_disposition='acked' WHERE id=?",
+            "UPDATE wake_log SET notified=1, push_disposition='acked' "
+            "WHERE id=? AND (notified IS NULL OR notified=0)",
             (wake_id,),
         )
-        if not soft_window:
+        state = conn.execute(
+            "SELECT notified, push_disposition FROM wake_log WHERE id=?", (wake_id,)
+        ).fetchone()
+        superseded = state[0] == NOTIFIED_SUPERSEDED
+        results['wake-%d' % wake_id] = 'superseded' if superseded else 'acked'
+        if not soft_window and not superseded:
             conn.execute(
                 "UPDATE wake_log SET notified=2, push_disposition='superseded' "
-                "WHERE action='message' AND (notified IS NULL OR notified=0) AND id<?",
-                (wake_id,),
+                "WHERE action='message' AND (notified IS NULL OR notified=0) AND id<? "
+                "AND (push_lease_until IS NULL OR push_lease_until<=?)",
+                (wake_id, now),
             )
     for cap_id in cap_ids:
         conn.execute(
@@ -193,8 +214,16 @@ def ack(conn, ids, soft_window, device_id):
             "WHERE id=? AND status IN ('pending','dispatched')",
             (cap_id,),
         )
+        results['cap-%d' % cap_id] = 'acked'
     conn.commit()
-    return {('wake-%d' % i): 'acked' for i in wake_ids} | {('cap-%d' % i): 'acked' for i in cap_ids}
+    return results
+
+
+def _newer_acked_exists(conn, wake_id):
+    return conn.execute(
+        "SELECT 1 FROM wake_log WHERE action='message' AND push_disposition='acked' AND id>? LIMIT 1",
+        (wake_id,),
+    ).fetchone() is not None
 
 
 # ── shared ───────────────────────────────────────────────────

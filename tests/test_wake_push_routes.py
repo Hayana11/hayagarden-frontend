@@ -187,6 +187,14 @@ class WakePushRouteTests(unittest.TestCase):
         self.assertEqual(self.wake_state(wake), (0, None, None))
         self.assertEqual(self.get(self.headers(self.a)).get_json()['id'], 'wake-%d' % wake)
 
+    def test_since_from_older_builds_never_acks_anything(self):
+        w10 = self.add_message('ten')
+        self.assertEqual(self.get(self.headers(self.a)).get_json()['id'], 'wake-%d' % w10)
+        w11 = self.add_message('eleven')
+        self.get(self.headers(self.a), 'protocol=ack&since=%d' % (w11 + 100))
+        self.assertEqual(self.wake_state(w10)[0], 0)
+        self.assertEqual(self.wake_state(w11)[0], 0)
+
     # ── commands, rotation, compatibility ─────────────────────
     def test_screenshot_only_for_authenticated_declaring_device(self):
         cap = self.add_screenshot()

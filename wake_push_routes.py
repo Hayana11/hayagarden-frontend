@@ -41,13 +41,13 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
             device_id = device_id_from_request()
             if device_id is None:
                 return _unauthorized()
-            since = wake_push.parse_since(request.args.get('since'))
+            # ?since= from older Canary builds is accepted and ignored (see wake_push).
             want_screenshot = 'screenshot' in (request.args.get('commands') or '').split(',')
 
             def take(conn):
                 return wake_push.lease_pending_payload(
                     conn, fetch_row, soft_window_enabled(), clock(), device_id,
-                    since=since, want_screenshot=want_screenshot,
+                    want_screenshot=want_screenshot,
                 )
         else:
             def take(conn):
@@ -70,7 +70,7 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
             return jsonify({'ok': False, 'error': 'ids must be a non-empty list'}), 400
         conn = get_db()
         try:
-            results = wake_push.ack(conn, ids, soft_window_enabled(), device_id)
+            results = wake_push.ack(conn, ids, soft_window_enabled(), device_id, clock())
         except wake_push.AckRefused:
             return jsonify({'ok': False, 'error': 'not delivered to this device'}), 403
         finally:

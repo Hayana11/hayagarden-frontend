@@ -96,19 +96,19 @@ class Base(unittest.TestCase):
             conn.close()
 
     # ack-protocol helpers, all on fresh connections like separate HTTP requests
-    def lease(self, since=0, screenshot=False, now=None, device=DEVICE_A):
+    def lease(self, screenshot=False, now=None, device=DEVICE_A):
         conn = self.open_conn()
         try:
             return wake_push.lease_pending_payload(
                 conn, fetch_row, False, self.now if now is None else now, device,
-                since=since, want_screenshot=screenshot)
+                want_screenshot=screenshot)
         finally:
             conn.close()
 
-    def ack(self, *ids, soft=False, device=DEVICE_A):
+    def ack(self, *ids, soft=False, device=DEVICE_A, now=None):
         conn = self.open_conn()
         try:
-            return wake_push.ack(conn, list(ids), soft, device)
+            return wake_push.ack(conn, list(ids), soft, device, self.now if now is None else now)
         finally:
             conn.close()
 
@@ -121,12 +121,6 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(wake_push.parse_wait('10'), 10)
         self.assertEqual(wake_push.parse_wait('999'), wake_push.MAX_WAIT_S)
 
-    def test_parse_since(self):
-        self.assertEqual(wake_push.parse_since(None), 0)
-        self.assertEqual(wake_push.parse_since('12'), 12)
-        self.assertEqual(wake_push.parse_since('wake-12'), 12)
-        self.assertEqual(wake_push.parse_since('x'), 0)
-        self.assertEqual(wake_push.parse_since('-3'), 0)
 
 
 class LegacyProtocolTests(Base):
@@ -265,32 +259,75 @@ class AckProtocolTests(Base):
             self.ack('wake-%d' % mine, 'wake-424242')
         self.assertEqual(self.notified(mine), 0)
 
-    def test_cursor_only_acks_rows_handed_to_this_device(self):
-        wake = self.add_message('晚安')
-        self.lease(device=DEVICE_A)
-        self.lease(since=wake, now=self.now + 1, device=DEVICE_B)
-        self.assertEqual(self.notified(wake), 0)
-
-    def test_phone_restart_cursor_recovers_a_lost_ack(self):
-        wake = self.add_message('晚安')
-        self.lease()
-        # shown, ack lost, phone reboots; first poll after boot carries since=<shown id>
-        self.assertIsNone(self.lease(since=wake, now=self.now + wake_push.LEASE_S + 1))
-        self.assertEqual(self.notified(wake), 1)
+    def state(self, wake_id):
         conn = self.open_conn()
-        self.assertEqual(conn.execute("SELECT push_disposition FROM wake_log WHERE id=?", (wake,)).fetchone()[0],
-                         'acked')
-        conn.close()
+        try:
+            return tuple(conn.execute("SELECT notified, push_disposition FROM wake_log WHERE id=?",
+                                      (wake_id,)).fetchone())
+        finally:
+            conn.close()
 
-    def test_cursor_never_acks_messages_that_were_never_handed_out(self):
-        first = self.add_message('one')
+    def test_lost_ack_is_recovered_by_redelivery_and_an_explicit_ack(self):
+        wake = self.add_message('晚安')
         self.lease()
-        second = self.add_message('two, created while the phone was offline')
-        # A stale or buggy cursor above an un-handed-out row must not swallow it.
-        payload = self.lease(since=second, now=self.now + 1)
-        self.assertEqual(self.notified(first), 1)
-        self.assertEqual(payload['id'], 'wake-%d' % second)
-        self.assertEqual(self.notified(second), 0)
+        # Shown, ack lost, phone reboots. Nothing is inferred; the lease runs out,
+        # the message is handed out again, the ledger sees it was shown and acks it.
+        self.assertEqual(self.state(wake), (0, None))
+        again = self.lease(now=self.now + wake_push.LEASE_S + 1)
+        self.assertEqual(again['id'], 'wake-%d' % wake)
+        self.assertEqual(self.ack(again['id']), {again['id']: 'acked'})
+        self.assertEqual(self.state(wake), (1, 'acked'))
+
+    def test_in_flight_older_message_is_not_lost_when_a_newer_one_is_acked_first(self):
+        # Review case: wake-10 leased but not yet shown; wake-11 shown and acked
+        # first (worker and long poll racing); the next poll still carries since=11.
+        w10 = self.add_message('ten')
+        self.assertEqual(self.lease()['id'], 'wake-%d' % w10)
+        w11 = self.add_message('eleven')
+        self.assertEqual(self.lease(now=self.now + 1)['id'], 'wake-%d' % w11)
+        self.ack('wake-%d' % w11, now=self.now + 2)
+        conn = self.open_conn()
+        try:
+            wake_push.lease_pending_payload(conn, fetch_row, False, self.now + 3, DEVICE_A)
+        finally:
+            conn.close()
+        # since is gone, and the live lease keeps wake-10 out of the supersede sweep.
+        self.assertEqual(self.state(w10), (0, None))
+        self.assertEqual(self.ack('wake-%d' % w10, now=self.now + 4), {'wake-%d' % w10: 'acked'})
+        self.assertEqual(self.state(w10), (1, 'acked'))
+
+    def test_late_ack_of_a_message_superseded_meanwhile_keeps_it_superseded(self):
+        w10 = self.add_message('ten')
+        self.lease()                                   # handed to this device...
+        later = self.now + wake_push.LEASE_S + 1       # ...lease ran out unacked
+        w11 = self.add_message('eleven')
+        self.assertEqual(self.lease(now=later)['id'], 'wake-%d' % w11)
+        self.ack('wake-%d' % w11, now=later)
+        self.assertEqual(self.state(w10), (2, 'superseded'))
+        result = self.ack('wake-%d' % w10, now=later + 1)  # the late ack arrives
+        self.assertEqual(result, {'wake-%d' % w10: 'superseded'})
+        self.assertEqual(self.state(w10), (2, 'superseded'))
+        self.assertEqual(self.ack('wake-%d' % w11, now=later + 2), {'wake-%d' % w11: 'acked'})
+        self.assertEqual(self.state(w11), (1, 'acked'))
+
+    def test_in_flight_message_whose_lease_expires_is_superseded_not_pushed_late(self):
+        w10 = self.add_message('ten')
+        self.lease()
+        w11 = self.add_message('eleven')
+        self.lease(now=self.now + 1)
+        self.ack('wake-%d' % w11, now=self.now + 2)
+        self.assertEqual(self.state(w10), (0, None))           # still in flight
+        self.assertIsNone(self.lease(now=self.now + wake_push.LEASE_S + 5))
+        self.assertEqual(self.state(w10), (2, 'superseded'))   # never pushed after wake-11
+
+    def test_executor_audit_rows_do_not_supersede_pending_messages(self):
+        pending = self.add_message('real message')
+        conn = self.open_conn()
+        conn.execute("INSERT INTO wake_log (action, content, woke_at, notified) "
+                     "VALUES ('message', 'stale audit row', 'now', 1)")
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.lease()['id'], 'wake-%d' % pending)
 
     def test_two_devices_requesting_at_once_get_one_lease(self):
         wake = self.add_message('晚安')
