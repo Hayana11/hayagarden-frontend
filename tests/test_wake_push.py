@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wake_push
 
+DEVICE_A = '11111111-1111-4111-8111-111111111111'
+DEVICE_B = '22222222-2222-4222-8222-222222222222'
+
 
 def fetch_row(conn):
     return conn.execute(
@@ -93,19 +96,19 @@ class Base(unittest.TestCase):
             conn.close()
 
     # ack-protocol helpers, all on fresh connections like separate HTTP requests
-    def lease(self, since=0, screenshot=False, now=None):
+    def lease(self, since=0, screenshot=False, now=None, device=DEVICE_A):
         conn = self.open_conn()
         try:
             return wake_push.lease_pending_payload(
-                conn, fetch_row, False, self.now if now is None else now,
+                conn, fetch_row, False, self.now if now is None else now, device,
                 since=since, want_screenshot=screenshot)
         finally:
             conn.close()
 
-    def ack(self, *ids, soft=False):
+    def ack(self, *ids, soft=False, device=DEVICE_A):
         conn = self.open_conn()
         try:
-            return wake_push.ack(conn, list(ids), soft)
+            return wake_push.ack(conn, list(ids), soft, device)
         finally:
             conn.close()
 
@@ -162,11 +165,15 @@ class AckProtocolTests(Base):
         self.assertEqual(payload['lease_s'], wake_push.LEASE_S)
         self.assertEqual(self.notified(wake), 0)
 
-    def test_response_lost_before_reaching_phone_is_redelivered_after_lease(self):
+    def test_response_lost_before_reaching_phone_is_redelivered(self):
         wake = self.add_message('晚安')
         self.assertIsNotNone(self.lease())  # response dropped on the way
-        self.assertIsNone(self.lease(now=self.now + wake_push.LEASE_S - 1))
-        again = self.lease(now=self.now + wake_push.LEASE_S)
+        # The same device may re-take its own lease at once (restarted process)...
+        self.assertEqual(self.lease(now=self.now + 1)['id'], 'wake-%d' % wake)
+        # ...another device must wait for the lease to run out.
+        # (A's re-take at now+1 renewed the lease to now+1+LEASE_S.)
+        self.assertIsNone(self.lease(now=self.now + wake_push.LEASE_S, device=DEVICE_B))
+        again = self.lease(now=self.now + 1 + wake_push.LEASE_S, device=DEVICE_B)
         self.assertEqual(again['id'], 'wake-%d' % wake)
 
     def test_killed_after_receiving_before_ack_is_redelivered(self):
@@ -204,12 +211,36 @@ class AckProtocolTests(Base):
     def test_soft_window_ack_only_touches_that_row(self):
         older = self.add_message('other window')
         latest = self.add_message('mine')
+        self.lease()
         self.ack('wake-%d' % latest, soft=True)
         self.assertEqual(self.notified(older), 0)
 
-    def test_unknown_and_malformed_ids(self):
-        self.assertEqual(self.ack('wake-999', 'cap-999', 'nonsense', ''),
-                         {'wake-999': 'unknown', 'cap-999': 'unknown', 'nonsense': 'unknown', '': 'unknown'})
+    def test_unknown_malformed_and_unleased_ids_are_refused_without_changes(self):
+        wake = self.add_message('never handed out')
+        for bad in ('wake-999', 'cap-999', 'nonsense', '', 'wake-%d' % wake):
+            with self.assertRaises(wake_push.AckRefused):
+                self.ack(bad)
+        self.assertEqual(self.notified(wake), 0)
+
+    def test_ack_by_another_device_is_refused_without_changes(self):
+        wake = self.add_message('晚安')
+        self.lease(device=DEVICE_A)
+        with self.assertRaises(wake_push.AckRefused):
+            self.ack('wake-%d' % wake, device=DEVICE_B)
+        self.assertEqual(self.notified(wake), 0)
+
+    def test_batch_with_one_foreign_id_changes_nothing(self):
+        mine = self.add_message('mine')
+        self.lease(device=DEVICE_A)
+        with self.assertRaises(wake_push.AckRefused):
+            self.ack('wake-%d' % mine, 'wake-424242')
+        self.assertEqual(self.notified(mine), 0)
+
+    def test_cursor_only_acks_rows_handed_to_this_device(self):
+        wake = self.add_message('晚安')
+        self.lease(device=DEVICE_A)
+        self.lease(since=wake, now=self.now + 1, device=DEVICE_B)
+        self.assertEqual(self.notified(wake), 0)
 
     def test_phone_restart_cursor_recovers_a_lost_ack(self):
         wake = self.add_message('晚安')
@@ -228,20 +259,20 @@ class AckProtocolTests(Base):
         self.assertEqual(payload['id'], 'wake-%d' % second)
         self.assertEqual(self.notified(second), 0)
 
-    def test_two_concurrent_requests_claim_one_message_once(self):
+    def test_two_devices_requesting_at_once_get_one_lease(self):
         wake = self.add_message('晚安')
         barrier = threading.Barrier(2)
         results = []
 
-        def claim():
+        def claim(device):
             conn = self.open_conn()
             try:
                 barrier.wait()
-                results.append(wake_push.lease_pending_payload(conn, fetch_row, False, self.now))
+                results.append(wake_push.lease_pending_payload(conn, fetch_row, False, self.now, device))
             finally:
                 conn.close()
 
-        threads = [threading.Thread(target=claim) for _ in range(2)]
+        threads = [threading.Thread(target=claim, args=(d,)) for d in (DEVICE_A, DEVICE_B)]
         for t in threads:
             t.start()
         for t in threads:
@@ -256,24 +287,27 @@ class AckProtocolTests(Base):
         handed = []
         lock = threading.Lock()
 
-        def worker():
+        def worker(device):
             for _ in range(20):
                 conn = self.open_conn()
                 try:
-                    payload = wake_push.lease_pending_payload(conn, fetch_row, False, self.now)
+                    payload = wake_push.lease_pending_payload(conn, fetch_row, False, self.now, device)
                 finally:
                     conn.close()
                 if payload:
                     with lock:
-                        handed.append(payload['id'])
+                        handed.append((device, payload['id']))
 
-        threads = [threading.Thread(target=worker) for _ in range(6)]
+        devices = ['%08d-0000-4000-8000-%012d' % (i, i) for i in range(6)]
+        threads = [threading.Thread(target=worker, args=(d,)) for d in devices]
         for t in threads:
             t.start()
         for t in threads:
             t.join(30)
-        # Latest-only semantics: within one lease window exactly one handout.
-        self.assertEqual(handed, ['wake-%d' % ids[-1]])
+        # Latest-only, one lease window: exactly one device ever holds it
+        # (it may re-take its own lease; no other device gets it).
+        self.assertEqual({wake for _, wake in handed}, {'wake-%d' % ids[-1]})
+        self.assertEqual(len({device for device, _ in handed}), 1)
 
     def test_screenshot_only_for_clients_that_support_it(self):
         cap = self.add_screenshot()
@@ -281,6 +315,9 @@ class AckProtocolTests(Base):
         self.assertEqual(self.screenshot_status(cap), 'pending')
         payload = self.lease(screenshot=True)
         self.assertEqual(payload['command_id'], 'cap-%d' % cap)
+        with self.assertRaises(wake_push.AckRefused):
+            self.ack('cap-%d' % cap, device=DEVICE_B)
+        self.assertEqual(self.screenshot_status(cap), 'dispatched')
         self.assertEqual(self.ack('cap-%d' % cap), {'cap-%d' % cap: 'acked'})
         self.assertEqual(self.screenshot_status(cap), 'received')
         self.assertEqual(self.ack('cap-%d' % cap), {'cap-%d' % cap: 'acked'})
@@ -300,7 +337,7 @@ class AckProtocolTests(Base):
 class WaitTests(Base):
     def run_poll(self, wait_s, clock):
         def take(conn):
-            return wake_push.lease_pending_payload(conn, fetch_row, False, self.now)
+            return wake_push.lease_pending_payload(conn, fetch_row, False, self.now, DEVICE_A)
         return wake_push.poll(self.counting_open, take, wait_s, sleep=clock.sleep, monotonic=clock.monotonic)
 
     def test_without_wait_answers_immediately(self):
