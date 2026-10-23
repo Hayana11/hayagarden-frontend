@@ -264,13 +264,14 @@ class CallService:
         With ``utterance`` (the number of the utterance she just began), any older
         utterance still being transcribed is held instead of starting a reply.
         """
-        # A speech_start can arrive after hangup. Validate the lifecycle before
-        # touching the per-call utterance map, otherwise a late request can
-        # recreate a queue that _finish() already removed.
-        if self.get(call_id)['state'] != call_store.ACTIVE:
-            raise call_store.CallStateError('call is not active')
-        if utterance is not None:
-            with self._utter_lock:
+        # A speech_start can arrive after hangup. Hold the same lock used by
+        # _finish() while checking state and touching the queue, so a hangup
+        # that has already transitioned the call cannot be followed by a
+        # setdefault() that recreates the removed queue.
+        with self._utter_lock:
+            if self.get(call_id)['state'] != call_store.ACTIVE:
+                raise call_store.CallStateError('call is not active')
+            if utterance is not None:
                 self._utterances.setdefault(call_id, _Utterances()).begin(int(utterance), self._clock())
         with self._changed:
             self._turns[call_id] = self._turns.get(call_id, 0) + 1
