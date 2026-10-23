@@ -234,3 +234,74 @@ class WakePushRouteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CallDeltaRouteTests(WakePushRouteTests):
+    """The same suite with call support on (proves the message protocol is unchanged),
+    plus the call delta: omitted = leave it, object = show it, null = withdraw it."""
+
+    def setUp(self):
+        super().setUp()
+        self.ringing = None
+        app = Flask(__name__)
+        app.register_blueprint(create_wake_push_blueprint(
+            self.open_db, fetch_row, lambda: False, self.health_db,
+            incoming_call=lambda: self.ringing))
+        self.client = app.test_client()
+
+    def poll(self, known=None, wait=0):
+        query = 'protocol=ack&wait=%d' % wait + ('&known_call=%s' % known if known else '')
+        return self.get(self.headers(self.a), query).get_json()
+
+    def test_a_new_ringing_call_is_announced_at_once(self):
+        self.ringing = 'abc123'
+        started = time.monotonic()
+        body = self.poll(wait=25)
+        self.assertLess(time.monotonic() - started, 5, 'does not wait out the long poll')
+        self.assertEqual(body, {'has_message': False, 'call': {'id': 'abc123', 'title': '费佳来电'}})
+
+    def test_a_call_the_phone_already_shows_is_left_alone(self):
+        self.ringing = 'abc123'
+        self.assertEqual(self.poll(known='abc123'), {'has_message': False})
+        started = time.monotonic()
+        self.assertEqual(self.poll(known='abc123', wait=1), {'has_message': False})
+        self.assertGreaterEqual(time.monotonic() - started, 0.9, 'no hot loop on an unchanged call')
+
+    def test_a_call_that_stopped_ringing_is_withdrawn(self):
+        self.ringing = None
+        self.assertEqual(self.poll(known='abc123'), {'has_message': False, 'call': None})
+        self.assertEqual(self.poll(), {'has_message': False}, 'nothing known, nothing ringing')
+
+    def test_a_different_call_replaces_the_known_one(self):
+        self.ringing = 'def456'
+        self.assertEqual(self.poll(known='abc123')['call']['id'], 'def456')
+
+    def test_message_and_call_delta_travel_together_and_only_the_message_is_acked(self):
+        wake = self.add_message('来电前的消息')
+        self.ringing = 'abc123'
+        body = self.poll()
+        self.assertTrue(body['has_message'])
+        self.assertEqual(body['id'], 'wake-%d' % wake)
+        self.assertEqual(body['call'], {'id': 'abc123', 'title': '费佳来电'})
+        self.assertEqual(self.post_ack(['wake-%d' % wake], self.headers(self.a)).status_code, 200)
+        self.assertEqual(self.post_ack(['abc123'], self.headers(self.a)).status_code, 403,
+                         'a call is never acked')
+
+    def test_withdrawal_is_not_held_back_by_a_message(self):
+        wake = self.add_message('挂断时的消息')
+        self.ringing = None
+        body = self.poll(known='abc123')
+        self.assertEqual((body['id'], body['call']), ('wake-%d' % wake, None))
+
+    def test_a_call_delta_never_touches_message_lease_state(self):
+        wake = self.add_message()
+        self.ringing = 'abc123'
+        before = self.wake_state(wake)
+        self.poll(known='abc123')  # message leased as before
+        leased = self.wake_state(wake)
+        self.assertEqual(leased[0], before[0])
+        self.assertEqual(leased[2], self.a['deviceId'])
+
+    def test_a_malformed_known_call_counts_as_none(self):
+        self.ringing = 'abc123'
+        self.assertEqual(self.poll(known='x%27%3B--')['call']['id'], 'abc123')

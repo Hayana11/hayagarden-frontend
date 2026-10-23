@@ -25,13 +25,19 @@ class BrainError(Exception):
 LANGUAGE_STYLE = '这通电话用{0}：她说{0}，你也只用{0}说话。'
 
 
-def format_utterance(text, first_turn, language=None):
-    """``language`` is the call language's label (日本語, English…); None is the default call."""
+CALLER_STYLE = '这通电话是你主动打给她的；她接起来时你先说了：「{0}」'
+
+
+def format_utterance(text, first_turn, language=None, opening=None):
+    """``language`` is the call language's label (日本語, English…); None is the default call.
+    ``opening`` is his first line when he placed the call (given on the first turn only)."""
     line = '〔电话〕她刚在电话里说：「%s」' % text.strip()
     if language:
         line += '（用%s回答）' % language  # every turn: the chat history around it is Chinese
     if first_turn:
         style = PHONE_STYLE + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
+        if opening:
+            style += '\n' + CALLER_STYLE.format(opening.strip())
         return style + '\n' + line
     return line
 
@@ -144,12 +150,12 @@ class ChatPipelineBrain:
         self._send_message = send_message
         self._stream_reply = stream_reply
 
-    def start_reply(self, text, first_turn, language=None):
-        message_id = self._send_message(format_utterance(text, first_turn, language))
+    def start_reply(self, text, first_turn, language=None, opening=None):
+        message_id = self._send_message(format_utterance(text, first_turn, language, opening))
         return CancellableReply(self._stream_reply(message_id))
 
-    def reply(self, text, first_turn, language=None):
-        handle = self.start_reply(text, first_turn, language)
+    def reply(self, text, first_turn, language=None, opening=None):
+        handle = self.start_reply(text, first_turn, language, opening)
         try:
             yield from handle
         finally:

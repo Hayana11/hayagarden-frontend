@@ -1,4 +1,5 @@
 """HTTP surface for voice calls under /api/call. Owner-only: audio costs money."""
+import hmac
 import json
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
@@ -7,7 +8,7 @@ from moments_auth import OwnerAuthError, require_owner
 from voice_call.store import CallStateError
 from voice_call.service import MAX_CLIP_BYTES
 from voice_call.stt import AUDIO_TYPES, STTError
-from voice_call.tts import TTSError
+from voice_call.tts import TTSError, read_env_value
 
 STREAM_WINDOW_S = 25
 
@@ -188,5 +189,58 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
         # no-store: a stream cut short must not be kept; a replay comes from the server cache.
         return Response(body(), mimetype='audio/mpeg', headers={'Cache-Control': 'no-store'})
+
+    return bp
+
+
+INTERNAL_TOKEN_KEY = 'VOICE_CALL_INTERNAL_TOKEN'
+INTERNAL_TOKEN_HEADER = 'X-Voice-Call-Internal-Token'
+_PROXY_HEADERS = ('X-Forwarded-For', 'X-Real-IP', 'Forwarded')
+_LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
+
+
+def create_voice_call_internal_blueprint(service, token_fn=None):
+    """Gateway -> app only: a Wake's call action rings her.
+
+    Not behind the owner guard, so it stands on its own: the token from .env
+    (read per request, compared in constant time) is required, no token
+    configured is a 503, and a request must name the loopback host (the
+    gateway calls 127.0.0.1:5050; nginx forwards the public host name) and
+    carry no forwarding header, whatever token it presents.
+    """
+    bp = Blueprint('voice_call_internal', __name__, url_prefix='/internal/voice_call')
+    get_token = token_fn or (lambda: read_env_value(INTERNAL_TOKEN_KEY))
+
+    @bp.before_request
+    def internal_only():
+        host = (request.host or '').rsplit(':', 1)[0].strip('[]').lower()
+        if host not in _LOOPBACK_HOSTS or any(request.headers.get(h) for h in _PROXY_HEADERS):
+            return jsonify({'ok': False, 'error': 'internal only'}), 403
+        expected = get_token() or ''
+        if not expected:
+            return jsonify({'ok': False, 'error': 'internal ring is not configured'}), 503
+        supplied = request.headers.get(INTERNAL_TOKEN_HEADER, '')
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+        return None
+
+    @bp.errorhandler(CallStateError)
+    def call_state_error(exc):
+        return jsonify({'ok': False, 'error': str(exc)}), exc.status
+
+    @bp.post('/ring')
+    def ring():
+        """Body: {"opening": "<his first line>", "language": "<code>" (optional)}.
+        409 a call is open, 429 his last call was under 3 hours ago."""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise CallStateError('JSON body required', 400)
+        language = data.get('language')
+        if language is not None and (not isinstance(language, str) or not language):
+            raise CallStateError('language must be a configured code', 400)
+        opening = data.get('opening')
+        if not isinstance(opening, str):
+            raise CallStateError('opening must be a string', 400)
+        return jsonify({'ok': True, 'call': service.ring_from_him(opening, language)}), 201
 
     return bp

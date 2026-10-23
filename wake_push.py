@@ -200,6 +200,40 @@ def _payload(row):
     }
 
 
+# ── incoming call delta (independent of the message lease/ack above) ──
+CALL_TITLE = '费佳来电'
+_UNCHANGED = object()
+
+
+def parse_known_call(raw):
+    """The call id the phone believes is still ringing (state reconciliation, never an ack)."""
+    value = (raw or '').strip()
+    return value if value and len(value) <= 64 and value.isalnum() else None
+
+
+def call_delta(ringing_id, known_call):
+    """What to tell the phone about his ringing call, or _UNCHANGED.
+
+    A ringing call it does not know yet: show it ({id, title}). No ringing call but
+    it still shows one: withdraw it (None). Otherwise leave its notification alone.
+    """
+    if ringing_id and ringing_id != known_call:
+        return {'id': ringing_id, 'title': CALL_TITLE}
+    if not ringing_id and known_call:
+        return None
+    return _UNCHANGED
+
+
+def with_call_delta(payload, delta):
+    """Attach ``call`` to a message payload (or to an empty one). ``call`` omitted means
+    leave the phone's call notification as it is; ``"call": null`` means withdraw it."""
+    if delta is _UNCHANGED:
+        return payload
+    out = dict(payload) if payload is not None else {'has_message': False}
+    out['call'] = delta
+    return out
+
+
 def poll(open_conn, take, wait_s, sleep=time.sleep, monotonic=time.monotonic):
     """Run ``take(conn)`` until it yields a payload or ``wait_s`` passes."""
     deadline = monotonic() + wait_s

@@ -19,6 +19,9 @@ DECLINED = 'declined'
 CANCELED = 'canceled'
 FINAL_STATES = (ENDED, MISSED, DECLINED, CANCELED)
 
+HER = 'her'          # she dialed (or the page's test ring)
+FYODOR = 'fyodor'    # he called her from a Wake (see CallService.ring_from_him)
+
 _TRANSITIONS = {
     RINGING: (ACTIVE, MISSED, DECLINED, CANCELED),
     ACTIVE: (ENDED,),
@@ -31,7 +34,7 @@ class CallStateError(Exception):
         self.status = status
 
 
-_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at, language, language_spec'
+_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at, language, language_spec, caller'
 
 
 def _load_spec(raw):
@@ -94,6 +97,12 @@ class CallStore:
             if 'language' not in cols:
                 # The call's language code (see voice_call.languages); NULL is the default call.
                 conn.execute("ALTER TABLE voice_calls ADD COLUMN language TEXT")
+            if 'caller' not in cols:
+                # Who placed the call: 'her' or 'fyodor'. Only his calls are pushed as incoming.
+                conn.execute("ALTER TABLE voice_calls ADD COLUMN caller TEXT NOT NULL DEFAULT 'her'")
+            if 'opening' not in cols:
+                # His first line for a call he placed; written as a line only when she answers.
+                conn.execute("ALTER TABLE voice_calls ADD COLUMN opening TEXT")
             if 'language_spec' not in cols:
                 # That language's config as it was at ring (JSON, holds the voice id: never served),
                 # so a runtime-config edit only changes the next call.
@@ -109,8 +118,14 @@ class CallStore:
         finally:
             conn.close()
 
-    def create_if_none_open(self, call_id, language=None, spec=None):
-        """Atomically: expire stale rings, refuse if a call is open, else create one ringing."""
+    def create_if_none_open(self, call_id, language=None, spec=None, caller=HER, opening=None,
+                            caller_cooldown_s=None):
+        """Atomically: expire stale rings, refuse if a call is open, else create one ringing.
+
+        With ``caller_cooldown_s`` the same transaction also refuses (429) while the
+        caller's previous call was placed less than that long ago, answered or not,
+        so two concurrent Wakes cannot both pass.
+        """
         with self._lock:
             conn = sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
             conn.row_factory = sqlite3.Row
@@ -122,11 +137,17 @@ class CallStore:
                         "SELECT 1 FROM voice_calls WHERE state IN (?, ?) LIMIT 1", (RINGING, ACTIVE)
                     ).fetchone():
                         raise CallStateError('a call is already ringing or active')
+                    if caller_cooldown_s:
+                        last = conn.execute(
+                            "SELECT MAX(created_at) FROM voice_calls WHERE caller=?", (caller,)
+                        ).fetchone()[0]
+                        if last is not None and self._clock() - last < caller_cooldown_s:
+                            raise CallStateError('called too recently', 429)
                     conn.execute(
-                        "INSERT INTO voice_calls (id, state, created_at, language, language_spec) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO voice_calls (id, state, created_at, language, language_spec, caller, opening) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (call_id, RINGING, self._clock(), language,
-                         json.dumps(spec, ensure_ascii=False) if spec else None),
+                         json.dumps(spec, ensure_ascii=False) if spec else None, caller, opening),
                     )
                     conn.execute('COMMIT')
                 except sqlite3.IntegrityError:
@@ -172,10 +193,37 @@ class CallStore:
             if new_state == ACTIVE:
                 conn.execute("UPDATE voice_calls SET state=?, answered_at=? WHERE id=?",
                              (new_state, now, call_id))
+                # His opening becomes his first line in the same transaction that answers:
+                # ringing -> active happens once, so it is said exactly once.
+                opening = conn.execute(
+                    "SELECT opening FROM voice_calls WHERE id=? AND caller=?", (call_id, FYODOR)
+                ).fetchone()
+                if opening and opening[0]:
+                    seq = conn.execute(
+                        "SELECT COALESCE(MAX(seq), 0) + 1 FROM voice_call_lines WHERE call_id=?", (call_id,)
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO voice_call_lines (call_id, seq, speaker, text, created_at) "
+                        "VALUES (?, ?, 'him', ?, ?)", (call_id, seq, opening[0], now))
             else:
                 conn.execute("UPDATE voice_calls SET state=?, ended_at=? WHERE id=?",
                              (new_state, now, call_id))
         return self.get(call_id)
+
+    def opening(self, call_id):
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT opening FROM voice_calls WHERE id=?", (call_id,)).fetchone()
+        return row[0] if row else None
+
+    def incoming_ringing_id(self):
+        """The id of a call he placed that is still ringing, or None. Her own dialing never counts."""
+        with self._lock, self._connect() as conn:
+            self._expire(conn)
+            row = conn.execute(
+                "SELECT id FROM voice_calls WHERE caller=? AND state=? ORDER BY created_at DESC LIMIT 1",
+                (FYODOR, RINGING),
+            ).fetchone()
+        return row[0] if row else None
 
     def unrecorded_final(self):
         """Finished calls whose chat record has not been confirmed written yet (no claim)."""

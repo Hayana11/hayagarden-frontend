@@ -27,7 +27,7 @@ from voice_call.sentences import SentenceSplitter
 from voice_call.service import MAX_CLIP_BYTES, STALE_UTTERANCE_S, CallService, format_duration
 from voice_call.stt import ElevenLabsSTT, STTError
 from voice_call.tts import CachedTTS, ElevenLabsTTS, TTSError, read_env_value
-from voice_call_routes import create_voice_call_blueprint
+from voice_call_routes import create_voice_call_blueprint, create_voice_call_internal_blueprint
 
 
 class Clock:
@@ -61,11 +61,13 @@ class FakeBrain:
         self.error = error
         self.calls = []
         self.languages = []
+        self.openings = []
         self.during = None
 
-    def reply(self, text, first_turn, language=None):
+    def reply(self, text, first_turn, language=None, opening=None):
         self.calls.append((text, first_turn))
         self.languages.append(language)
+        self.openings.append(opening)
         for index, chunk in enumerate(self.chunks):
             if self.during:
                 self.during(index)
@@ -937,6 +939,163 @@ class CallLanguageTests(unittest.TestCase):
             self.assertIsNone(store.get('old')['language'])
             store.create_if_none_open('new', 'en')
             self.assertEqual(store.get('new')['language'], 'en')
+        finally:
+            os.unlink(path)
+
+
+class ProactiveCallTests(unittest.TestCase):
+    """He calls her: caller, cooldown, opening said exactly once on answer."""
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = Clock()
+        self.engine = FakeEngine()
+        self.brain = FakeBrain()
+        self.service = CallService(
+            call_store.CallStore(self.path, self.clock), CachedTTS(self.engine, self.tmp.name, spawn=run_now),
+            self.brain, clock=self.clock, spawn=run_now,
+        )
+
+    def tearDown(self):
+        os.unlink(self.path)
+        self.tmp.cleanup()
+
+    def him_lines(self, call_id):
+        lines, _ = self.service.lines_after(call_id, 0)
+        return [l['text'] for l in lines if l['speaker'] == 'him']
+
+    def test_his_call_rings_as_incoming_without_showing_the_opening(self):
+        call = self.service.ring_from_him('哈娅，在做什么？')
+        self.assertEqual((call['caller'], call['state']), ('fyodor', 'ringing'))
+        self.assertNotIn('opening', call)
+        self.assertEqual(self.service.incoming_ringing_id(), call['id'])
+        self.assertEqual(self.him_lines(call['id']), [], 'not a line while it is ringing')
+        self.assertEqual(self.engine.calls, [], 'not voiced before she answers')
+
+    def test_answer_says_the_opening_exactly_once(self):
+        call = self.service.ring_from_him('哈娅，在做什么？')
+        self.service.answer(call['id'])
+        self.assertEqual(self.him_lines(call['id']), ['哈娅，在做什么？'])
+        self.assertEqual(self.engine.calls, ['哈娅，在做什么？'], 'voiced as soon as she picks up')
+        with self.assertRaises(call_store.CallStateError):
+            self.service.answer(call['id'])  # a retried answer
+        self.assertEqual(self.him_lines(call['id']), ['哈娅，在做什么？'])
+        self.assertIsNone(self.service.incoming_ringing_id())
+
+    def test_her_first_words_tell_the_brain_he_called_and_what_he_said(self):
+        call = self.service.ring_from_him('哈娅，在做什么？')
+        self.service.answer(call['id'])
+        self.service.say(call['id'], '在想你')
+        self.assertEqual(self.brain.openings, ['哈娅，在做什么？'])
+        self.service.say(call['id'], '真的')
+        self.assertEqual(self.brain.openings[-1], None, 'only on the first turn')
+        first = format_utterance('在想你', True, None, '哈娅，在做什么？')
+        self.assertIn(PHONE_STYLE, first)
+        self.assertIn('这通电话是你主动打给她的；她接起来时你先说了：「哈娅，在做什么？」', first)
+
+    def test_her_own_dialing_is_never_an_incoming_call(self):
+        mine = self.service.ring()  # between ring() and answer() when she dials
+        self.assertEqual(mine['caller'], 'her')
+        self.assertIsNone(self.service.incoming_ringing_id())
+        self.service.answer(mine['id'])
+        self.assertEqual(self.him_lines(mine['id']), [])
+
+    def test_no_second_call_while_one_is_open_or_within_three_hours(self):
+        self.service.ring()
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.ring_from_him('在吗')
+        self.assertEqual(ctx.exception.status, 409)
+        self.service.hangup(self.service.current()['id'])
+        call = self.service.ring_from_him('在吗')
+        self.service.decline(call['id'])  # declined still counts as a call he placed
+        self.clock.now += 3 * 3600 - 1
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.ring_from_him('在吗')
+        self.assertEqual(ctx.exception.status, 429)
+        self.clock.now += 1
+        self.assertEqual(self.service.ring_from_him('在吗')['caller'], 'fyodor')
+
+    def test_a_missed_call_still_counts_for_the_cooldown(self):
+        self.service.ring_from_him('在吗')
+        self.clock.now += call_store.RING_TIMEOUT_S + 1
+        self.assertIsNone(self.service.incoming_ringing_id(), 'unanswered: missed')
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.ring_from_him('在吗')
+        self.assertEqual(ctx.exception.status, 429)
+
+    def test_two_concurrent_rings_cannot_both_pass(self):
+        results = []
+
+        def ring():
+            try:
+                results.append(self.service.ring_from_him('在吗')['id'])
+            except call_store.CallStateError as exc:
+                results.append(exc.status)
+
+        threads = [threading.Thread(target=ring) for _ in range(4)]
+        [t.start() for t in threads]
+        [t.join(5) for t in threads]
+        self.assertEqual(sum(1 for r in results if isinstance(r, str)), 1)
+
+    def test_opening_is_required_and_bounded(self):
+        for opening in ('', '   ', 'x' * 201):
+            with self.assertRaises(call_store.CallStateError) as ctx:
+                self.service.ring_from_him(opening)
+            self.assertEqual(ctx.exception.status, 400)
+
+    def internal_client(self, token='s3cret'):
+        app = Flask(__name__)
+        app.register_blueprint(create_voice_call_internal_blueprint(self.service, token_fn=lambda: token))
+        client = app.test_client()
+        client.environ_base['HTTP_HOST'] = '127.0.0.1:5050'  # how the gateway calls it
+        return client
+
+    def test_internal_ring_needs_its_token_and_refuses_proxied_requests(self):
+        client = self.internal_client()
+        body = {'opening': '在吗'}
+        self.assertEqual(client.post('/internal/voice_call/ring', json=body).status_code, 401)
+        self.assertEqual(client.post('/internal/voice_call/ring', json=body,
+                                     headers={'X-Voice-Call-Internal-Token': 'wrong'}).status_code, 401)
+        for proxy in ('X-Forwarded-For', 'X-Real-IP', 'Forwarded'):
+            resp = client.post('/internal/voice_call/ring', json=body,
+                               headers={'X-Voice-Call-Internal-Token': 's3cret', proxy: '1.2.3.4'})
+            self.assertEqual(resp.status_code, 403, proxy)
+        resp = client.post('/internal/voice_call/ring', json=body, base_url='https://love-style.xyz',
+                           headers={'X-Voice-Call-Internal-Token': 's3cret'})
+        self.assertEqual(resp.status_code, 403, 'the public host, as nginx forwards it')
+        self.assertIsNone(self.service.current(), 'nothing rang')
+        unconfigured = self.internal_client(token='')
+        self.assertEqual(unconfigured.post('/internal/voice_call/ring', json=body,
+                                           headers={'X-Voice-Call-Internal-Token': ''}).status_code, 503)
+
+    def test_internal_ring_rings_and_reports_conflicts(self):
+        client = self.internal_client()
+        auth = {'X-Voice-Call-Internal-Token': 's3cret'}
+        resp = client.post('/internal/voice_call/ring', json={'opening': '在吗'}, headers=auth)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.get_json()['call']['caller'], 'fyodor')
+        self.assertEqual(client.post('/internal/voice_call/ring', json={'opening': '在吗'},
+                                     headers=auth).status_code, 409)
+        self.assertEqual(client.post('/internal/voice_call/ring', json={'opening': 7},
+                                     headers=auth).status_code, 400)
+        self.assertEqual(client.post('/internal/voice_call/ring', json={'opening': '在吗', 'language': ''},
+                                     headers=auth).status_code, 400)
+
+    def test_old_database_gains_caller_and_opening(self):
+        fd, path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE voice_calls (id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+                         "created_at REAL NOT NULL, answered_at REAL, ended_at REAL)")
+            conn.execute("INSERT INTO voice_calls VALUES ('old', 'ended', 1, 2, 3)")
+            conn.commit()
+            conn.close()
+            store = call_store.CallStore(path, self.clock)
+            self.assertEqual(store.get('old')['caller'], 'her')
+            self.assertIsNone(store.opening('old'))
         finally:
             os.unlink(path)
 
