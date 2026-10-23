@@ -60,9 +60,28 @@ function call<T>(fn: (b: ElpisSpeechBridge) => T, fallback: T): T {
   }
 }
 
+/**
+ * ready: the mic can be offered. no_bridge: inside the Elpis shell but a build
+ * without ElpisSpeech (before P2E). unavailable: the bridge is there but Android
+ * reports no speech recognition service. browser: not in the shell at all.
+ */
+export type SpeechStatus = 'ready' | 'no_bridge' | 'unavailable' | 'browser';
+
+function inElpisShell(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as Record<string, unknown>;
+  return !!(w.ElpisSpeech || w.ElpisNative || w.ElpisHealth || w.ElpisNotifications);
+}
+
 export const nativeSpeech = {
   supported(): boolean {
-    return call((b) => typeof b.start === 'function' && !!(b.isAvailable && b.isAvailable()), false);
+    return nativeSpeech.status() === 'ready';
+  },
+
+  status(): SpeechStatus {
+    const b = bridge();
+    if (!b || typeof b.start !== 'function') return inElpisShell() ? 'no_bridge' : 'browser';
+    return call((x) => !!(x.isAvailable && x.isAvailable()), false) ? 'ready' : 'unavailable';
   },
 
   hasPermission(): boolean {
