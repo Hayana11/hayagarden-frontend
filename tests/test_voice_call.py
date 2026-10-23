@@ -382,6 +382,7 @@ class UtteranceOrderTests(unittest.TestCase):
             self.service.interrupt('missing-call', utterance=1)
         self.assertEqual(ctx.exception.status, 404)
         self.assertNotIn('missing-call', self.service._utterances)
+
     def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
         self.stt.release(b'A')
