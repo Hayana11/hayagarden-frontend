@@ -13,7 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from moments_auth import OwnerAuthError
 from voice_call import store as call_store
 from voice_call.chat_record import record_call_in_chat
-from voice_call.brain import BrainError, ChatPipelineBrain, format_utterance, parse_sse_text, PHONE_STYLE
+from voice_call.brain import (
+    BrainError,
+    CancellableReply,
+    ChatPipelineBrain,
+    format_utterance,
+    parse_sse_text,
+    PHONE_STYLE,
+)
 from voice_call.sentences import SentenceSplitter
 from voice_call.service import MAX_CLIP_BYTES, STALE_UTTERANCE_S, CallService, format_duration
 from voice_call.stt import ElevenLabsSTT, STTError
@@ -63,6 +70,44 @@ class FakeBrain:
 
 def run_now(target):
     target()
+
+
+class CancellableHandle:
+    def __init__(self, chunks=(), wait_for_cancel=False, late_chunks=()):
+        self.chunks = list(chunks)
+        self.wait_for_cancel = wait_for_cancel
+        self.late_chunks = list(late_chunks)
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+        self.cancel_calls = 0
+
+    def __iter__(self):
+        self.started.set()
+        if self.wait_for_cancel:
+            self.cancelled.wait(5)
+            yield from self.late_chunks
+        else:
+            yield from self.chunks
+
+    def cancel(self):
+        self.cancel_calls += 1
+        self.cancelled.set()
+
+
+class CancellableBrain:
+    def __init__(self):
+        self.calls = []
+        self.handles = []
+
+    def start_reply(self, text, first_turn):
+        self.calls.append((text, first_turn))
+        handle = CancellableHandle(
+            wait_for_cancel=bool(self.handles),
+            late_chunks=['旧回复。\\n'],
+            chunks=['新回复。\\n'],
+        )
+        self.handles.append(handle)
+        return handle
 
 
 class SentenceSplitterTests(unittest.TestCase):
@@ -693,6 +738,87 @@ class BrainTests(unittest.TestCase):
         )
         self.assertEqual(list(brain.reply('喂', False)), ['id=42'])
         self.assertEqual(sent, ['〔电话〕她刚在电话里说：「喂」'])
+
+
+
+    def test_start_reply_can_close_only_its_underlying_stream(self):
+        class CloseableStream:
+            def __init__(self):
+                self.closed = False
+
+            def __iter__(self):
+                yield 'partial'
+
+            def close(self):
+                self.closed = True
+
+        stream = CloseableStream()
+        brain = ChatPipelineBrain(
+            send_message=lambda _content: 42,
+            stream_reply=lambda _message_id: stream,
+        )
+        handle = brain.start_reply('喂', False)
+        iterator = iter(handle)
+        self.assertEqual(next(iterator), 'partial')
+        handle.cancel()
+        self.assertTrue(stream.closed)
+
+
+class BargeInCancellationTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.brain = CancellableBrain()
+        self.service = CallService(
+            call_store.CallStore(self.path, time.time),
+            CachedTTS(FakeEngine(), self.tmp.name),
+            self.brain,
+        )
+        call = self.service.ring()
+        self.service.answer(call['id'])
+        self.call_id = call['id']
+
+    def tearDown(self):
+        self.service.hangup(self.call_id)
+        os.unlink(self.path)
+        self.tmp.cleanup()
+
+    def wait_until(self, predicate):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail('condition did not become true')
+
+    def test_interrupt_closes_old_stream_and_next_turn_gets_a_clean_generation(self):
+        self.service.say(self.call_id, '第一句')
+        self.wait_until(lambda: len(self.brain.handles) == 1)
+        first = self.brain.handles[0]
+        self.assertTrue(first.started.wait(5))
+
+        # This is deliberately a call-scoped assertion: a separate ordinary
+        # chat/wake stream is never present in CallService's handle registry.
+        ordinary_stream = CancellableHandle(wait_for_cancel=True)
+        self.service.interrupt(self.call_id, utterance=7, prev=0)
+        self.assertEqual(first.cancel_calls, 1)
+        self.assertEqual(ordinary_stream.cancel_calls, 0)
+
+        self.service.say(self.call_id, '第二句')
+        self.wait_until(lambda: len(self.brain.handles) == 2)
+        self.wait_until(lambda: any(
+            line['text'] == '新回复。'
+            for line in self.service.lines_after(self.call_id, 0)[0]
+        ))
+
+        texts = [line['text'] for line in self.service.lines_after(self.call_id, 0)[0]]
+        self.assertIn('第一句', texts)
+        self.assertIn('第二句', texts)
+        self.assertIn('新回复。', texts)
+        self.assertNotIn('旧回复。', texts)
+        self.assertNotIn('（信号不太好，刚才那句我没接住。）', texts)
+        self.assertNotIn(self.call_id, self.service._brain_turns)
 
 
 class ServiceTests(unittest.TestCase):
