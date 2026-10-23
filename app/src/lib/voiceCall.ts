@@ -48,8 +48,10 @@ export const voiceCall = {
   answer: (callId: string) => http.post<{ call: VoiceCall }>(`${base(callId)}/answer`).then((r) => r.call),
   decline: (callId: string) => http.post<CallSummary>(`${base(callId)}/decline`),
   hangup: (callId: string) => http.post<CallSummary>(`${base(callId)}/hangup`),
-  interrupt: (callId: string, utteranceSeq: number) =>
-    http.post<{ ok: boolean }>(`${base(callId)}/interrupt?seq=${encodeURIComponent(String(utteranceSeq))}`),
+  interrupt: (callId: string, utteranceSeq?: number) =>
+    http.post<{ ok: boolean }>(
+      `${base(callId)}/interrupt${utteranceSeq === undefined ? '' : `?seq=${encodeURIComponent(String(utteranceSeq))}`}`,
+    ),
   hear: (callId: string, wavBlob: Blob, utteranceSeq: number, language: string) =>
     http.post<VoiceHearResult>(
       `${base(callId)}/hear?lang=${encodeURIComponent(language)}&seq=${encodeURIComponent(String(utteranceSeq))}`,
