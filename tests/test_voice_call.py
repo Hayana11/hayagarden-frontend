@@ -822,6 +822,15 @@ class BargeInCancellationTests(unittest.TestCase):
         self.assertNotIn('（信号不太好，刚才那句我没接住。）', texts)
         self.assertNotIn(self.call_id, self.service._brain_turns)
 
+    def test_hangup_closes_the_active_call_reply(self):
+        self.service.say(self.call_id, '挂断前')
+        self.wait_until(lambda: len(self.brain.handles) == 1)
+        handle = self.brain.handles[0]
+        self.assertTrue(handle.started.wait(5))
+        self.service.hangup(self.call_id)
+        self.assertEqual(handle.cancel_calls, 1)
+        self.assertNotIn(self.call_id, self.service._brain_turns)
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
