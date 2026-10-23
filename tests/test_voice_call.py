@@ -103,8 +103,8 @@ class CancellableBrain:
         self.calls.append((text, first_turn))
         handle = CancellableHandle(
             wait_for_cancel=not self.handles,
-            late_chunks=['旧回复。\\n'],
-            chunks=['新回复。\\n'],
+            late_chunks=['旧回复。\n'],
+            chunks=['新回复。\n'],
         )
         self.handles.append(handle)
         return handle
