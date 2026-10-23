@@ -13,7 +13,8 @@ from voice_call import store as call_store
 from voice_call.chat_record import record_call_in_chat
 from voice_call.brain import BrainError, ChatPipelineBrain, format_utterance, parse_sse_text, PHONE_STYLE
 from voice_call.sentences import SentenceSplitter
-from voice_call.service import CallService, format_duration
+from voice_call.service import MAX_CLIP_BYTES, CallService, format_duration
+from voice_call.stt import ElevenLabsSTT, STTError
 from voice_call.tts import CachedTTS, ElevenLabsTTS, TTSError, read_env_value
 from voice_call_routes import create_voice_call_blueprint
 
@@ -145,6 +146,62 @@ class TTSTests(unittest.TestCase):
             self.assertEqual(read_env_value('MISSING_KEY_X', env.name), '')
         finally:
             os.unlink(env.name)
+
+
+class FakeSTT:
+    def __init__(self, text='你在干嘛', error=None):
+        self.text = text
+        self.error = error
+        self.calls = []
+
+    def transcribe(self, audio, mime, language):
+        self.calls.append((len(audio), mime, language))
+        if self.error:
+            raise self.error
+        return self.text
+
+
+class STTTests(unittest.TestCase):
+    def test_scribe_request_shape(self):
+        seen = {}
+
+        def post(url, headers, body, timeout):
+            seen.update(url=url, headers=headers, body=body)
+            return 200, json.dumps({'text': ' 小猫今天有没有好好吃饭？ ', 'language_code': 'zho'}).encode()
+
+        stt = ElevenLabsSTT(api_key='k', post=post)
+        self.assertEqual(stt.transcribe(b'RIFFdata', 'audio/wav', 'zho'), '小猫今天有没有好好吃饭？')
+        self.assertEqual(seen['url'], 'https://api.elevenlabs.io/v1/speech-to-text')
+        self.assertEqual(seen['headers']['xi-api-key'], 'k')
+        self.assertTrue(seen['headers']['content-type'].startswith('multipart/form-data; boundary='))
+        for part in (b'name="model_id"\r\n\r\nscribe_v2', b'name="language_code"\r\n\r\nzho',
+                     b'name="tag_audio_events"\r\n\r\nfalse', b'filename="clip.wav"', b'RIFFdata'):
+            self.assertIn(part, seen['body'])
+
+    def test_unknown_language_falls_back_to_chinese(self):
+        seen = {}
+
+        def post(url, headers, body, timeout):
+            seen['body'] = body
+            return 200, b'{"text": "hi"}'
+
+        ElevenLabsSTT(api_key='k', post=post).transcribe(b'x', 'audio/wav', 'klingon')
+        self.assertIn(b'name="language_code"\r\n\r\nzho', seen['body'])
+
+    def test_scribe_errors(self):
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='', post=lambda *a: (200, b'{}')).transcribe(b'x')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (200, b'{}')).transcribe(b'x', 'video/avi')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (401, b'no')).transcribe(b'x')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=lambda *a: (200, b'<html>')).transcribe(b'x')
+
+        def explode(*args):
+            raise OSError('net down')
+        with self.assertRaises(STTError):
+            ElevenLabsSTT(api_key='k', post=explode).transcribe(b'x')
 
 
 class StoreTests(unittest.TestCase):
@@ -571,9 +628,10 @@ class RouteTests(unittest.TestCase):
         self.clock = Clock()
         self.engine = FakeEngine()
         self.allowed = True
+        self.stt = FakeSTT()
         service = CallService(call_store.CallStore(self.path, self.clock),
                               CachedTTS(self.engine, self.tmp.name),
-                              FakeBrain(), clock=self.clock, spawn=run_now)
+                              FakeBrain(), clock=self.clock, spawn=run_now, stt=self.stt)
 
         def guard(request):
             if not self.allowed:
@@ -631,6 +689,51 @@ class RouteTests(unittest.TestCase):
         self.client.post('/api/call/%s/answer' % call_id)
         self.client.post('/api/call/%s/say' % call_id, json={'text': '喂'})
         self.assertEqual(self.client.get('/api/call/%s/audio/2' % call_id).status_code, 503)
+
+    def hear(self, call_id, body=b'RIFF....WAVE', mime='audio/wav', query=''):
+        return self.client.post('/api/call/%s/hear%s' % (call_id, query), data=body,
+                                headers={'Content-Type': mime})
+
+    def test_hear_transcribes_then_says(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.assertEqual(self.hear(call_id).status_code, 409)
+        self.assertEqual(self.stt.calls, [], 'a clip for a call that is not active is never billed')
+        self.client.post('/api/call/%s/answer' % call_id)
+
+        resp = self.hear(call_id, query='?lang=eng')
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body['text'], '你在干嘛')
+        self.assertEqual(body['line']['speaker'], 'her')
+        self.assertEqual(self.stt.calls, [(12, 'audio/wav', 'eng')])
+        stream = self.client.get('/api/call/%s/stream?after=0' % call_id).get_data(as_text=True)
+        self.assertIn('"text":"你在干嘛"', stream)
+        self.assertIn('"speaker":"him"', stream)
+
+    def test_hear_silence_says_nothing(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.stt.text = ''
+        body = self.hear(call_id).get_json()
+        self.assertEqual((body['text'], body['line']), ('', None))
+        stream = self.client.get('/api/call/%s/stream?after=0' % call_id).get_data(as_text=True)
+        self.assertNotIn('event: line', stream)
+
+    def test_hear_rejects_empty_oversized_and_failed_clips(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.assertEqual(self.hear(call_id, body=b'').status_code, 413)
+        self.assertEqual(self.hear(call_id, body=b'0' * (MAX_CLIP_BYTES + 1)).status_code, 413)
+        self.assertEqual(self.stt.calls, [])
+        self.stt.error = STTError('stt http 401')
+        resp = self.hear(call_id)
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(resp.get_json()['error'], 'stt http 401')
+
+    def test_hear_requires_owner(self):
+        self.allowed = False
+        self.assertEqual(self.hear('anything').status_code, 401)
+        self.assertEqual(self.stt.calls, [])
 
 
 if __name__ == '__main__':

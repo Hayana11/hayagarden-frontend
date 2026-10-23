@@ -5,6 +5,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from moments_auth import OwnerAuthError, require_owner
 from voice_call.store import CallStateError
+from voice_call.stt import STTError
 from voice_call.tts import TTSError
 
 STREAM_WINDOW_S = 25
@@ -76,6 +77,16 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
     def say(call_id):
         data = request.get_json(silent=True) or {}
         return jsonify({'ok': True, 'line': service.say(call_id, data.get('text'))})
+
+    @bp.post('/<call_id>/hear')
+    def hear(call_id):
+        """Body: one utterance (audio/wav PCM16 from the shell). ?lang=zho|eng."""
+        mime = (request.mimetype or '').lower()
+        try:
+            result = service.hear(call_id, request.get_data(cache=False), mime, request.args.get('lang'))
+        except STTError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 502
+        return jsonify({'ok': True, **result})
 
     @bp.get('/<call_id>/stream')
     def stream(call_id):

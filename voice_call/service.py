@@ -16,6 +16,9 @@ from voice_call.tts import TTSError
 
 HER = 'her'
 HIM = 'him'
+# 16 kHz mono PCM16 is 32 KB/s: 4 MB holds a ~2 minute clip, far above a VAD-cut sentence.
+MAX_CLIP_BYTES = 4 * 1024 * 1024
+DEFAULT_STT_LANGUAGE = 'zho'
 
 
 def format_duration(seconds):
@@ -30,9 +33,10 @@ def _spawn(target):
 
 
 class CallService:
-    def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None):
+    def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None, stt=None):
         self._store = store
         self._tts = tts
+        self._stt = stt
         self._brain = brain
         self._clock = clock
         self._spawn = spawn
@@ -90,6 +94,23 @@ class CallService:
             self._changed.notify_all()
         self._spawn(lambda: self._run_reply(call_id, text, first_turn, generation))
         return line
+
+    def hear(self, call_id, audio, mime, language=None):
+        """One finished utterance as audio (the phone's VAD cut it): transcribe, then say.
+
+        Checked for an active call before transcribing, so a clip for a dead call
+        is never billed. Silence or noise transcribes to '' and says nothing.
+        """
+        if self._stt is None:
+            raise call_store.CallStateError('speech-to-text is not configured', 503)
+        if not audio or len(audio) > MAX_CLIP_BYTES:
+            raise call_store.CallStateError('clip must be 1 byte to %d bytes' % MAX_CLIP_BYTES, 413)
+        if self.get(call_id)['state'] != call_store.ACTIVE:
+            raise call_store.CallStateError('call is not active')
+        text = self._stt.transcribe(audio, mime, language or DEFAULT_STT_LANGUAGE)
+        if not text:
+            return {'text': '', 'line': None}
+        return {'text': text, 'line': self.say(call_id, text)}
 
     def interrupt(self, call_id):
         """She started talking: stop adding the rest of his current answer."""
