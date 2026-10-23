@@ -170,6 +170,7 @@ class GatedSTT:
         self.gates = {}
         self.texts = {}
         self.errors = {}
+        self.calls = []
 
     def expect(self, clip, text, error=None):
         self.gates[clip] = threading.Event()
@@ -180,6 +181,7 @@ class GatedSTT:
         self.gates[clip].set()
 
     def transcribe(self, audio, mime, language):
+        self.calls.append(audio)
         self.gates[audio].wait(5)
         if self.errors[audio]:
             raise self.errors[audio]
@@ -300,6 +302,33 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
         with self.assertRaises(call_store.CallStateError):
             self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+
+    def test_duplicate_in_flight_waits_and_replays_without_second_stt(self):
+        self.stt.expect(b'A', '只处理一次')
+        returned = []
+        errors = []
+
+        def hear_once():
+            try:
+                returned.append(self.service.hear(self.call_id, b'A', 'audio/wav', None, 1))
+            except Exception as exc:  # noqa: BLE001 - assertion below
+                errors.append(exc)
+
+        first = threading.Thread(target=hear_once)
+        duplicate = threading.Thread(target=hear_once)
+        first.start()
+        self.wait_started(1)
+        duplicate.start()
+        time.sleep(0.05)
+        self.assertTrue(duplicate.is_alive(), 'duplicate must wait for the in-flight Scribe call')
+        self.stt.release(b'A')
+        first.join(5)
+        duplicate.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(len(returned), 2)
+        self.assertEqual([line['text'] for line in self.her_lines()], [])
+        self.assertTrue(any(result.get('duplicate') for result in returned))
 
     def test_without_numbers_arrival_order_is_used(self):
         self.stt.expect(b'A', '一')
