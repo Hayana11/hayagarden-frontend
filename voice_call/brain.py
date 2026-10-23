@@ -103,7 +103,7 @@ class CancellableReply:
                 if self._cancelled.is_set():
                     return
                 yield chunk
-        except BaseException:
+        except Exception:
             if self._cancelled.is_set():
                 return
             raise
