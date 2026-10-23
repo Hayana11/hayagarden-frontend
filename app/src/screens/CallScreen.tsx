@@ -49,13 +49,9 @@ function describeError(err: unknown): string {
   return '网络不太好，稍后再试';
 }
 
-/** The fallback recognizer's locale for this call: its language's, else Chinese. */
-function speechLanguageOf(call: VoiceCall | null, languages: CallLanguage[]): string {
-  const code = call && call.language;
-  for (const entry of languages) {
-    if (code && entry.code === code && entry.speech) return entry.speech;
-  }
-  return SPEECH_LANGUAGE;
+/** The fallback recognizer's locale for this call: the one frozen with it at ring, else Chinese. */
+function speechLanguageOf(call: VoiceCall | null): string {
+  return (call && call.speech) || SPEECH_LANGUAGE;
 }
 
 export function CallScreen() {
@@ -82,8 +78,6 @@ export function CallScreen() {
 
   const callRef = useRef<VoiceCall | null>(null);
   const utteranceChainRef = useRef(newUtteranceChain());
-  const languagesRef = useRef<CallLanguage[]>([]);
-  languagesRef.current = languages;
   const linesRef = useRef<CallLine[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queueRef = useRef<number[]>([]);
@@ -186,7 +180,7 @@ export function CallScreen() {
     if (awaitingReplyRef.current || playingRef.current !== null || queueRef.current.length) return;
     listeningRef.current = true;
     setHearing(true);
-    nativeSpeech.start(speechLanguageOf(current, languagesRef.current));
+    nativeSpeech.start(speechLanguageOf(current));
   }, [voiceSupported]);
 
   const resumeListening = useCallback((delayMs: number) => {

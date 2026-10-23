@@ -5,6 +5,7 @@ missed / declined / canceled. Ring timeout is applied lazily whenever a call
 is read, so no timer thread is needed.
 """
 import contextlib
+import json
 import sqlite3
 import threading
 
@@ -30,7 +31,25 @@ class CallStateError(Exception):
         self.status = status
 
 
-_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at, language'
+_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at, language, language_spec'
+
+
+def _load_spec(raw):
+    try:
+        spec = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return spec if isinstance(spec, dict) else None
+
+
+def _call(row):
+    """A call as the API shows it: the private language snapshot reduced to its speech locale."""
+    if row is None:
+        return None
+    call = dict(row)
+    spec = _load_spec(call.pop('language_spec', None))
+    call['speech'] = spec.get('speech') if spec else None
+    return call
 
 
 class CallStore:
@@ -75,6 +94,10 @@ class CallStore:
             if 'language' not in cols:
                 # The call's language code (see voice_call.languages); NULL is the default call.
                 conn.execute("ALTER TABLE voice_calls ADD COLUMN language TEXT")
+            if 'language_spec' not in cols:
+                # That language's config as it was at ring (JSON, holds the voice id: never served),
+                # so a runtime-config edit only changes the next call.
+                conn.execute("ALTER TABLE voice_calls ADD COLUMN language_spec TEXT")
 
     @contextlib.contextmanager
     def _connect(self):
@@ -86,7 +109,7 @@ class CallStore:
         finally:
             conn.close()
 
-    def create_if_none_open(self, call_id, language=None):
+    def create_if_none_open(self, call_id, language=None, spec=None):
         """Atomically: expire stale rings, refuse if a call is open, else create one ringing."""
         with self._lock:
             conn = sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
@@ -100,8 +123,10 @@ class CallStore:
                     ).fetchone():
                         raise CallStateError('a call is already ringing or active')
                     conn.execute(
-                        "INSERT INTO voice_calls (id, state, created_at, language) VALUES (?, ?, ?, ?)",
-                        (call_id, RINGING, self._clock(), language),
+                        "INSERT INTO voice_calls (id, state, created_at, language, language_spec) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (call_id, RINGING, self._clock(), language,
+                         json.dumps(spec, ensure_ascii=False) if spec else None),
                     )
                     conn.execute('COMMIT')
                 except sqlite3.IntegrityError:
@@ -118,7 +143,13 @@ class CallStore:
         with self._lock, self._connect() as conn:
             self._expire(conn)
             row = conn.execute("SELECT %s FROM voice_calls WHERE id=?" % _CALL_COLUMNS, (call_id,)).fetchone()
-        return dict(row) if row else None
+        return _call(row)
+
+    def language_spec(self, call_id):
+        """The call's frozen language config (with its voice id), or None for the default call."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT language_spec FROM voice_calls WHERE id=?", (call_id,)).fetchone()
+        return _load_spec(row[0]) if row else None
 
     def latest_open(self):
         with self._lock, self._connect() as conn:
@@ -127,7 +158,7 @@ class CallStore:
                 "SELECT %s FROM voice_calls WHERE state IN (?, ?) ORDER BY created_at DESC LIMIT 1" % _CALL_COLUMNS,
                 (RINGING, ACTIVE),
             ).fetchone()
-        return dict(row) if row else None
+        return _call(row)
 
     def transition(self, call_id, new_state):
         now = self._clock()
@@ -156,7 +187,7 @@ class CallStore:
                 % (_CALL_COLUMNS, marks),
                 FINAL_STATES,
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [_call(row) for row in rows]
 
     def mark_recorded(self, call_id):
         """Only after the chat record for call_id is durably written."""

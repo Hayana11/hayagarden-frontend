@@ -7,9 +7,12 @@ Chinese voice once one is trained, say) is added without a deploy:
      "en": {"label": "English", "voice_id": "K7JxslCTelez3qaKj5SJ", "stt": "eng", "speech": "en-US"}}
 
 voice_id (ElevenLabs) and stt (Scribe ISO 639-3) are required; label defaults to
-the code and speech (the Android fallback recognizer's locale) is optional. A
-malformed entry is skipped, never fatal. No entries means today's single
-Chinese call with the default voice.
+the code; speech (the Android fallback recognizer's locale) and fallback (what he
+says when his reply fails) are optional. A malformed entry is skipped, never
+fatal. No entries means today's single Chinese call with the default voice.
+
+A call keeps a snapshot of its entry from ring (see CallService.ring), so an edit
+here changes the next call, never one already ringing or talking.
 """
 import json
 import re
@@ -46,12 +49,14 @@ def load(get=None):
             continue
         label = entry.get('label')
         speech = entry.get('speech')
+        fallback = entry.get('fallback')
         languages[code] = {
             'code': code,
             'label': label.strip() if isinstance(label, str) and label.strip() else code,
             'voice_id': voice_id,
             'stt': stt,
             'speech': speech if isinstance(speech, str) and _SPEECH.match(speech) else None,
+            'fallback': fallback.strip() if isinstance(fallback, str) and 0 < len(fallback.strip()) <= 200 else None,
         }
     return languages
 

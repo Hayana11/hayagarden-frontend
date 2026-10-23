@@ -157,4 +157,16 @@ test.describe('CallScreen speech lifecycle (Canary shell)', () => {
     await waitForStartsAbove(page, afterSay, 5000);
     await expect(mic).toHaveText('在听…');
   });
+
+  test('listens in the locale frozen with the call', async ({ page }) => {
+    await installCallRoutes(page);
+    const japanese = { ...CALL, language: 'ja', speech: 'ja-JP' };
+    await page.route('**/api/call/current', (route) => route.fulfill({ json: { call: japanese } }));
+    await page.route('**/api/call/c1', (route) => route.fulfill({ json: { call: japanese, lines: [] } }));
+    await installFakeShell(page);
+    await page.goto('/dash/call');
+    await page.locator('.call-mic').click();
+    await waitForStartsAbove(page, 0);
+    expect(await lastCall(page)).toBe('start:ja-JP');
+  });
 });

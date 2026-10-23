@@ -15,6 +15,8 @@ export type VoiceCall = {
   ended_at: number | null;
   /** A code from voiceCall.languages(); null is the default (Chinese) call. */
   language?: string | null;
+  /** The fallback recognizer's locale, frozen with the call at ring; null for the default. */
+  speech?: string | null;
 };
 
 /** One configured call language; `speech` is the Android fallback recognizer's locale. */

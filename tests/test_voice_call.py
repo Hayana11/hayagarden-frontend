@@ -47,7 +47,7 @@ class FakeEngine:
         self.voices = []
         self.fail = fail
 
-    def synthesize(self, text, voice_id=None):
+    def synthesize(self, text, voice_id=None, model_id=None):
         self.calls.append(text)
         self.voices.append(voice_id)
         if self.fail:
@@ -191,6 +191,17 @@ class TTSTests(unittest.TestCase):
         self.assertEqual(seen[0][1]['model_id'], 'eleven_v4')
         self.assertIn('/text-to-speech/TpHHy93T39MKuyQgrXh8?', seen[1][0])
         self.assertEqual(seen[1][1]['model_id'], 'eleven_v4_turbo')
+
+    def test_one_lookup_uses_one_model_for_key_and_request(self):
+        models = iter(['eleven_v4', 'eleven_v4_turbo'])  # the config flips between two reads
+        seen = []
+        tts = ElevenLabsTTS(api_key='k', model_id=lambda: next(models),
+                            post=lambda url, headers, body, timeout: seen.append(json.loads(body)) or (200, b'mp3'))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(tts, tmp)
+            key, _ = cache.get('はい')
+            self.assertEqual(key, cache.key('はい', None, 'eleven_v4'))
+        self.assertEqual([body['model_id'] for body in seen], ['eleven_v4'])
 
     def test_cache_keeps_each_voice_apart(self):
         engine = FakeEngine()
@@ -637,7 +648,8 @@ class UtteranceOrderTests(unittest.TestCase):
 
 
 JA_EN = json.dumps({
-    'ja': {'label': '日本語', 'voice_id': '0zi0ae2RvBmXaahlPt2n', 'stt': 'jpn', 'speech': 'ja-JP'},
+    'ja': {'label': '日本語', 'voice_id': '0zi0ae2RvBmXaahlPt2n', 'stt': 'jpn', 'speech': 'ja-JP',
+           'fallback': 'ごめん、今の一言をうまく聞き取れなかった。'},
     'en': {'label': 'English', 'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'eng', 'speech': 'en-US'},
 })
 
@@ -720,12 +732,55 @@ class CallLanguageTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 400)
         self.assertIsNone(self.service.current())
 
-    def test_language_removed_mid_call_falls_back_to_default(self):
+    def test_a_config_edit_only_changes_the_next_call(self):
+        call = self.active_call('ja')
+        self.config = json.dumps({'ja': {'label': 'にほんご', 'voice_id': 'NEWVOICE0001', 'stt': 'eng'}})
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)
+        self.assertEqual(self.stt.calls[-1][2], 'jpn')
+        self.assertEqual(self.brain.languages, ['日本語'])
+        self.config = ''  # removed entirely: still the same Japanese call
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 2)
+        self.assertEqual(self.stt.calls[-1][2], 'jpn')
+        lines, _ = self.service.lines_after(call['id'], 0)
+        self.service.audio(call['id'], [l for l in lines if l['speaker'] == 'him'][-1]['seq'])
+        self.assertEqual(self.engine.voices, ['0zi0ae2RvBmXaahlPt2n'])
+        self.service.hangup(call['id'])
+        with self.assertRaises(call_store.CallStateError):
+            self.service.ring('ja')  # the next call sees the edit
+
+    def test_the_snapshot_survives_a_restart(self):
         call = self.active_call('ja')
         self.config = ''
-        self.service.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)
-        self.assertEqual(self.stt.calls[-1][2], 'zho')
-        self.assertEqual(self.brain.languages, [None])
+        restarted = CallService(
+            call_store.CallStore(self.path, self.clock), CachedTTS(self.engine, self.tmp.name),
+            self.brain, clock=self.clock, spawn=run_now, stt=self.stt,
+            languages=lambda: call_languages.load(lambda key: self.config),
+        )
+        restarted.hear(call['id'], b'RIFF', 'audio/wav', 'zho', 1)
+        self.assertEqual(self.stt.calls[-1][2], 'jpn')
+        self.assertEqual(self.brain.languages, ['日本語'])
+
+    def test_the_call_shows_its_speech_locale_but_never_its_voice(self):
+        call = self.service.ring('ja')
+        self.assertEqual((call['language'], call['speech']), ('ja', 'ja-JP'))
+        self.assertNotIn('voice_id', json.dumps(call))
+        self.assertNotIn('language_spec', call)
+        self.assertEqual(self.service.current()['speech'], 'ja-JP')
+
+    def test_a_failed_reply_falls_back_in_the_call_language(self):
+        self.brain.chunks = ['']
+        self.brain.error = BrainError('down')
+        call = self.active_call('ja')
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', None, 1)
+        lines, _ = self.service.lines_after(call['id'], 0)
+        self.assertEqual([l['text'] for l in lines if l['speaker'] == 'him'],
+                         ['ごめん、今の一言をうまく聞き取れなかった。'])
+        self.brain.languages.clear()
+        self.service.hangup(call['id'])
+        call = self.active_call('en')  # no fallback configured: today's sentence
+        self.service.hear(call['id'], b'RIFF', 'audio/wav', None, 1)
+        lines, _ = self.service.lines_after(call['id'], 0)
+        self.assertEqual([l['text'] for l in lines if l['speaker'] == 'him'], ['（信号不太好，刚才那句我没接住。）'])
 
     def test_reply_instruction_names_the_language_every_turn(self):
         first = format_utterance('もしもし', True, '日本語')
@@ -744,6 +799,8 @@ class CallLanguageTests(unittest.TestCase):
         self.assertNotIn('voice_id', json.dumps(body))
         self.assertEqual(client.post('/api/call/ring', json={'language': 'fr'}).status_code, 400)
         self.assertEqual(client.post('/api/call/ring', json={'language': 7}).status_code, 400)
+        self.assertEqual(client.post('/api/call/ring', json={'language': ''}).status_code, 400)
+        self.assertEqual(client.post('/api/call/ring', json={'language': None}).status_code, 400)
         resp = client.post('/api/call/ring', json={'language': 'ja'})
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.get_json()['call']['language'], 'ja')

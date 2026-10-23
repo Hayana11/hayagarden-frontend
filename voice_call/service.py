@@ -126,10 +126,17 @@ class CallService:
 
     # ── lifecycle ────────────────────────────────────────────
     def ring(self, language=None):
-        """Open a call; ``language`` is a configured code (see voice_call.languages) or None."""
-        if language is not None and language not in self._languages():
-            raise call_store.CallStateError('unknown call language', 400)
-        call = self._store.create_if_none_open(uuid.uuid4().hex, language)
+        """Open a call; ``language`` is a configured code (see voice_call.languages) or None.
+
+        The language's entry is frozen with the call: a config edit only changes the next one.
+        """
+        spec = None
+        if language is not None:
+            entry = self._languages().get(language)
+            if not entry:
+                raise call_store.CallStateError('unknown call language', 400)
+            spec = {key: entry[key] for key in ('label', 'voice_id', 'stt', 'speech', 'fallback')}
+        call = self._store.create_if_none_open(uuid.uuid4().hex, language, spec)
         self._notify()
         return call
 
@@ -145,10 +152,9 @@ class CallService:
     def languages(self):
         return call_languages.public(self._languages())
 
-    def _language(self, call):
-        """The call's language entry, or None for the default call (or one removed since)."""
-        code = call.get('language') if call else None
-        return self._languages().get(code) if code else None
+    def _language(self, call_id):
+        """The call's language as frozen at ring, or None for the default call."""
+        return self._store.language_spec(call_id)
 
     def answer(self, call_id):
         return self._change(call_id, call_store.ACTIVE)
@@ -224,7 +230,7 @@ class CallService:
         call = self.get(call_id)
         if call['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
-        entry = self._language(call)
+        entry = self._language(call_id)
         if entry:
             language = entry['stt']  # the call decides, not the page
         try:
@@ -403,7 +409,7 @@ class CallService:
         line = self._store.line(call_id, seq)
         if not line or line['speaker'] != HIM:
             raise call_store.CallStateError('no such spoken line', 404)
-        entry = self._language(self._store.get(call_id))
+        entry = self._language(call_id)
         key, data = self._tts.get(line['text'], entry['voice_id'] if entry else None)
         if line.get('audio_key') != key:
             self._store.set_audio_key(call_id, seq, key)
@@ -448,8 +454,9 @@ class CallService:
     def _run_reply(self, call_id, text, first_turn, generation):
         splitter = SentenceSplitter()
         handle = None
-        entry = self._language(self._store.get(call_id))
+        entry = self._language(call_id)
         extra = {'language': entry['label']} if entry else {}
+        fallback = (entry and entry.get('fallback')) or '（信号不太好，刚才那句我没接住。）'
         try:
             start_reply = getattr(self._brain, 'start_reply', None)
             if callable(start_reply):
@@ -470,7 +477,7 @@ class CallService:
             # A cancelled stale stream is intentionally silent: its generation
             # has already been superseded, so it must not revive a fallback.
             if self._current_generation(call_id) == generation:
-                self._emit(call_id, generation, ['（信号不太好，刚才那句我没接住。）'])
+                self._emit(call_id, generation, [fallback])
         finally:
             if handle is not None:
                 self._unregister_brain_handle(call_id, generation, handle)
