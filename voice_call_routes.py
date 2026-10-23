@@ -168,12 +168,25 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
     @bp.get('/<call_id>/audio/<int:seq>')
     def audio(call_id, seq):
+        """Streamed: the page plays from the first bytes. A failure before any audio
+        is a 503 (the page shows the text only, never another voice); one mid-line
+        just ends the audio early."""
         try:
-            data = service.audio(call_id, seq)
+            chunks = service.audio_stream(call_id, seq)
+            first = next(chunks, b'')
         except TTSError as exc:
-            # Never fall back to another voice: the page shows the text only.
             return jsonify({'ok': False, 'error': str(exc)}), 503
-        return Response(data, mimetype='audio/mpeg',
-                        headers={'Cache-Control': 'private, max-age=86400'})
+        if not first:
+            return jsonify({'ok': False, 'error': 'tts returned no audio'}), 503
+
+        def body():
+            yield first
+            try:
+                yield from chunks
+            except TTSError:
+                return
+
+        # no-store: a stream cut short must not be kept; a replay comes from the server cache.
+        return Response(body(), mimetype='audio/mpeg', headers={'Cache-Control': 'no-store'})
 
     return bp

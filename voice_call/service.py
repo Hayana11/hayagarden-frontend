@@ -405,15 +405,19 @@ class CallService:
                     return lines, call
                 self._changed.wait(min(remaining, 1.0))
 
-    def audio(self, call_id, seq):
+    def audio_stream(self, call_id, seq):
+        """His line's mp3 as chunks, joining the synthesis _emit already started."""
         line = self._store.line(call_id, seq)
         if not line or line['speaker'] != HIM:
             raise call_store.CallStateError('no such spoken line', 404)
         entry = self._language(call_id)
-        key, data = self._tts.get(line['text'], entry['voice_id'] if entry else None)
+        key, chunks = self._tts.stream(line['text'], entry['voice_id'] if entry else None)
         if line.get('audio_key') != key:
             self._store.set_audio_key(call_id, seq, key)
-        return data
+        return chunks
+
+    def audio(self, call_id, seq):
+        return b''.join(self.audio_stream(call_id, seq))
 
     # ── internals ────────────────────────────────────────────
     @staticmethod
@@ -491,7 +495,15 @@ class CallService:
                 return False
             self._store.add_line(call_id, HIM, sentence)
             self._notify()
+            self._warm(call_id, sentence)
         return True
+
+    def _warm(self, call_id, text):
+        """Start his line's voice now, so the page joins a synthesis already under way."""
+        warm = getattr(self._tts, 'warm', None)
+        if callable(warm):
+            entry = self._language(call_id)
+            warm(text, entry['voice_id'] if entry else None)
 
     def _change(self, call_id, state):
         call = self._store.transition(call_id, state)
