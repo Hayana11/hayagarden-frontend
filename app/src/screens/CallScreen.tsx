@@ -150,6 +150,8 @@ export function CallScreen() {
   const listen = useCallback(() => {
     const current = callRef.current;
     if (!micOnRef.current || listeningRef.current || !current || current.state !== 'active') return;
+    // The shell destroys the recognizer when the app is paused; never start one while hidden.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     if (awaitingReplyRef.current || playingRef.current !== null || queueRef.current.length) return;
     listeningRef.current = true;
     setHearing(true);
@@ -222,12 +224,32 @@ export function CallScreen() {
           micOnRef.current = false;
           setMicOn(false);
           setError(event.code === 'no_permission' ? '需要麦克风权限才能直接说话' : '这台手机没有可用的语音识别，先打字吧');
-        } else {
+        } else if (event.code !== 'paused') {
+          // 'paused': the shell released the recognizer in onPause; 'resumed' brings it back.
           resumeListening(event.code === 'busy' || event.code === 'client' ? 800 : 300);
         }
+      } else if (event.type === 'resumed') {
+        resumeListening(300);
       }
     });
   }, [speechSupported, sayText, resumeListening]);
+
+  // Keep the page's idea of "listening" in step with the native recognizer, which the shell
+  // releases in onPause (screen locked, app backgrounded). Hidden: forget the listen in
+  // flight. Visible again with the mic on: listen anew, unless he is speaking or replying.
+  useEffect(() => {
+    if (!speechSupported) return undefined;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        clearTimer(resumeTimerRef);
+        stopListening();
+        return;
+      }
+      if (micOnRef.current) resumeListening(300);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [speechSupported, stopListening, resumeListening]);
 
   const turnMicOff = useCallback(() => {
     micOnRef.current = false;

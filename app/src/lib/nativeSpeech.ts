@@ -2,11 +2,13 @@
 //
 // The shell runs android.speech.SpeechRecognizer: one utterance per start(),
 // partial results while she talks, a final result after ~2s of silence. It
-// reports back by calling window.__elpisSpeech(json). Outside the shell (desktop
-// browser, older Canary) supported() is false and the call page keeps typing.
+// reports back by calling window.__elpisSpeech(json). onPause releases the
+// recognizer (error code 'paused' if one was live); onResume sends 'resumed'.
+// Outside the shell (desktop browser, older Canary) supported() is false and
+// the call page keeps typing.
 
 export type SpeechEvent = {
-  type: 'ready' | 'speech_start' | 'partial' | 'final' | 'end' | 'error' | 'permission';
+  type: 'ready' | 'speech_start' | 'partial' | 'final' | 'end' | 'error' | 'permission' | 'resumed';
   text?: string;
   code?: string;
   granted?: boolean;
