@@ -490,7 +490,8 @@ class UtteranceOrderTests(unittest.TestCase):
         self.scheduler = FakeScheduler()
         self.service = CallService(
             call_store.CallStore(self.path, self.clock),
-            CachedTTS(FakeEngine(), self.tmp.name),
+            # synchronous synthesis: a background warm writing into tmp would race tearDown
+            CachedTTS(FakeEngine(), self.tmp.name, spawn=run_now),
             self.brain, clock=self.clock, spawn=run_now, stt=self.stt, schedule=self.scheduler,
         )
         call = self.service.ring()
