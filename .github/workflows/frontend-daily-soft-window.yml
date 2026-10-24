@@ -85,7 +85,7 @@ jobs:
           npm run test:call-subtitles
           npm run test:call-runtime
           npm run test:chat-call-record
-      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio + subtitles e2e (P2H-3B: all through the web CallRuntime)
+      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio + subtitles e2e
         working-directory: app
         run: |
           npx playwright install --with-deps chromium
