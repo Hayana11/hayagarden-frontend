@@ -237,6 +237,27 @@ class TTSTests(unittest.TestCase):
         self.assertEqual([body['text'] for body in seen], ['[slowly] 嗯'])
         self.assertNotIn('speed', seen[0]['voice_settings'], 'v4 ignores speed; it is not sent')
 
+    def test_a_disabled_base_tag_snapshot_stays_disabled(self):
+        tags = iter([None, 'slowly'])  # "none" on the first read, a real tag on the second
+        seen = []
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag=lambda: next(tags),
+                            open_stream=lambda url, headers, body, timeout: (
+                                seen.append(json.loads(body)) or (200, iter([b'mp3']))))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(tts, tmp)
+            key, _ = cache.get('嗯')
+            self.assertEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', None))
+        self.assertEqual([body['text'] for body in seen], ['嗯'],
+                         'the no-tag key must never hold audio made with a tag')
+
+    def test_an_explicit_none_means_no_base_tag(self):
+        sent = []
+        post = lambda u, h, body, t: sent.append(json.loads(body)['text']) or (200, b'x')  # noqa: E731
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag='slowly', post=post)
+        tts.synthesize('嗯', base_tag=None)
+        tts.synthesize('嗯')
+        self.assertEqual(sent, ['嗯', '[slowly] 嗯'])
+
     def test_the_base_tag_leads_every_line_for_tag_capable_models_only(self):
         sent = []
         post = lambda u, h, body, t: sent.append(json.loads(body)['text']) or (200, b'x')  # noqa: E731

@@ -80,6 +80,10 @@ BASE_TAG_CONFIG_KEY = 'VOICE_CALL_BASE_TAG'
 DEFAULT_BASE_TAG = 'speaking slowly, in a low calm voice'
 
 
+# "Not passed" for base_tag arguments; None is a real value (no base tag), so it cannot mean this.
+_CONFIGURED = object()
+
+
 def configured_base_tag():
     """Runtime config VOICE_CALL_BASE_TAG: unset (or unreadable) = DEFAULT_BASE_TAG,
     "none" = no base tag, anything else must be plain lowercase words."""
@@ -124,14 +128,14 @@ class ElevenLabsTTS:
     def api_key(self):
         return self._api_key if self._api_key is not None else read_env_value('ELEVENLABS_API_KEY')
 
-    def _request(self, text, model_id, base_tag=None):
+    def _request(self, text, model_id, base_tag=_CONFIGURED):
         key = self.api_key()
         if not key:
             raise TTSError('ELEVENLABS_API_KEY is not configured')
         model = model_id or self.model_id
         body = json.dumps({
             # his audio tags filtered for this model, led by the base delivery tag
-            'text': voice_text(text, model, self.base_tag if base_tag is None else base_tag),
+            'text': voice_text(text, model, self.base_tag if base_tag is _CONFIGURED else base_tag),
             'model_id': model,
             'voice_settings': {  # no 'style': v4 does not take it
                 'stability': 0.5,
@@ -142,9 +146,10 @@ class ElevenLabsTTS:
         headers = {'xi-api-key': key, 'content-type': 'application/json', 'accept': 'audio/mpeg'}
         return headers, body
 
-    def synthesize(self, text, voice_id=None, model_id=None, base_tag=None):
+    def synthesize(self, text, voice_id=None, model_id=None, base_tag=_CONFIGURED):
         """Speak ``text`` with ``voice_id`` (the call language's voice) or the default voice,
-        in ``model_id`` with ``base_tag`` (the caller's snapshot) or the configured ones."""
+        in ``model_id`` with ``base_tag`` (the caller's snapshot; None = no base tag) or the
+        configured ones."""
         headers, body = self._request(text, model_id, base_tag)
         try:
             status, data = self._post(self.URL.format(voice_id=voice_id or self.voice_id), headers, body, self._timeout)
@@ -156,7 +161,7 @@ class ElevenLabsTTS:
             raise TTSError('tts returned no audio')
         return data
 
-    def stream(self, text, voice_id=None, model_id=None, base_tag=None):
+    def stream(self, text, voice_id=None, model_id=None, base_tag=_CONFIGURED):
         """Like synthesize, but yield the mp3 as ElevenLabs produces it."""
         headers, body = self._request(text, model_id, base_tag)
         try:
@@ -260,8 +265,8 @@ class CachedTTS:
         """Return (key, mp3 chunks): from disk, from the synthesis already under way
         (in this worker or another), or a new one this worker owns."""
         model_id = self._engine.model_id  # read once: the model can change live between key and request
-        base_tag = getattr(self._engine, 'base_tag', None)  # likewise
-        key = self.key(text, voice_id, model_id, base_tag)
+        base_tag = getattr(self._engine, 'base_tag', _CONFIGURED)  # likewise; None (disabled) is a snapshot too
+        key = self.key(text, voice_id, model_id, None if base_tag is _CONFIGURED else base_tag)
         path = self.path(key)
         with self._lock:
             job = self._running.get(key)
@@ -378,14 +383,15 @@ class CachedTTS:
                 raise TTSError('tts synthesis ended without audio')
             time.sleep(self._poll_s)
 
-    def _synthesize(self, key, path, job, owner, text, voice_id, model_id, base_tag=None):
+    def _synthesize(self, key, path, job, owner, text, voice_id, model_id, base_tag=_CONFIGURED):
         part = '%s.%d-%s.part' % (path[:-len('.mp3')], os.getpid(), uuid.uuid4().hex[:8])
         error = None
         try:
             with open(part, 'wb') as out:
                 os.ftruncate(owner, 0)
                 os.pwrite(owner, os.path.basename(part).encode('ascii'), 0)
-                extra = {} if base_tag is None else {'base_tag': base_tag}
+                # an engine without base tags gets none; any snapshot, None included, is passed on
+                extra = {} if base_tag is _CONFIGURED else {'base_tag': base_tag}
                 stream = getattr(self._engine, 'stream', None)
                 if callable(stream):
                     chunks = stream(text, voice_id, model_id, **extra)
