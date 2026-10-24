@@ -95,7 +95,9 @@ class LanguageConfigTests(unittest.TestCase):
         langs = self.load({
             'zh': {'label': '中文', 'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'zho', 'subtitle': 'zh'},
             'en': {'label': 'English', 'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'eng', 'subtitle': 'Chinese!'},
+            'ja': {'label': '日本語', 'voice_id': '0zi0ae2RvBmXaahlPt2n', 'stt': 'jpn', 'subtitle': 'en'},
         })
+        self.assertIsNone(langs['ja']['subtitle'], 'only Chinese subtitles are supported for now')
         self.assertIsNone(langs['zh']['subtitle'], 'spoken and gloss marks must differ')
         self.assertIsNone(langs['en']['subtitle'])
         self.assertEqual(self.load({'x': {'voice_id': 'K7JxslCTelez3qaKj5SJ', 'stt': 'automatic'}}), {})
@@ -122,6 +124,13 @@ class PromptTests(unittest.TestCase):
         self.assertIn('只给她看，不会念出来', first)
         later = brain.format_utterance('嗯', False, 'English', pairs=('EN', 'ZH'))
         self.assertIn('每句写 EN: 和 ZH: 两行', later, 'the chat history around a call is Chinese')
+        for label, mark, own in (('日本語', 'JA', 'ゆっくりでいいよ。'), ('Русский', 'RU', 'Не торопись.')):
+            prompt = brain.format_utterance('早', True, label, pairs=(mark, 'ZH'))
+            self.assertNotIn('Take your time.', prompt, 'no English example in a %s call' % label)
+            self.assertIn('%s: [softly] %s\nZH: 慢慢来。' % (mark, own), prompt)
+        other = brain.format_utterance('早', True, 'Deutsch', pairs=('DE', 'ZH'))
+        self.assertNotIn('Take your time.', other)
+        self.assertIn('DE: （一句Deutsch）\nZH: （这句的中文意思）', other, 'other languages: structure only')
         self.assertEqual(brain.format_utterance('嗯', False, 'English'),
                          '〔电话〕她刚在电话里说：「嗯」（用English回答）', 'one-language calls are unchanged')
 

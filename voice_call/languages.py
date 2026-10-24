@@ -12,7 +12,8 @@ Android fallback recognizer's locale) and fallback (what he says when his reply
 fails) are optional. A malformed entry is skipped, never fatal. No entries
 means today's single Chinese call with the default voice.
 
-A bilingual call ("English, Chinese subtitles") adds subtitle: "zh". He then
+A bilingual call ("English, Chinese subtitles") adds subtitle: "zh" (the only
+subtitle language for now: prompt, gloss and page are written for Chinese). He then
 writes every sentence as a pair of marked lines, the spoken line and its
 gloss (see voice_call.pairs); only the spoken line is voiced, the gloss is only
 shown. marker is the spoken line's mark (default: the code upper-cased, EN /
@@ -31,7 +32,7 @@ CONFIG_KEY = 'VOICE_CALL_LANGUAGES'
 _CODE = re.compile(r'^[a-z][a-z0-9-]{0,15}$')
 _VOICE = re.compile(r'^[A-Za-z0-9]{8,64}$')
 _STT = re.compile(r'^([a-z]{3}|auto)$')
-_SUBTITLE = re.compile(r'^[a-z]{2,3}$')
+SUBTITLE_LANGUAGES = ('zh',)  # the prompt, the gloss and the page toggle are written for Chinese
 _MARKER = re.compile(r'^[A-Z]{2,3}$')
 _SPEECH = re.compile(r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$')
 
@@ -62,7 +63,7 @@ def load(get=None):
         speech = entry.get('speech')
         fallback = entry.get('fallback')
         subtitle = entry.get('subtitle')
-        subtitle = subtitle if isinstance(subtitle, str) and _SUBTITLE.match(subtitle) else None
+        subtitle = subtitle if subtitle in SUBTITLE_LANGUAGES else None
         marker = entry.get('marker')
         if not (isinstance(marker, str) and _MARKER.match(marker)):
             marker = code.split('-')[0].upper()

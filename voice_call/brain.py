@@ -48,9 +48,25 @@ PAIR_STYLE = (
     '这通电话有中文字幕：她听你说{label}，屏幕上看中文。每一句写成两行，一句一组：\n'
     '{m}: 你要说出口的{label}（语气标签只放在这一行）\n'
     '{g}: 这句的中文意思（只给她看，不会念出来）\n'
-    '比如：\n{m}: [softly] Take your time.\n{g}: 慢慢来。\n'
+    '比如：\n{example}\n'
     '不要把两种语言写在同一行，也不要写别的格式。她说什么语言都行，你都用{label}回答。'
 )
+# The example is in the call's own language: a few-shot line in another language is
+# imitated more readily than the instruction to answer in this one.
+PAIR_EXAMPLES = {
+    'EN': '[softly] Take your time.',
+    'JA': '[softly] ゆっくりでいいよ。',
+    'RU': '[softly] Не торопись.',
+}
+PAIR_GLOSS_EXAMPLE = '慢慢来。'
+
+
+def pair_example(marker, gloss_marker, label):
+    spoken = PAIR_EXAMPLES.get(marker)
+    if spoken:
+        return '%s: %s\n%s: %s' % (marker, spoken, gloss_marker, PAIR_GLOSS_EXAMPLE)
+    # no fixed sentence for other languages: only the structure
+    return '%s: （一句{label}）\n%s: （这句的中文意思）'.replace('{label}', label) % (marker, gloss_marker)
 PAIR_REMINDER = '（用{label}回答，每句写 {m}: 和 {g}: 两行）'
 
 
@@ -65,7 +81,8 @@ def format_utterance(text, first_turn, language=None, opening=None, pairs=None):
         line += '（用%s回答）' % language  # every turn: the chat history around it is Chinese
     if first_turn:
         if language and pairs:
-            style = phone_style() + '\n' + PAIR_STYLE.format(label=language, m=pairs[0], g=pairs[1])
+            style = phone_style() + '\n' + PAIR_STYLE.format(
+                label=language, m=pairs[0], g=pairs[1], example=pair_example(pairs[0], pairs[1], language))
         else:
             style = phone_style() + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
         if opening:
