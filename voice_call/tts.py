@@ -17,7 +17,7 @@ import uuid
 import urllib.error
 import urllib.request
 
-from voice_call.tags import speakable
+from voice_call.tags import clean_base_tag, voice_text
 
 STREAM_CHUNK = 4096
 FOLLOW_POLL_S = 0.02  # how often another worker's reader checks for new bytes
@@ -73,22 +73,26 @@ def _urllib_open_stream(url, headers, body, timeout):
     return resp.status, chunks()
 
 
-SPEED_CONFIG_KEY = 'VOICE_CALL_SPEED'
-DEFAULT_SPEED = 0.9  # a little slower than the voice's own pace (owner, 2026-10-24)
-SPEED_MIN, SPEED_MAX = 0.7, 1.2  # what ElevenLabs accepts
+BASE_TAG_CONFIG_KEY = 'VOICE_CALL_BASE_TAG'
+# Eleven v4 ignores voice_settings.speed (measured: 1.0, 0.8 and 0.7 gave the
+# same length) but follows a descriptive delivery tag: this one made the same
+# line ~14% longer and lower. Owner, 2026-10-24: a little slower and lower.
+DEFAULT_BASE_TAG = 'speaking slowly, in a low calm voice'
 
 
-def configured_speed():
-    """Runtime config VOICE_CALL_SPEED clamped to ElevenLabs' range; DEFAULT_SPEED if unset or unreadable."""
+def configured_base_tag():
+    """Runtime config VOICE_CALL_BASE_TAG: unset (or unreadable) = DEFAULT_BASE_TAG,
+    "none" = no base tag, anything else must be plain lowercase words."""
     try:
         import config_store
-        raw = str(config_store.get(SPEED_CONFIG_KEY, '') or '').strip()
-        value = float(raw) if raw else DEFAULT_SPEED
+        raw = str(config_store.get(BASE_TAG_CONFIG_KEY, '') or '').strip()
     except Exception:
-        value = DEFAULT_SPEED
-    if value != value:  # NaN
-        value = DEFAULT_SPEED
-    return round(min(SPEED_MAX, max(SPEED_MIN, value)), 2)
+        raw = ''
+    if not raw:
+        return DEFAULT_BASE_TAG
+    if raw.lower() == 'none':
+        return None
+    return clean_base_tag(raw)
 
 
 class ElevenLabsTTS:
@@ -97,12 +101,12 @@ class ElevenLabsTTS:
 
     def __init__(self, voice_id=DEFAULT_VOICE_ID, model_id=DEFAULT_MODEL_ID,
                  api_key=None, post=_urllib_post, timeout=30, open_stream=_urllib_open_stream,
-                 speed=configured_speed):
-        """``model_id`` and ``speed`` are values, or callables read on every request so a
+                 base_tag=configured_base_tag):
+        """``model_id`` and ``base_tag`` are values, or callables read on every request so a
         runtime-config change takes effect without a restart."""
         self.voice_id = voice_id
         self._model_id = model_id
-        self._speed = speed
+        self._base_tag = base_tag
         self._api_key = api_key
         self._post = post
         self._open_stream = open_stream
@@ -114,34 +118,34 @@ class ElevenLabsTTS:
         return model or DEFAULT_MODEL_ID
 
     @property
-    def speed(self):
-        return self._speed() if callable(self._speed) else self._speed
+    def base_tag(self):
+        return self._base_tag() if callable(self._base_tag) else self._base_tag
 
     def api_key(self):
         return self._api_key if self._api_key is not None else read_env_value('ELEVENLABS_API_KEY')
 
-    def _request(self, text, model_id, speed=None):
+    def _request(self, text, model_id, base_tag=None):
         key = self.api_key()
         if not key:
             raise TTSError('ELEVENLABS_API_KEY is not configured')
         model = model_id or self.model_id
         body = json.dumps({
-            'text': speakable(text, model),  # his audio tags, filtered for this model
+            # his audio tags filtered for this model, led by the base delivery tag
+            'text': voice_text(text, model, self.base_tag if base_tag is None else base_tag),
             'model_id': model,
             'voice_settings': {  # no 'style': v4 does not take it
                 'stability': 0.5,
                 'similarity_boost': 0.75,
                 'use_speaker_boost': True,
-                'speed': self.speed if speed is None else speed,
             },
         }).encode('utf-8')
         headers = {'xi-api-key': key, 'content-type': 'application/json', 'accept': 'audio/mpeg'}
         return headers, body
 
-    def synthesize(self, text, voice_id=None, model_id=None, speed=None):
+    def synthesize(self, text, voice_id=None, model_id=None, base_tag=None):
         """Speak ``text`` with ``voice_id`` (the call language's voice) or the default voice,
-        in ``model_id`` and at ``speed`` (the caller's snapshot) or the configured ones."""
-        headers, body = self._request(text, model_id, speed)
+        in ``model_id`` with ``base_tag`` (the caller's snapshot) or the configured ones."""
+        headers, body = self._request(text, model_id, base_tag)
         try:
             status, data = self._post(self.URL.format(voice_id=voice_id or self.voice_id), headers, body, self._timeout)
         except Exception as exc:
@@ -152,9 +156,9 @@ class ElevenLabsTTS:
             raise TTSError('tts returned no audio')
         return data
 
-    def stream(self, text, voice_id=None, model_id=None, speed=None):
+    def stream(self, text, voice_id=None, model_id=None, base_tag=None):
         """Like synthesize, but yield the mp3 as ElevenLabs produces it."""
-        headers, body = self._request(text, model_id, speed)
+        headers, body = self._request(text, model_id, base_tag)
         try:
             status, chunks = self._open_stream(
                 self.STREAM_URL.format(voice_id=voice_id or self.voice_id), headers, body, self._timeout)
@@ -230,14 +234,12 @@ class CachedTTS:
         self._lock = threading.Lock()
         self._running = {}  # key -> _Synthesis this process owns
 
-    def key(self, text, voice_id=None, model_id=None, speed=None):
+    def key(self, text, voice_id=None, model_id=None, base_tag=None):
         model = model_id or self._engine.model_id
         # Keyed on what the voice is actually sent: lines that differ only in
-        # tags the model would drop share one synthesis.
-        parts = [voice_id or self._engine.voice_id, model, speakable(text, model)]
-        if speed is not None:
-            parts.append('speed=%.2f' % speed)  # a new pace is a new recording
-        raw = '\0'.join(parts)
+        # tags the model would drop share one synthesis, and a new base
+        # delivery is a new recording.
+        raw = '\0'.join((voice_id or self._engine.voice_id, model, voice_text(text, model, base_tag)))
         return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
     def path(self, key):
@@ -258,8 +260,8 @@ class CachedTTS:
         """Return (key, mp3 chunks): from disk, from the synthesis already under way
         (in this worker or another), or a new one this worker owns."""
         model_id = self._engine.model_id  # read once: the model can change live between key and request
-        speed = getattr(self._engine, 'speed', None)  # likewise
-        key = self.key(text, voice_id, model_id, speed)
+        base_tag = getattr(self._engine, 'base_tag', None)  # likewise
+        key = self.key(text, voice_id, model_id, base_tag)
         path = self.path(key)
         with self._lock:
             job = self._running.get(key)
@@ -277,7 +279,7 @@ class CachedTTS:
                 return key, iter([cached])
             job = _Synthesis()
             self._running[key] = job
-        self._spawn(lambda: self._synthesize(key, path, job, owner, text, voice_id, model_id, speed))
+        self._spawn(lambda: self._synthesize(key, path, job, owner, text, voice_id, model_id, base_tag))
         return key, job.read()
 
     def warm(self, text, voice_id=None):
@@ -376,14 +378,14 @@ class CachedTTS:
                 raise TTSError('tts synthesis ended without audio')
             time.sleep(self._poll_s)
 
-    def _synthesize(self, key, path, job, owner, text, voice_id, model_id, speed=None):
+    def _synthesize(self, key, path, job, owner, text, voice_id, model_id, base_tag=None):
         part = '%s.%d-%s.part' % (path[:-len('.mp3')], os.getpid(), uuid.uuid4().hex[:8])
         error = None
         try:
             with open(part, 'wb') as out:
                 os.ftruncate(owner, 0)
                 os.pwrite(owner, os.path.basename(part).encode('ascii'), 0)
-                extra = {} if speed is None else {'speed': speed}
+                extra = {} if base_tag is None else {'base_tag': base_tag}
                 stream = getattr(self._engine, 'stream', None)
                 if callable(stream):
                     chunks = stream(text, voice_id, model_id, **extra)
