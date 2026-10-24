@@ -2496,8 +2496,20 @@ def _hot_native_tail_proof(
         registry_offset = int(registry.get('scan_offset'))
     except (TypeError, ValueError):
         return {'status': 'missing', 'reason': 'native_tail_offset_missing'}
-    if last_good_end <= 0 or registry_offset != last_good_end:
+    if last_good_end <= 0:
         return {'status': 'missing', 'reason': 'native_tail_offset_mismatch'}
+    wake_skip_count = 0
+    if registry_offset != last_good_end:
+        # A unified Wake round runs on this same resident after the last Chat
+        # turn and CAS-skips its provider-only range. The model saw it
+        # natively, so the Chat tail is still live when the committed skips
+        # cover the gap exactly.
+        chain_end, wake_skip_count = _hot_wake_skip_chain_end(
+            plan,
+            start_offset=last_good_end,
+        )
+        if wake_skip_count <= 0 or chain_end != registry_offset:
+            return {'status': 'missing', 'reason': 'native_tail_offset_mismatch'}
 
     try:
         conn = open_continuity_read_only(_production_continuity_store_path(plan))
@@ -2679,7 +2691,72 @@ def _hot_native_tail_proof(
         'user_message_id': user_message_id,
         'assistant_message_id': assistant_message_id,
         'transcript_end_offset': last_good_end,
+        'wake_skip_count': wake_skip_count,
     }
+
+
+def _hot_wake_skip_chain_end(
+    plan: DailyTurnPlan,
+    *,
+    start_offset: int,
+) -> tuple[Optional[int], int]:
+    """Follow committed Wake transcript skips contiguously from ``start_offset``.
+
+    Returns ``(end_offset, skip_count)``; ``(None, 0)`` when the chain is
+    unreadable or ambiguous.
+    """
+    from continuity.store import open_continuity_read_only
+
+    try:
+        conn = open_continuity_read_only(_production_continuity_store_path(plan))
+        try:
+            rows = conn.execute(
+                'SELECT cache_info FROM wake_log '
+                'WHERE context_id=? AND context_epoch=? AND resident_generation=? '
+                'ORDER BY id ASC',
+                (
+                    int(plan.context_id), int(plan.context_epoch),
+                    int(plan.resident_generation),
+                ),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return None, 0
+
+    by_start: dict[int, list[int]] = {}
+    for row in rows:
+        try:
+            cache = json.loads(str(row[0] or ''))
+        except (TypeError, ValueError):
+            continue
+        skip = cache.get('transcript_skip') if isinstance(cache, dict) else None
+        if not isinstance(skip, dict) or skip.get('skipped_provider_round') is not True:
+            continue
+        try:
+            if (
+                int(skip.get('context_id')) != int(plan.context_id)
+                or int(skip.get('resident_generation'))
+                    != int(plan.resident_generation)
+            ):
+                continue
+            start = int(skip.get('start_offset'))
+            end = int(skip.get('end_offset'))
+        except (TypeError, ValueError):
+            continue
+        if start < int(start_offset) or end <= start:
+            continue
+        by_start.setdefault(start, []).append(end)
+
+    cursor = int(start_offset)
+    count = 0
+    while cursor in by_start:
+        ends = set(by_start.pop(cursor))
+        if len(ends) != 1:
+            return None, 0
+        cursor = ends.pop()
+        count += 1
+    return cursor, count
 
 
 def _hot_live_identity_decision(
