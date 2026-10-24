@@ -7140,6 +7140,8 @@ class ContextPlanConsumerTests(unittest.TestCase):
         user_offset=100,
         last_good_end=400,
         duplicate_user=False,
+        registry_offset=None,
+        wake_skips=(),
     ):
         from continuity.sources import evidence_ref
 
@@ -7223,6 +7225,29 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 in mapping_rows
             ),
         )
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS wake_log ('
+            'id INTEGER PRIMARY KEY AUTOINCREMENT, cache_info TEXT, '
+            'context_id INTEGER, context_epoch INTEGER, resident_generation INTEGER)'
+        )
+        for skip in wake_skips:
+            start, end = skip[:2]
+            generation = skip[2] if len(skip) > 2 else 1
+            conn.execute(
+                'INSERT INTO wake_log '
+                '(cache_info, context_id, context_epoch, resident_generation) '
+                'VALUES (?,?,?,?)',
+                (
+                    json.dumps({'transcript_skip': {
+                        'context_id': 7,
+                        'resident_generation': generation,
+                        'start_offset': start,
+                        'end_offset': end,
+                        'skipped_provider_round': True,
+                    }}),
+                    7, 3, generation,
+                ),
+            )
         conn.commit()
         row = conn.execute(
             'SELECT * FROM chat_messages WHERE id=?', (user_id,)
@@ -7257,7 +7282,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
         registry = {
             'scan_status': 'READY',
             'last_mapped_message_id': assistant_id,
-            'scan_offset': last_good_end,
+            'scan_offset': (
+                last_good_end if registry_offset is None else registry_offset
+            ),
             'claude_session_id': 'session-1',
         }
         return db, plan, frozen, registry
@@ -7321,6 +7348,39 @@ class ContextPlanConsumerTests(unittest.TestCase):
             conn.close()
         finally:
             os.unlink(db)
+
+    def test_native_tail_passes_across_committed_wake_skip(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_skips=((400, 520), (520, 650)),
+        )
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['wake_skip_count'], 2)
+
+    def test_native_tail_offset_gap_without_wake_skip_fails_closed(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
+
+    def test_native_tail_wake_skip_must_cover_whole_gap(self):
+        for skips in (
+            ((400, 520),),
+            ((410, 650),),
+            ((400, 650, 2),),
+            ((400, 520), (400, 600), (520, 650)),
+        ):
+            with self.subTest(skips=skips):
+                result = self._native_tail_result(
+                    assistant_offsets=(200,),
+                    registry_offset=650,
+                    wake_skips=skips,
+                )
+                self.assertEqual(result['status'], 'missing')
+                self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
 
     def test_native_tail_assistant_zero_is_incomplete(self):
         result = self._native_tail_result(assistant_offsets=())
