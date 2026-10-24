@@ -21,6 +21,7 @@ import {
   type CallLanguage,
   type CallLine,
   type VoiceCall,
+  displayLineText,
 } from '../lib/voiceCall';
 import './CallScreen.css';
 
@@ -636,7 +637,7 @@ export function CallScreen() {
         <div className="vstack vstack-10">
           {lines.map((line) => (
             <div key={line.seq} className={`call-line call-line--${line.speaker}`}>
-              <span className="call-bubble">{line.text}</span>
+              <span className="call-bubble">{displayLineText(line)}</span>
               {line.speaker === 'him' && voiceless[line.seq] ? <span className="call-voiceless">仅文字</span> : null}
             </div>
           ))}

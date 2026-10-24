@@ -8,14 +8,30 @@ import json
 import threading
 import urllib.request
 
+from voice_call.tags import PROMPT_HINT
+
 APP_BASE = 'http://127.0.0.1:5050'
 GATEWAY_BASE = 'http://127.0.0.1:5051'
 
+# The model reads this at the start of each call (the chat page never shows
+# call turns). Runtime config VOICE_CALL_PHONE_STYLE replaces it; empty = this.
+PHONE_STYLE_CONFIG_KEY = 'VOICE_CALL_PHONE_STYLE'
 PHONE_STYLE = (
-    '〔电话接通〕现在是在打电话，不是打字聊天。\n'
-    '用说话的口气，一轮两三句短句，说完就停下等她。\n'
-    '一句一行；不要用列表、括号动作描写、表情符号或 Markdown，它们会被念出来。'
+    '〔电话〕你们正在打电话，她听得见你的声音。\n'
+    '像平常跟她说话那样开口：句子短，一次两三句，说完就停下来听她说。\n'
+    + PROMPT_HINT + '停顿用省略号……\n'
+    '别写圆括号里的动作描写、表情符号、列表或 Markdown，它们会被原样念出来。'
 )
+
+
+def phone_style():
+    """The configured call prompt, or PHONE_STYLE (also when config cannot be read)."""
+    try:
+        import config_store
+        configured = str(config_store.get(PHONE_STYLE_CONFIG_KEY, '') or '').strip()
+    except Exception:
+        configured = ''
+    return configured or PHONE_STYLE
 
 
 class BrainError(Exception):
@@ -35,7 +51,7 @@ def format_utterance(text, first_turn, language=None, opening=None):
     if language:
         line += '（用%s回答）' % language  # every turn: the chat history around it is Chinese
     if first_turn:
-        style = PHONE_STYLE + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
+        style = phone_style() + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
         if opening:
             style += '\n' + CALLER_STYLE.format(opening.strip())
         return style + '\n' + line
@@ -104,8 +120,9 @@ class _HTTPStream:
 class CancellableReply:
     """An iterable reply whose close aborts only its underlying stream."""
 
-    def __init__(self, stream):
+    def __init__(self, stream, message_id=None):
         self._stream = stream
+        self.message_id = message_id  # her chat message this reply answers
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._closed = False
@@ -152,7 +169,7 @@ class ChatPipelineBrain:
 
     def start_reply(self, text, first_turn, language=None, opening=None):
         message_id = self._send_message(format_utterance(text, first_turn, language, opening))
-        return CancellableReply(self._stream_reply(message_id))
+        return CancellableReply(self._stream_reply(message_id), message_id=message_id)
 
     def reply(self, text, first_turn, language=None, opening=None):
         handle = self.start_reply(text, first_turn, language, opening)

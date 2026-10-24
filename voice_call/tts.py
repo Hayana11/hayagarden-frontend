@@ -17,6 +17,8 @@ import uuid
 import urllib.error
 import urllib.request
 
+from voice_call.tags import speakable
+
 STREAM_CHUNK = 4096
 FOLLOW_POLL_S = 0.02  # how often another worker's reader checks for new bytes
 
@@ -98,9 +100,10 @@ class ElevenLabsTTS:
         key = self.api_key()
         if not key:
             raise TTSError('ELEVENLABS_API_KEY is not configured')
+        model = model_id or self.model_id
         body = json.dumps({
-            'text': text,
-            'model_id': model_id or self.model_id,
+            'text': speakable(text, model),  # his audio tags, filtered for this model
+            'model_id': model,
             'voice_settings': {  # no 'style': v4 does not take it
                 'stability': 0.5,
                 'similarity_boost': 0.75,
@@ -203,7 +206,10 @@ class CachedTTS:
         self._running = {}  # key -> _Synthesis this process owns
 
     def key(self, text, voice_id=None, model_id=None):
-        raw = '\0'.join((voice_id or self._engine.voice_id, model_id or self._engine.model_id, text))
+        model = model_id or self._engine.model_id
+        # Keyed on what the voice is actually sent: lines that differ only in
+        # tags the model would drop share one synthesis.
+        raw = '\0'.join((voice_id or self._engine.voice_id, model, speakable(text, model)))
         return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
     def path(self, key):

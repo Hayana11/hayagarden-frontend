@@ -114,6 +114,10 @@ export interface ChatMsg {
   createdAt: string;
   /** Chat day key using 04:00 Asia/Shanghai boundary */
   chatDay: string;
+  /** A call's record line ("ᯅ 通话时长 …"): the call it opens. Its turns are folded away server-side. */
+  callId?: string;
+  /** Who placed that call; the card sits on that side. */
+  callCaller?: 'her' | 'fyodor';
 }
 
 export interface ChatMessageRow {
@@ -133,6 +137,9 @@ export interface ChatMessageRow {
   choices?: string | null;
   display_segments?: string | null;
   created_at?: string | null;
+  call_id?: string | null;
+  call_part?: string | null;
+  call_caller?: string | null;
 }
 
 export function normalizeChatAttachments(value: unknown): ChatAttachment[] {
@@ -310,7 +317,15 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
     dateKey: created.slice(0, 10),
     createdAt: created,
     chatDay: chatDayKeyFromLocalTs(created),
+    ...(row.call_part === 'record' && row.call_id
+      ? { callId: row.call_id, callCaller: row.call_caller === 'fyodor' ? 'fyodor' : 'her' }
+      : {}),
   };
+}
+
+/** A call record line's text for its card: the leading ᯅ glyph becomes the card's phone icon. */
+export function callRecordLabel(text: string): string {
+  return text.replace(/^\s*ᯅ\s*/, '').trim() || '通话';
 }
 
 export function fmtTokens(n: number): string {
