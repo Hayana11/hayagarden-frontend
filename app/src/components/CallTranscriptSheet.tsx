@@ -3,7 +3,8 @@
 // history the model reads); this sheet reads the call's own lines instead.
 // Chrome 78: no flex `gap`, no `inset` shorthand.
 import { useEffect, useState } from 'react';
-import { displayLineText, voiceCall, type CallLine, type VoiceCall } from '../lib/voiceCall';
+import { displayLineText, hasGloss, subtitleToggleLabel, voiceCall, type CallLine, type VoiceCall } from '../lib/voiceCall';
+import { useSubtitleMode } from '../lib/useSubtitleMode';
 import { FONT_CN } from '../lib/typography';
 
 type Props = {
@@ -17,6 +18,7 @@ type Loaded = { call: VoiceCall | null; lines: CallLine[] };
 export function CallTranscriptSheet({ callId, title, onClose }: Props) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [failed, setFailed] = useState(false);
+  const [subtitleMode, toggleSubtitleMode] = useSubtitleMode();
 
   useEffect(() => {
     let alive = true;
@@ -79,7 +81,16 @@ export function CallTranscriptSheet({ callId, title, onClose }: Props) {
                   background: line.speaker === 'her' ? 'var(--rosebg)' : 'var(--bg)',
                 }}
               >
-                {displayLineText(line)}
+                {displayLineText(line, subtitleMode)}
+                {hasGloss(line) ? (
+                  <button
+                    type="button"
+                    onClick={toggleSubtitleMode}
+                    style={{ display: 'block', marginTop: 6, padding: 0, border: 'none', background: 'transparent', fontSize: 12, color: 'var(--ghost)', cursor: 'pointer' }}
+                  >
+                    {subtitleToggleLabel(subtitleMode)}
+                  </button>
+                ) : null}
               </span>
             </div>
           ))}

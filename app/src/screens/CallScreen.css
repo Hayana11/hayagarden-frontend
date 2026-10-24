@@ -95,6 +95,17 @@
   border-bottom-right-radius: 6px;
 }
 
+.call-subtitle-toggle {
+  display: block;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  color: var(--color-text-faint);
+  cursor: pointer;
+}
+
 .call-voiceless {
   margin-top: 3px;
   font-size: 11px;

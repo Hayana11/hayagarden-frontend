@@ -43,15 +43,39 @@ LANGUAGE_STYLE = '这通电话用{0}：她说{0}，你也只用{0}说话。'
 
 CALLER_STYLE = '这通电话是你主动打给她的；她接起来时你先说了：「{0}」'
 
+# A bilingual call (see voice_call.pairs): the spoken line and its gloss, as marked pairs.
+PAIR_STYLE = (
+    '这通电话有中文字幕：她听你说{label}，屏幕上看中文。每一句写成两行，一句一组：\n'
+    '{m}: 你要说出口的{label}（语气标签只放在这一行）\n'
+    '{g}: 这句的中文意思（只给她看，不会念出来）\n'
+    '比如：\n{example}\n'
+    '不要把两种语言写在同一行，也不要写别的格式。她说什么语言都行，你都用{label}回答。'
+)
+# The example shows only the structure. No fixed sentence: a few-shot line in another
+# language is imitated more readily than the instruction, and the marker is only a
+# protocol token (configurable), so it cannot tell which language the call is in.
+def pair_example(marker, gloss_marker, label):
+    return '%s: [softly] （一句%s）\n%s: （这句的中文意思）' % (marker, label, gloss_marker)
 
-def format_utterance(text, first_turn, language=None, opening=None):
+
+PAIR_REMINDER = '（用{label}回答，每句写 {m}: 和 {g}: 两行）'
+
+
+def format_utterance(text, first_turn, language=None, opening=None, pairs=None):
     """``language`` is the call language's label (日本語, English…); None is the default call.
-    ``opening`` is his first line when he placed the call (given on the first turn only)."""
+    ``opening`` is his first line when he placed the call (given on the first turn only).
+    ``pairs`` is (spoken mark, gloss mark) in a bilingual call, e.g. ('EN', 'ZH')."""
     line = '〔电话〕她刚在电话里说：「%s」' % text.strip()
-    if language:
+    if language and pairs:
+        line += PAIR_REMINDER.format(label=language, m=pairs[0], g=pairs[1])
+    elif language:
         line += '（用%s回答）' % language  # every turn: the chat history around it is Chinese
     if first_turn:
-        style = phone_style() + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
+        if language and pairs:
+            style = phone_style() + '\n' + PAIR_STYLE.format(
+                label=language, m=pairs[0], g=pairs[1], example=pair_example(pairs[0], pairs[1], language))
+        else:
+            style = phone_style() + ('\n' + LANGUAGE_STYLE.format(language) if language else '')
         if opening:
             style += '\n' + CALLER_STYLE.format(opening.strip())
         return style + '\n' + line
@@ -167,12 +191,12 @@ class ChatPipelineBrain:
         self._send_message = send_message
         self._stream_reply = stream_reply
 
-    def start_reply(self, text, first_turn, language=None, opening=None):
-        message_id = self._send_message(format_utterance(text, first_turn, language, opening))
+    def start_reply(self, text, first_turn, language=None, opening=None, pairs=None):
+        message_id = self._send_message(format_utterance(text, first_turn, language, opening, pairs))
         return CancellableReply(self._stream_reply(message_id), message_id=message_id)
 
-    def reply(self, text, first_turn, language=None, opening=None):
-        handle = self.start_reply(text, first_turn, language, opening)
+    def reply(self, text, first_turn, language=None, opening=None, pairs=None):
+        handle = self.start_reply(text, first_turn, language, opening, pairs)
         try:
             yield from handle
         finally:

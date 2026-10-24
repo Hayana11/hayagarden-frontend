@@ -9,6 +9,7 @@ import { HttpError } from '../lib/http';
 import { nativeSpeech, type SpeechEvent, type SpeechStatus } from '../lib/nativeSpeech';
 import { nativeVoice, type VoiceEvent } from '../lib/nativeVoice';
 import { nativeCallAudio } from '../lib/nativeCallAudio';
+import { useSubtitleMode } from '../lib/useSubtitleMode';
 import { ROUTES } from '../navigation';
 import {
   FINAL_CALL_STATES,
@@ -23,6 +24,8 @@ import {
   type CallLine,
   type VoiceCall,
   displayLineText,
+  hasGloss,
+  subtitleToggleLabel,
 } from '../lib/voiceCall';
 import './CallScreen.css';
 
@@ -78,6 +81,7 @@ export function CallScreen() {
   // Canary shell: his voice plays natively (earpiece by default); the button follows the shell's real route.
   const [nativeAudio] = useState(() => nativeCallAudio.supported());
   const [speaker, setSpeaker] = useState(false);
+  const [subtitleMode, toggleSubtitleMode] = useSubtitleMode();
   const [languages, setLanguages] = useState<CallLanguage[]>([]);
   const [language, setLanguage] = useState('');
 
@@ -677,7 +681,14 @@ export function CallScreen() {
         <div className="vstack vstack-10">
           {lines.map((line) => (
             <div key={line.seq} className={`call-line call-line--${line.speaker}`}>
-              <span className="call-bubble">{displayLineText(line)}</span>
+              <span className="call-bubble">
+                {displayLineText(line, subtitleMode)}
+                {hasGloss(line) ? (
+                  <button type="button" className="call-subtitle-toggle" onClick={toggleSubtitleMode}>
+                    {subtitleToggleLabel(subtitleMode)}
+                  </button>
+                ) : null}
+              </span>
               {line.speaker === 'him' && voiceless[line.seq] ? <span className="call-voiceless">仅文字</span> : null}
             </div>
           ))}
