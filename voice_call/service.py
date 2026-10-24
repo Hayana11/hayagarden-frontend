@@ -7,6 +7,7 @@ dropped from the call (it stays in chat history, it is just not spoken).
 """
 import http.client
 import itertools
+import logging
 import threading
 import time
 import uuid
@@ -17,6 +18,8 @@ from voice_call.brain import BrainError
 from voice_call.sentences import SentenceSplitter
 from voice_call.stt import STTError
 from voice_call.tts import TTSError
+
+_LOG = logging.getLogger('voice_call')
 
 HER = 'her'
 HIM = 'him'
@@ -107,8 +110,9 @@ def _spawn(target):
 
 class CallService:
     def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None, stt=None,
-                 schedule=_schedule, languages=None):
+                 schedule=_schedule, languages=None, on_turn=None):
         self._store = store
+        self._on_turn = on_turn  # (call_id, chat message id of her turn): lets the chat page fold it
         self._languages = languages or call_languages.load  # read per call: config edits apply live
         self._tts = tts
         self._stt = stt
@@ -503,6 +507,7 @@ class CallService:
             start_reply = getattr(self._brain, 'start_reply', None)
             if callable(start_reply):
                 handle = start_reply(text, first_turn, **extra)
+                self._note_turn(call_id, getattr(handle, 'message_id', None))
                 if not self._register_brain_handle(call_id, generation, handle):
                     return
                 stream = handle
@@ -523,6 +528,15 @@ class CallService:
         finally:
             if handle is not None:
                 self._unregister_brain_handle(call_id, generation, handle)
+
+    def _note_turn(self, call_id, message_id):
+        """Best effort: a failure only leaves this turn visible on the chat page."""
+        if self._on_turn is None or message_id is None:
+            return
+        try:
+            self._on_turn(call_id, message_id)
+        except Exception:
+            _LOG.warning('voice call turn %s not mapped to call %s', message_id, call_id, exc_info=True)
 
     def _emit(self, call_id, generation, sentences):
         for sentence in sentences:

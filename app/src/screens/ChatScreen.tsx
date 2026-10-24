@@ -56,6 +56,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
   type MemoryRecall,
+  callRecordLabel,
 } from '../lib/chat';
 import { imageUrlsFromToolValue, type ChatMediaItem } from '../lib/chatMedia';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
@@ -163,6 +164,7 @@ import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typo
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
 import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
+import { CallTranscriptSheet } from '../components/CallTranscriptSheet';
 import { createTypingPulse } from '../lib/typingPulse';
 import {
   resizeChatTextarea,
@@ -933,6 +935,7 @@ export function ChatScreen() {
     selectedModel?: string | null;
   } | null>(null);
   const [gallery, setGallery] = useState<{ items: ChatMediaItem[]; currentIndex: number } | null>(null);
+  const [openCall, setOpenCall] = useState<{ id: string; title: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
   const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
   const [txWin, setTxWin] = useState<TranscriptWindow>(() => warmSnapshot ? { ...warmSnapshot.txWin } : { start: 0, end: 0 });
@@ -2477,6 +2480,29 @@ export function ChatScreen() {
         </div>
       );
     }
+  /** A call's record line: tap to read everything said in that call. Sits on the caller's side. */
+  function renderCallRecord(m: ChatMsg) {
+    const label = callRecordLabel(m.text);
+    const mine = m.callCaller !== 'fyodor';
+    return (
+      <div id={`msg-${m.id}`} className="chat-msg vstack vstack-6" style={{ alignItems: mine ? 'flex-end' : 'flex-start' }}>
+        <button
+          type="button"
+          data-testid="call-record-card"
+          data-call-id={m.callId}
+          onClick={() => setOpenCall({ id: m.callId as string, title: label })}
+          style={{ display: 'flex', alignItems: 'center', border: 'none', cursor: 'pointer', padding: '9px 14px', borderRadius: 16, background: mine ? 'var(--rosebg)' : 'var(--card)', color: 'var(--ink)', fontFamily: FONT_CN, fontSize: 14, boxShadow: '0 4px 14px var(--shadow2)' }}
+        >
+          <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, flexShrink: 0 }} aria-hidden="true">
+            <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z" />
+          </svg>
+          <span>{label}</span>
+        </button>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
+      </div>
+    );
+  }
+
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
     const attachments = m.attachments?.length ? m.attachments : [
@@ -2814,6 +2840,9 @@ export function ChatScreen() {
         : null;
     }
     const { message } = entry;
+    if (message.callId) {
+      return <div key={entry.key}>{renderCallRecord(message)}</div>;
+    }
     return (
       <div key={entry.key}>
         {message.role === 'user'
@@ -3378,6 +3407,10 @@ export function ChatScreen() {
           });
         }}
       />
+
+      {openCall && (
+        <CallTranscriptSheet callId={openCall.id} title={openCall.title} onClose={() => setOpenCall(null)} />
+      )}
 
       {gallery && (
         <ChatMediaGallery

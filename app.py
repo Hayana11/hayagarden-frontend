@@ -171,6 +171,7 @@ def _create_voice_call_service():
     from voice_call.service import CallService
     from voice_call.store import CallStore
     from voice_call.stt import ElevenLabsSTT
+    from voice_call.turn_messages import mark_turn
     from voice_call.tts import MODEL_CONFIG_KEY as TTS_MODEL_CONFIG_KEY
     from voice_call.tts import CachedTTS, ElevenLabsTTS, read_env_value
 
@@ -184,6 +185,7 @@ def _create_voice_call_service():
         ChatPipelineBrain(),
         on_end=lambda summary: record_call_in_chat(DB_PATH, summary),
         stt=ElevenLabsSTT(),
+        on_turn=lambda call_id, message_id: mark_turn(DB_PATH, call_id, message_id),
     )
 
 
@@ -1135,9 +1137,17 @@ def get_chat_messages():
         has_more_before = len(rows) > limit
         rows = rows[:limit]
         rows = list(reversed(rows))
+    # A call's turns stay in the history the model reads; the chat page shows
+    # the call's record line instead (it opens GET /api/call/<id>).
+    rows = [dict(r) for r in rows]
+    try:
+        from voice_call.turn_messages import fold_call_turns
+        rows = fold_call_turns(conn, rows)
+    except Exception as exc:  # never let call folding break the chat history
+        app.logger.warning('chat messages: call folding skipped: %s', exc)
     conn.close()
     return jsonify({
-        "messages": [dict(r) for r in rows],
+        "messages": rows,
         "has_more_before": bool(has_more_before),
         "has_more_after": bool(has_more_after),
     })
