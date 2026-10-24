@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from flask import Flask
 
@@ -187,7 +188,7 @@ class TTSTests(unittest.TestCase):
             seen.update(url=url, headers=headers, body=json.loads(body), timeout=timeout)
             return 200, b'mp3'
 
-        tts = ElevenLabsTTS(api_key='k', post=post)
+        tts = ElevenLabsTTS(api_key='k', post=post, base_tag=None)
         self.assertEqual(tts.synthesize('你好'), b'mp3')
         self.assertIn('/text-to-speech/TpHHy93T39MKuyQgrXh8?', seen['url'])
         self.assertEqual(seen['headers']['xi-api-key'], 'k')
@@ -218,8 +219,64 @@ class TTSTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = CachedTTS(tts, tmp)
             key, _ = cache.get('はい')
-            self.assertEqual(key, cache.key('はい', None, 'eleven_v4'))
+            self.assertEqual(key, cache.key('はい', None, 'eleven_v4', tts.base_tag))
         self.assertEqual([body['model_id'] for body in seen], ['eleven_v4'])
+
+    def test_one_lookup_uses_one_base_tag_for_key_and_request(self):
+        tags = iter(['slowly', 'teasing'])  # the config flips between two reads
+        seen = []
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag=lambda: next(tags),
+                            open_stream=lambda url, headers, body, timeout: (
+                                seen.append(json.loads(body)) or (200, iter([b'mp3']))))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(tts, tmp)
+            key, _ = cache.get('嗯')
+            self.assertEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', 'slowly'))
+            self.assertNotEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', 'teasing'),
+                                'a new base delivery is a new recording, never the cached old one')
+        self.assertEqual([body['text'] for body in seen], ['[slowly] 嗯'])
+        self.assertNotIn('speed', seen[0]['voice_settings'], 'v4 ignores speed; it is not sent')
+
+    def test_a_disabled_base_tag_snapshot_stays_disabled(self):
+        tags = iter([None, 'slowly'])  # "none" on the first read, a real tag on the second
+        seen = []
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag=lambda: next(tags),
+                            open_stream=lambda url, headers, body, timeout: (
+                                seen.append(json.loads(body)) or (200, iter([b'mp3']))))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(tts, tmp)
+            key, _ = cache.get('嗯')
+            self.assertEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', None))
+        self.assertEqual([body['text'] for body in seen], ['嗯'],
+                         'the no-tag key must never hold audio made with a tag')
+
+    def test_an_explicit_none_means_no_base_tag(self):
+        sent = []
+        post = lambda u, h, body, t: sent.append(json.loads(body)['text']) or (200, b'x')  # noqa: E731
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag='slowly', post=post)
+        tts.synthesize('嗯', base_tag=None)
+        tts.synthesize('嗯')
+        self.assertEqual(sent, ['嗯', '[slowly] 嗯'])
+
+    def test_the_base_tag_leads_every_line_for_tag_capable_models_only(self):
+        sent = []
+        post = lambda u, h, body, t: sent.append(json.loads(body)['text']) or (200, b'x')  # noqa: E731
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag='speaking slowly', post=post)
+        tts.synthesize('[whispers] 过来一点 [gunshot]')
+        tts.synthesize('嗯', model_id='eleven_multilingual_v2')
+        ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', base_tag=None, post=post).synthesize('嗯')
+        self.assertEqual(sent, ['[speaking slowly] [whispers] 过来一点', '嗯', '嗯'])
+
+    def test_base_tag_comes_from_runtime_config(self):
+        from voice_call import tts as tts_mod
+        cases = [('', tts_mod.DEFAULT_BASE_TAG), ('none', None), ('NONE', None),
+                 ('[Slowly,  Softly]', 'slowly, softly'), ('slowly; rm -rf', None),
+                 ('慢一点', None), ('x' * 41, None)]
+        for raw, want in cases:
+            with mock.patch('config_store.get', return_value=raw):
+                self.assertEqual(tts_mod.configured_base_tag(), want, raw)
+        with mock.patch('config_store.get', side_effect=RuntimeError('locked')):
+            self.assertEqual(tts_mod.configured_base_tag(), tts_mod.DEFAULT_BASE_TAG)
 
     def test_stream_uses_the_stream_endpoint_and_yields_as_it_arrives(self):
         seen = {}

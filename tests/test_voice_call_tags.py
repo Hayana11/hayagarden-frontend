@@ -36,7 +36,7 @@ class SpeakableTests(unittest.TestCase):
         self.assertFalse(tags.is_tag_only(''))
 
     def test_the_tts_request_carries_the_filtered_text(self):
-        engine = ElevenLabsTTS(model_id='eleven_v4_turbo', api_key='k')
+        engine = ElevenLabsTTS(model_id='eleven_v4_turbo', api_key='k', base_tag=None)
         _headers, body = engine._request('[whispers] 嗯 [gunshot]', None)
         self.assertEqual(json.loads(body)['text'], '[whispers] 嗯')
         _headers, body = engine._request('[whispers] 嗯', 'eleven_multilingual_v2')
@@ -88,8 +88,12 @@ class OpeningToneTests(unittest.TestCase):
         lines, _ = service.lines_after(call['id'], 0)
         self.assertEqual([(l['speaker'], l['text']) for l in lines], [('him', '[softly] 在吗？')])
         self.assertEqual(sent, ['[softly] 在吗？'], 'answering warms the voice with the tagged opening')
-        _headers, body = ElevenLabsTTS(model_id='eleven_v4_turbo', api_key='k')._request(lines[0]['text'], None)
+        _headers, body = ElevenLabsTTS(model_id='eleven_v4_turbo', api_key='k', base_tag=None)._request(lines[0]['text'], None)
         self.assertEqual(json.loads(body)['text'], '[softly] 在吗？', 'the voice performs it')
+        _headers, body = ElevenLabsTTS(model_id='eleven_v4_turbo', api_key='k',
+                                       base_tag='speaking slowly')._request(lines[0]['text'], None)
+        self.assertEqual(json.loads(body)['text'], '[speaking slowly] [softly] 在吗？',
+                         'the base delivery leads, his own tag still shapes the line')
         self.assertEqual(tags.strip_tags(lines[0]['text']), '在吗？', 'what the page shows')
 
 

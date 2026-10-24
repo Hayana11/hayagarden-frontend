@@ -48,6 +48,25 @@ def speakable(text, model_id):
     return _SPACES.sub(' ', _TAG.sub(repl, text or '')).strip()
 
 
+_BASE_TAG_OK = re.compile(r"^[a-z][a-z ,'-]{0,39}$")
+
+
+def clean_base_tag(raw):
+    """A configured base delivery ("speaking slowly, in a low calm voice") or None.
+    Operator config, so not limited to ALLOWED, but only plain lowercase words."""
+    tag = _norm(str(raw or '').strip().strip('[]'))
+    return tag if _BASE_TAG_OK.match(tag) else None
+
+
+def voice_text(text, model_id, base_tag=None):
+    """What the voice is sent: ``speakable`` text, led by the base delivery tag
+    when the model performs tags (every line, before his own tags)."""
+    spoken = speakable(text, model_id)
+    if spoken and base_tag and supports_tags(model_id):
+        return '[%s] %s' % (base_tag, spoken)
+    return spoken
+
+
 def strip_tags(text):
     """``text`` without any bracket tags: what is shown, and what counts as words."""
     return _SPACES.sub(' ', _TAG.sub('', text or '')).strip()
