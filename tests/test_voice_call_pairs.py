@@ -120,17 +120,15 @@ class AutoTranscriptionTests(unittest.TestCase):
 class PromptTests(unittest.TestCase):
     def test_a_bilingual_call_asks_for_marked_pairs_every_turn(self):
         first = brain.format_utterance('早', True, 'English', pairs=('EN', 'ZH'))
-        self.assertIn('EN: [softly] Take your time.\nZH: 慢慢来。', first)
+        self.assertIn('EN: [softly] （一句English）\nZH: （这句的中文意思）', first)
         self.assertIn('只给她看，不会念出来', first)
         later = brain.format_utterance('嗯', False, 'English', pairs=('EN', 'ZH'))
         self.assertIn('每句写 EN: 和 ZH: 两行', later, 'the chat history around a call is Chinese')
-        for label, mark, own in (('日本語', 'JA', 'ゆっくりでいいよ。'), ('Русский', 'RU', 'Не торопись.')):
+        for label, mark in (('日本語', 'JA'), ('Русский', 'RU'), ('Deutsch', 'EN'), ('日本語', 'RU')):
             prompt = brain.format_utterance('早', True, label, pairs=(mark, 'ZH'))
-            self.assertNotIn('Take your time.', prompt, 'no English example in a %s call' % label)
-            self.assertIn('%s: [softly] %s\nZH: 慢慢来。' % (mark, own), prompt)
-        other = brain.format_utterance('早', True, 'Deutsch', pairs=('DE', 'ZH'))
-        self.assertNotIn('Take your time.', other)
-        self.assertIn('DE: （一句Deutsch）\nZH: （这句的中文意思）', other, 'other languages: structure only')
+            for sentence in ('Take your time.', 'ゆっくり', 'Не торопись'):
+                self.assertNotIn(sentence, prompt, 'no fixed example sentence (%s, marker %s)' % (label, mark))
+            self.assertIn('%s: [softly] （一句%s）' % (mark, label), prompt, 'the marker is only a token')
         self.assertEqual(brain.format_utterance('嗯', False, 'English'),
                          '〔电话〕她刚在电话里说：「嗯」（用English回答）', 'one-language calls are unchanged')
 

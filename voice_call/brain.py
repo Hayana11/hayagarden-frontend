@@ -51,22 +51,13 @@ PAIR_STYLE = (
     '比如：\n{example}\n'
     '不要把两种语言写在同一行，也不要写别的格式。她说什么语言都行，你都用{label}回答。'
 )
-# The example is in the call's own language: a few-shot line in another language is
-# imitated more readily than the instruction to answer in this one.
-PAIR_EXAMPLES = {
-    'EN': '[softly] Take your time.',
-    'JA': '[softly] ゆっくりでいいよ。',
-    'RU': '[softly] Не торопись.',
-}
-PAIR_GLOSS_EXAMPLE = '慢慢来。'
-
-
+# The example shows only the structure. No fixed sentence: a few-shot line in another
+# language is imitated more readily than the instruction, and the marker is only a
+# protocol token (configurable), so it cannot tell which language the call is in.
 def pair_example(marker, gloss_marker, label):
-    spoken = PAIR_EXAMPLES.get(marker)
-    if spoken:
-        return '%s: %s\n%s: %s' % (marker, spoken, gloss_marker, PAIR_GLOSS_EXAMPLE)
-    # no fixed sentence for other languages: only the structure
-    return '%s: （一句{label}）\n%s: （这句的中文意思）'.replace('{label}', label) % (marker, gloss_marker)
+    return '%s: [softly] （一句%s）\n%s: （这句的中文意思）' % (marker, label, gloss_marker)
+
+
 PAIR_REMINDER = '（用{label}回答，每句写 {m}: 和 {g}: 两行）'
 
 
