@@ -54,6 +54,8 @@
     "test:call-dial:e2e": "playwright test e2e/call-dial.spec.ts",
     "test:call-native-audio:e2e": "playwright test e2e/call-native-audio.spec.ts",
     "test:call-native-audio": "vite-node scripts/test-call-native-audio.mjs",
+    "test:call-subtitles": "vite-node scripts/test-call-subtitles.mjs",
+    "test:call-subtitles:e2e": "playwright test e2e/call-subtitles.spec.ts",
     "test:chat-stream-handoff": "vite-node scripts/test-chat-stream-handoff.mjs",
     "test:flow-studio-runtime-status": "vite-node scripts/test-flow-studio-runtime-status.mjs",
     "test:flow-studio-persistence": "vite-node scripts/test-flow-studio-persistence.mjs"

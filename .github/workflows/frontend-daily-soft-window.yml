@@ -82,7 +82,8 @@ jobs:
           npm run test:flow-studio-persistence
           npm run test:flow-studio-runtime-status
           npm run test:call-native-audio
-      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio e2e
+          npm run test:call-subtitles
+      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio + subtitles e2e
         working-directory: app
         run: |
           npx playwright install --with-deps chromium
@@ -90,6 +91,7 @@ jobs:
           npm run test:call-speech:e2e
           npm run test:call-dial:e2e
           npm run test:call-native-audio:e2e
+          npm run test:call-subtitles:e2e
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -153,7 +155,7 @@ jobs:
           python -m unittest tests.test_hidden_flow_activation_contract -v
           python -m unittest tests.test_hidden_flow_observability -v
       - name: Voice call server ordering and request-limit regressions
-        run: python -m unittest tests.test_voice_call -v
+        run: python -m unittest tests.test_voice_call tests.test_voice_call_pairs -v
 
       - name: Claude chat effort backend regressions
         env:

@@ -103,6 +103,10 @@ class CallStore:
             if 'opening' not in cols:
                 # His first line for a call he placed; written as a line only when she answers.
                 conn.execute("ALTER TABLE voice_calls ADD COLUMN opening TEXT")
+            line_cols = {row[1] for row in conn.execute('PRAGMA table_info(voice_call_lines)')}
+            if 'gloss' not in line_cols:
+                # A bilingual call's subtitle for his spoken line (shown, never voiced).
+                conn.execute("ALTER TABLE voice_call_lines ADD COLUMN gloss TEXT")
             if 'language_spec' not in cols:
                 # That language's config as it was at ring (JSON, holds the voice id: never served),
                 # so a runtime-config edit only changes the next call.
@@ -242,17 +246,21 @@ class CallStore:
         with self._lock, self._connect() as conn:
             conn.execute("UPDATE voice_calls SET recorded=1 WHERE id=?", (call_id,))
 
-    def add_line(self, call_id, speaker, text):
+    def add_line(self, call_id, speaker, text, gloss=None):
         with self._lock, self._connect() as conn:
             seq = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM voice_call_lines WHERE call_id=?",
                 (call_id,),
             ).fetchone()[0]
             conn.execute(
-                "INSERT INTO voice_call_lines (call_id, seq, speaker, text, created_at) VALUES (?, ?, ?, ?, ?)",
-                (call_id, seq, speaker, text, self._clock()),
+                "INSERT INTO voice_call_lines (call_id, seq, speaker, text, gloss, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (call_id, seq, speaker, text, gloss, self._clock()),
             )
-        return {'seq': seq, 'speaker': speaker, 'text': text}
+        line = {'seq': seq, 'speaker': speaker, 'text': text}
+        if gloss:
+            line['gloss'] = gloss
+        return line
 
     def set_audio_key(self, call_id, seq, audio_key):
         with self._lock, self._connect() as conn:
@@ -268,11 +276,17 @@ class CallStore:
     def lines_after(self, call_id, after_seq):
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT seq, speaker, text, audio_key FROM voice_call_lines "
+                "SELECT seq, speaker, text, audio_key, gloss FROM voice_call_lines "
                 "WHERE call_id=? AND seq>? ORDER BY seq",
                 (call_id, after_seq),
             ).fetchall()
-        return [dict(row) for row in rows]
+        lines = []
+        for row in rows:
+            line = dict(row)
+            if not line.get('gloss'):
+                line.pop('gloss', None)  # only bilingual lines carry one
+            lines.append(line)
+        return lines
 
     def _expire(self, conn):
         conn.execute(

@@ -13,6 +13,7 @@ from voice_call.tts import _urllib_post, read_env_value
 DEFAULT_MODEL_ID = 'scribe_v2'
 DEFAULT_LANGUAGE = 'zho'
 LANGUAGE_CODE = re.compile(r'^[a-z]{3}$')  # Scribe takes ISO 639-3 codes
+AUTO = 'auto'  # no language_code: Scribe detects the language itself
 AUDIO_TYPES = {
     'audio/wav': 'clip.wav',
     'audio/x-wav': 'clip.wav',
@@ -59,11 +60,12 @@ class ElevenLabsSTT:
             raise STTError('ELEVENLABS_API_KEY is not configured')
         if mime not in AUDIO_TYPES:
             raise STTError('unsupported audio type')
-        if not isinstance(language, str) or not LANGUAGE_CODE.match(language):
-            language = DEFAULT_LANGUAGE
-        boundary, body = _multipart(
-            [('model_id', self.model_id), ('language_code', language), ('tag_audio_events', 'false')],
-            AUDIO_TYPES[mime], mime, audio)
+        fields = [('model_id', self.model_id), ('tag_audio_events', 'false')]
+        if language != AUTO:
+            if not isinstance(language, str) or not LANGUAGE_CODE.match(language):
+                language = DEFAULT_LANGUAGE
+            fields.insert(1, ('language_code', language))
+        boundary, body = _multipart(fields, AUDIO_TYPES[mime], mime, audio)
         headers = {'xi-api-key': key, 'content-type': 'multipart/form-data; boundary=' + boundary}
         try:
             status, data = self._post(self.URL, headers, body, self._timeout)

@@ -27,6 +27,8 @@ export type CallLine = {
   speaker: 'her' | 'him';
   text: string;
   audio_key?: string | null;
+  /** A bilingual call's subtitle for his spoken line (shown, never voiced). */
+  gloss?: string | null;
 };
 
 export type CallSummary = {
@@ -87,10 +89,48 @@ export const voiceCall = {
 
 const AUDIO_TAG = /\[[^[\]\n]{1,40}\]/g;
 
-/** What a line shows: his audio tags ("[whispers]") are performed, never displayed. */
-export function displayLineText(line: Pick<CallLine, 'speaker' | 'text'>): string {
+/** Which side of a bilingual line is shown: the Chinese gloss (default) or what he said. */
+export type SubtitleMode = 'gloss' | 'original';
+
+const SUBTITLE_MODE_KEY = 'hg.call.subtitleMode';
+
+/** The last choice on this device; the gloss when none was made or storage is unavailable. */
+export function readSubtitleMode(): SubtitleMode {
+  try {
+    return window.localStorage.getItem(SUBTITLE_MODE_KEY) === 'original' ? 'original' : 'gloss';
+  } catch {
+    return 'gloss';
+  }
+}
+
+export function writeSubtitleMode(mode: SubtitleMode): void {
+  try {
+    window.localStorage.setItem(SUBTITLE_MODE_KEY, mode);
+  } catch {
+    // a convenience only: the toggle still works for this visit
+  }
+}
+
+export function hasGloss(line: Pick<CallLine, 'speaker' | 'gloss'>): boolean {
+  return line.speaker === 'him' && !!(line.gloss && line.gloss.trim());
+}
+
+function withoutTags(text: string): string {
+  return text.replace(AUDIO_TAG, '').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/**
+ * What a line shows: his audio tags ("[whispers]") are performed, never displayed.
+ * A bilingual line shows its gloss unless `mode` asks for what he actually said.
+ */
+export function displayLineText(line: Pick<CallLine, 'speaker' | 'text' | 'gloss'>, mode: SubtitleMode = 'gloss'): string {
   if (line.speaker !== 'him') return line.text;
-  return line.text.replace(AUDIO_TAG, '').replace(/[ \t]{2,}/g, ' ').trim();
+  if (mode === 'gloss' && hasGloss(line)) return withoutTags(line.gloss as string);
+  return withoutTags(line.text);
+}
+
+export function subtitleToggleLabel(mode: SubtitleMode): string {
+  return mode === 'gloss' ? '显示原文' : '显示中文';
 }
 
 export function formatCallTimer(totalSeconds: number): string {

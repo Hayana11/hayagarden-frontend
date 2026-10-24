@@ -15,6 +15,7 @@ import uuid
 from voice_call import languages as call_languages
 from voice_call import store as call_store
 from voice_call.brain import BrainError
+from voice_call.pairs import PairParser
 from voice_call.sentences import SentenceSplitter
 from voice_call.stt import STTError
 from voice_call.tts import TTSError
@@ -141,7 +142,7 @@ class CallService:
             entry = self._languages().get(language)
             if not entry:
                 raise call_store.CallStateError('unknown call language', 400)
-            spec = {key: entry[key] for key in ('label', 'voice_id', 'stt', 'speech', 'fallback')}
+            spec = call_languages.snapshot(entry)
         call = self._store.create_if_none_open(uuid.uuid4().hex, language, spec)
         self._notify()
         return call
@@ -176,7 +177,7 @@ class CallService:
             entry = self._languages().get(language)
             if not entry:
                 raise call_store.CallStateError('unknown call language', 400)
-            spec = {key: entry[key] for key in ('label', 'voice_id', 'stt', 'speech', 'fallback')}
+            spec = call_languages.snapshot(entry)
         call = self._store.create_if_none_open(
             uuid.uuid4().hex, language, spec, caller=call_store.FYODOR, opening=opening,
             caller_cooldown_s=cooldown_s,
@@ -492,10 +493,15 @@ class CallService:
             return self._turns.get(call_id, 0)
 
     def _run_reply(self, call_id, text, first_turn, generation):
-        splitter = SentenceSplitter()
         handle = None
-        entry = self._language(call_id)
+        entry = self._language(call_id)  # the call's snapshot: config edits never reach a call under way
         extra = {'language': entry['label']} if entry else {}
+        if entry and entry.get('subtitle') and entry.get('marker'):
+            pair = (entry['marker'], entry['subtitle'].upper())
+            extra['pairs'] = pair
+            splitter = PairParser(*pair)
+        else:
+            splitter = SentenceSplitter()
         if first_turn:
             call = self._store.get(call_id)
             if call and call.get('caller') == call_store.FYODOR:
@@ -539,13 +545,15 @@ class CallService:
             _LOG.warning('voice call turn %s not mapped to call %s', message_id, call_id, exc_info=True)
 
     def _emit(self, call_id, generation, sentences):
-        for sentence in sentences:
+        """Each item is a line, or (spoken line, gloss) in a bilingual call; only the line is voiced."""
+        for item in sentences:
+            sentence, gloss = item if isinstance(item, tuple) else (item, None)
             if self._current_generation(call_id) != generation:
                 return False
             call = self._store.get(call_id)
             if not call or call['state'] != call_store.ACTIVE:
                 return False
-            self._store.add_line(call_id, HIM, sentence)
+            self._store.add_line(call_id, HIM, sentence, gloss)
             self._notify()
             self._warm(call_id, sentence)
         return True
