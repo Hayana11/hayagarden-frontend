@@ -85,6 +85,14 @@ export const voiceCall = {
   },
 };
 
+const AUDIO_TAG = /\[[^[\]\n]{1,40}\]/g;
+
+/** What a line shows: his audio tags ("[whispers]") are performed, never displayed. */
+export function displayLineText(line: Pick<CallLine, 'speaker' | 'text'>): string {
+  if (line.speaker !== 'him') return line.text;
+  return line.text.replace(AUDIO_TAG, '').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 export function formatCallTimer(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   const mm = Math.floor(s / 60);

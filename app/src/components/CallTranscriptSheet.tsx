@@ -3,7 +3,7 @@
 // history the model reads); this sheet reads the call's own lines instead.
 // Chrome 78: no flex `gap`, no `inset` shorthand.
 import { useEffect, useState } from 'react';
-import { voiceCall, type CallLine, type VoiceCall } from '../lib/voiceCall';
+import { displayLineText, voiceCall, type CallLine, type VoiceCall } from '../lib/voiceCall';
 import { FONT_CN } from '../lib/typography';
 
 type Props = {
@@ -79,7 +79,7 @@ export function CallTranscriptSheet({ callId, title, onClose }: Props) {
                   background: line.speaker === 'her' ? 'var(--rosebg)' : 'var(--bg)',
                 }}
               >
-                {line.text}
+                {displayLineText(line)}
               </span>
             </div>
           ))}

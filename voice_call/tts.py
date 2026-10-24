@@ -17,6 +17,8 @@ import uuid
 import urllib.error
 import urllib.request
 
+from voice_call.tags import speakable
+
 STREAM_CHUNK = 4096
 FOLLOW_POLL_S = 0.02  # how often another worker's reader checks for new bytes
 
@@ -98,9 +100,10 @@ class ElevenLabsTTS:
         key = self.api_key()
         if not key:
             raise TTSError('ELEVENLABS_API_KEY is not configured')
+        model = model_id or self.model_id
         body = json.dumps({
-            'text': text,
-            'model_id': model_id or self.model_id,
+            'text': speakable(text, model),  # his audio tags, filtered for this model
+            'model_id': model,
             'voice_settings': {  # no 'style': v4 does not take it
                 'stability': 0.5,
                 'similarity_boost': 0.75,
