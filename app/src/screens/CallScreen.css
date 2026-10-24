@@ -236,3 +236,13 @@
 }
 
 .call-btn--interrupt { background: var(--color-primary); }
+.call-btn--speaker {
+  background: var(--color-card);
+  color: var(--color-text-mute);
+  border: 1px solid var(--color-border);
+}
+.call-btn--speaker.is-on {
+  background: var(--color-green);
+  border-color: var(--color-green);
+  color: #FFFFFF;
+}

@@ -8,6 +8,7 @@ import { PageHeader } from '../components/PageHeader';
 import { HttpError } from '../lib/http';
 import { nativeSpeech, type SpeechEvent, type SpeechStatus } from '../lib/nativeSpeech';
 import { nativeVoice, type VoiceEvent } from '../lib/nativeVoice';
+import { nativeCallAudio } from '../lib/nativeCallAudio';
 import { ROUTES } from '../navigation';
 import {
   FINAL_CALL_STATES,
@@ -74,6 +75,9 @@ export function CallScreen() {
   const [hearing, setHearing] = useState(false);
   const [partial, setPartial] = useState('');
   const [speaking, setSpeaking] = useState(false);
+  // Canary shell: his voice plays natively (earpiece by default); the button follows the shell's real route.
+  const [nativeAudio] = useState(() => nativeCallAudio.supported());
+  const [speaker, setSpeaker] = useState(false);
   const [languages, setLanguages] = useState<CallLanguage[]>([]);
   const [language, setLanguage] = useState('');
 
@@ -83,6 +87,7 @@ export function CallScreen() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queueRef = useRef<number[]>([]);
   const playingRef = useRef<number | null>(null);
+  const nativeDoneRef = useRef<((failed: boolean) => void) | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const retryRef = useRef<number | null>(null);
   const composingRef = useRef(false);
@@ -109,7 +114,6 @@ export function CallScreen() {
     if (playingRef.current !== null || !current) return;
     const seq = queueRef.current.shift();
     if (seq === undefined) return;
-    const audio = ensureAudio();
     playingRef.current = seq;
     const done = (failed: boolean) => {
       if (playingRef.current !== seq) return;
@@ -118,24 +122,32 @@ export function CallScreen() {
       playNext();
       if (playingRef.current === null && !queueRef.current.length) onDrainedRef.current();
     };
+    if (nativeAudio) {
+      nativeDoneRef.current = done;
+      nativeCallAudio.play(current.id, seq);
+      return;
+    }
+    const audio = ensureAudio();
     audio.onended = () => done(false);
     audio.onerror = () => done(true);
     audio.src = voiceCall.audioUrl(current.id, seq);
     const started = audio.play();
     if (started && typeof started.catch === 'function') started.catch(() => done(true));
-  }, [ensureAudio]);
+  }, [ensureAudio, nativeAudio]);
 
   const stopSpeaking = useCallback(() => {
     queueRef.current = [];
     playingRef.current = null;
     setSpeaking(false);
+    nativeDoneRef.current = null;
+    if (nativeAudio) nativeCallAudio.stop();
     const audio = audioRef.current;
     if (audio) {
       audio.onended = null;
       audio.onerror = null;
       audio.pause();
     }
-  }, []);
+  }, [nativeAudio]);
 
   const addLines = useCallback((incoming: CallLine[], speak: boolean) => {
     const before = linesRef.current;
@@ -503,6 +515,33 @@ export function CallScreen() {
     clearTimer(replyTimerRef);
   }, [call && call.state, turnMicOff]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Native playback events: a line ending moves the queue on; the route drives the speaker button.
+  useEffect(() => {
+    if (!nativeAudio) return undefined;
+    return nativeCallAudio.subscribe((event) => {
+      if (event.type === 'route') {
+        setSpeaker(event.route === 'speaker');
+        return;
+      }
+      if (event.type === 'started') return;
+      const done = nativeDoneRef.current;
+      if (done && playingRef.current === event.seq) {
+        nativeDoneRef.current = null;
+        done(event.type === 'error');
+      }
+    });
+  }, [nativeAudio]);
+
+  // Call audio mode only while the call is live; leaving it gives normal media routing back.
+  useEffect(() => {
+    if (!nativeAudio || !call || call.state !== 'active') return undefined;
+    nativeCallAudio.begin();
+    return () => {
+      nativeCallAudio.end();
+      setSpeaker(false);
+    };
+  }, [nativeAudio, call && call.id, call && call.state]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Timer tick while talking.
   useEffect(() => {
     if (!call || call.state !== 'active') return undefined;
@@ -550,6 +589,7 @@ export function CallScreen() {
 
   /** Inside a tap: lets his lines play later without another gesture. */
   const unlockAudio = () => {
+    if (nativeAudio) return;  // the shell plays natively; no autoplay gesture needed
     const audio = ensureAudio();
     audio.src = SILENT_WAV;
     const unlocked = audio.play();
@@ -694,6 +734,16 @@ export function CallScreen() {
             <div className="call-buttons hstack hstack-26">
               {speaking ? (
                 <button type="button" className="call-btn call-btn--interrupt" onClick={interruptHim}>打断</button>
+              ) : null}
+              {nativeAudio ? (
+                <button
+                  type="button"
+                  className={`call-btn call-btn--speaker${speaker ? ' is-on' : ''}`}
+                  onClick={() => nativeCallAudio.setSpeaker(!speaker)}
+                  aria-pressed={speaker}
+                >
+                  免提
+                </button>
               ) : null}
               <button type="button" className="call-btn call-btn--decline" onClick={hangup} disabled={busy}>挂断</button>
             </div>
