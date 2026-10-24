@@ -47,7 +47,7 @@ assert.equal(displayLineText({ speaker: 'him', text: '[whispers] 过来一点。
 assert.equal(displayLineText({ speaker: 'him', text: '才不是 [laughs] 傻瓜' }), '才不是 傻瓜');
 assert.equal(displayLineText({ speaker: 'her', text: '[她说的方括号] 原样' }), '[她说的方括号] 原样', 'her words are never touched');
 const callScreen = readFileSync(new URL('../src/screens/CallScreen.tsx', import.meta.url), 'utf8');
-assert.match(callScreen, /<span className="call-bubble">\{displayLineText\(line\)\}<\/span>/, 'the call page hides tags');
-assert.match(sheet, /\{displayLineText\(line\)\}/, 'the transcript hides tags');
+assert.match(callScreen, /\{displayLineText\(line, subtitleMode\)\}/, 'the call page hides tags');
+assert.match(sheet, /\{displayLineText\(line, subtitleMode\)\}/, 'the transcript hides tags');
 
 console.log('chat call record: OK');
