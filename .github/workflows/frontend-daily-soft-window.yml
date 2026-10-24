@@ -83,7 +83,9 @@ jobs:
           npm run test:flow-studio-runtime-status
           npm run test:call-native-audio
           npm run test:call-subtitles
-      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio + subtitles e2e
+          npm run test:call-runtime
+          npm run test:chat-call-record
+      - name: P2F native voice + P2E fallback + dial language + P2H-1 native call audio + subtitles e2e (P2H-3B: all through the web CallRuntime)
         working-directory: app
         run: |
           npx playwright install --with-deps chromium
