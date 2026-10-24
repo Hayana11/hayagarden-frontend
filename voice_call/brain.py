@@ -8,6 +8,8 @@ import json
 import threading
 import urllib.request
 
+from voice_call.tags import PROMPT_HINT
+
 APP_BASE = 'http://127.0.0.1:5050'
 GATEWAY_BASE = 'http://127.0.0.1:5051'
 
@@ -17,9 +19,7 @@ PHONE_STYLE_CONFIG_KEY = 'VOICE_CALL_PHONE_STYLE'
 PHONE_STYLE = (
     '〔电话〕你们正在打电话，她听得见你的声音。\n'
     '像平常跟她说话那样开口：句子短，一次两三句，说完就停下来听她说。\n'
-    '语气由你自己定：想轻一点、笑出来、叹口气的时候，在那句话前面加一个英文方括号标签，'
-    '比如 [whispers] [softly] [laughs] [chuckles] [sighs] [teasing] [sleepy]；'
-    '只在真的需要时用，不必每句都有。停顿用省略号……\n'
+    + PROMPT_HINT + '停顿用省略号……\n'
     '别写圆括号里的动作描写、表情符号、列表或 Markdown，它们会被原样念出来。'
 )
 

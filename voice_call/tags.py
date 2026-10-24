@@ -16,6 +16,13 @@ ALLOWED = frozenset((
     'curious', 'teasing', 'playfully', 'mischievously', 'sarcastic',
     'excited', 'happy', 'sad', 'pouting', 'serious', 'hesitant',
 ))
+# The tags the prompts suggest (both his call replies and the opening of a call
+# he places use this one hint, so they cannot drift apart). All are in ALLOWED.
+SUGGESTED = ('whispers', 'softly', 'laughs', 'chuckles', 'sighs', 'teasing', 'sleepy')
+PROMPT_HINT = (
+    '语气由你自己定：想轻一点、笑出来、叹口气的时候，在那句话前面加一个英文方括号标签，'
+    '比如 ' + ' '.join('[%s]' % tag for tag in SUGGESTED) + '；只在真的需要时用，不必每句都有。'
+)
 _TAG = re.compile(r'\[([^\[\]\n]{1,40})\]')
 _SPACES = re.compile(r'[ \t]{2,}')
 

@@ -86,10 +86,16 @@ _SHARED_RENDERER_INSTRUCTIONS = (
     '只输出一个 JSON object：{"rendered_content": "..."}。'
 )
 
-_CALL_OPENING_NOTE = (
-    '\ncontent_target 为 call_opening 时：你正主动给她打电话，写的是她接起电话时你说的'
-    '第一句话——一两句口语短句，像真的在说话；不要列表、括号动作、表情或 Markdown。'
-)
+def _call_opening_note():
+    from voice_call.tags import PROMPT_HINT  # the same tone hint as his call replies
+    return (
+        '\ncontent_target 为 call_opening 时：你正主动给她打电话，写的是她接起电话时你说的'
+        '第一句话——一两句口语短句，像真的在说话。' + PROMPT_HINT
+        + '不要列表、圆括号动作、表情或 Markdown。'
+    )
+
+
+_CALL_OPENING_NOTE = _call_opening_note()
 
 
 @dataclass(frozen=True)

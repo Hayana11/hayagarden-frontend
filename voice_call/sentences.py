@@ -41,9 +41,10 @@ class SentenceSplitter:
                 out.extend(self._take([self._buf[:cut + 1]]))
                 self._buf = self._buf[cut + 1:]
         self._started = self._started or bool(out)
-        while len(self._buf) > self._soft_limit:
-            cut = max((i for i, ch in enumerate(self._buf[:self._soft_limit + 1])
-                       if ch in _ENDINGS and outside_tags(self._buf, i)), default=-1)
+        while len(strip_tags(self._buf)) > self._soft_limit:
+            cut = max((i for i, ch in enumerate(self._buf)
+                       if ch in _ENDINGS and outside_tags(self._buf, i)
+                       and len(strip_tags(self._buf[:i + 1])) <= self._soft_limit), default=-1)
             if cut <= 0:
                 break
             out.extend(self._take([self._buf[:cut + 1]]))
