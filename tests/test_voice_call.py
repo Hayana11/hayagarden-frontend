@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from flask import Flask
 
@@ -218,8 +219,36 @@ class TTSTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = CachedTTS(tts, tmp)
             key, _ = cache.get('はい')
-            self.assertEqual(key, cache.key('はい', None, 'eleven_v4'))
+            self.assertEqual(key, cache.key('はい', None, 'eleven_v4', tts.speed))
         self.assertEqual([body['model_id'] for body in seen], ['eleven_v4'])
+
+    def test_one_lookup_uses_one_speed_for_key_and_request(self):
+        speeds = iter([0.85, 1.1])  # the config flips between two reads
+        seen = []
+        tts = ElevenLabsTTS(api_key='k', model_id='eleven_v4_turbo', speed=lambda: next(speeds),
+                            open_stream=lambda url, headers, body, timeout: (
+                                seen.append(json.loads(body)) or (200, iter([b'mp3']))))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CachedTTS(tts, tmp)
+            key, _ = cache.get('嗯')
+            self.assertEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', 0.85))
+            self.assertNotEqual(key, cache.key('嗯', None, 'eleven_v4_turbo', 1.1),
+                                'a new pace is a new recording, never the cached old one')
+        self.assertEqual([body['voice_settings']['speed'] for body in seen], [0.85])
+
+    def test_speed_comes_from_runtime_config_clamped(self):
+        from voice_call import tts as tts_mod
+        cases = [('', 0.9), ('0.8', 0.8), ('0.3', 0.7), ('2', 1.2), ('fast', 0.9), ('nan', 0.9)]
+        for raw, want in cases:
+            with mock.patch('config_store.get', return_value=raw):
+                self.assertEqual(tts_mod.configured_speed(), want, raw)
+        with mock.patch('config_store.get', side_effect=RuntimeError('locked')):
+            self.assertEqual(tts_mod.configured_speed(), tts_mod.DEFAULT_SPEED)
+        seen = []
+        with mock.patch('config_store.get', return_value='0.95'):
+            ElevenLabsTTS(api_key='k', post=lambda u, h, body, t: seen.append(json.loads(body)) or (200, b'x')
+                          ).synthesize('嗯')
+        self.assertEqual(seen[0]['voice_settings']['speed'], 0.95)
 
     def test_stream_uses_the_stream_endpoint_and_yields_as_it_arrives(self):
         seen = {}
