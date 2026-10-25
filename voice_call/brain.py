@@ -5,6 +5,7 @@ The call is not a second AI: her words are stored as an ordinary chat message
 same /chat/stream turn as any typed message, so it is remembered afterwards.
 """
 import json
+import socket
 import threading
 import urllib.request
 
@@ -135,10 +136,27 @@ class _HTTPStream:
                 return
             self._closed = True
             response = self._response
+        # Another thread is usually blocked reading this stream (the gateway is silent
+        # while the model thinks), and response.close() waits for that read to return:
+        # tens of seconds, with the caller (interrupt, or _hand_on under _utter_lock)
+        # stuck behind it. Shutting the socket down first ends the read at once.
+        sock = _socket_of(response)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         try:
             response.close()
         except Exception:
             pass
+
+
+def _socket_of(response):
+    """The socket under an http.client response (HTTPResponse.fp is a buffered SocketIO), or None."""
+    raw = getattr(getattr(response, 'fp', None), 'raw', None)
+    sock = getattr(raw, '_sock', None)
+    return sock if isinstance(sock, socket.socket) else None
 
 
 class CancellableReply:
