@@ -40,6 +40,8 @@ class CanonicalTurn:
     terminal_state: str
     transcript_identity: dict[str, Any]
     projection_hash: str
+    # Optional keeps legacy test/utility constructors source-compatible.
+    self_state: str = ''
     hidden_flow_control: dict[str, Any] | None = None
     hidden_flow_control_classification: str = 'unknown'
 
@@ -230,6 +232,7 @@ def _coerce_display_segments(display_segments: str | Iterable[dict[str, Any]]) -
 def _hash_projection(
     content: str,
     thinking: str,
+    self_state: str,
     segments: list[dict[str, Any]],
     tool_calls: Iterable[Mapping[str, Any]],
     choices: Iterable[Any],
@@ -249,6 +252,7 @@ def _hash_projection(
         {
             'content': str(content or '').strip(),
             'thinking': str(thinking or ''),
+            'self_state': str(self_state or ''),
             'display_segments': _normalize_projection_value(segments),
             'tool_calls': normalized_tool_calls,
             'choices': [str(choice) for choice in choices],
@@ -270,6 +274,8 @@ def _feed_parser(
     for kind, text in emitted:
         if kind == 'think':
             accumulator.append_thinking(text)
+        elif kind == 'self_state':
+            accumulator.append_self_state(text)
         elif kind == 'text':
             accumulator.append_text(text)
 
@@ -454,10 +460,13 @@ def build_canonical_turn(
     for kind, value in parser.finish():
         if kind == 'think':
             segments.append_thinking(value)
+        elif kind == 'self_state':
+            segments.append_self_state(value)
         elif kind == 'text':
             segments.append_text(value)
     raw_assistant_text = parser.text
     sanitized_thinking = parser.thinking
+    sanitized_self_state = parser.self_state
     if hidden_sanitize is not None:
         hidden_control_classification = classify_hidden_flow_control(
             raw_assistant_text,
@@ -470,6 +479,7 @@ def build_canonical_turn(
         hidden_control = parsed.to_dict() if parsed is not None else None
         raw_assistant_text = hidden_sanitize(raw_assistant_text)
         sanitized_thinking = hidden_sanitize(sanitized_thinking)
+        sanitized_self_state = hidden_sanitize(sanitized_self_state)
     content, choices = extract_choices(strip_save_markers(raw_assistant_text))
     content = str(content or '').strip()
     if not content and choices:
@@ -484,7 +494,7 @@ def build_canonical_turn(
         sanitized_values = []
         for segment in segment_values:
             item = dict(segment)
-            if str(item.get('type') or '') in ('text', 'thinking'):
+            if str(item.get('type') or '') in ('text', 'thinking', 'self_state'):
                 item['text'] = hidden_sanitize(str(item.get('text') or ''))
             sanitized_values.append(item)
         segment_values = sanitized_values
@@ -512,6 +522,7 @@ def build_canonical_turn(
     return CanonicalTurn(
         content=content,
         thinking=sanitized_thinking,
+        self_state=sanitized_self_state,
         display_segments=json.dumps(canonical_segments, ensure_ascii=False, separators=(',', ':')),
         tool_calls=tuple(tool_calls),
         choices=tuple(choices),
@@ -522,6 +533,7 @@ def build_canonical_turn(
         projection_hash=_hash_projection(
             content,
             sanitized_thinking,
+            sanitized_self_state,
             canonical_segments,
             tool_calls,
             choices,
@@ -536,12 +548,14 @@ def projection_hash(
     display_segments: str | Iterable[dict[str, Any]],
     *,
     thinking: str = '',
+    self_state: str = '',
     tool_calls: Iterable[Mapping[str, Any]] = (),
     choices: Iterable[Any] = (),
 ) -> str:
     return _hash_projection(
         str(content or '').strip(),
         str(thinking or ''),
+        str(self_state or ''),
         _coerce_display_segments(display_segments),
         tool_calls,
         choices,
