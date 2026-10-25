@@ -52,7 +52,8 @@ def execute(action: str, thoughts: str, content: str,
             settle_user_idle_hours: float = 0.0,
             settle_outcome_at: Optional[str] = None,
             settlement_required: bool = True,
-            tool_calls_json: str = ''):
+            tool_calls_json: str = '',
+            display_segments_json: str = ''):
     """
     action: 'none' | 'message' | 'diary' | 'explore' | 'call'
       ('call' only records the call he placed: an audit row, never pushed or
@@ -124,6 +125,17 @@ def execute(action: str, thoughts: str, content: str,
         cache_info_json = json.dumps(cache_info, ensure_ascii=False)
     else:
         cache_info_json = ''
+
+    if display_segments_json:
+        try:
+            from chat.display_segments import finalize_display_segments_json
+            display_segments_json = finalize_display_segments_json(
+                display_segments_json,
+                visible_text=str(content or '').strip(),
+            )
+        except Exception:
+            logger.warning('wake display_segments finalization failed', exc_info=True)
+            display_segments_json = ''
 
     surfaced_json = None
     if surfaced_desire_ids:
@@ -270,34 +282,27 @@ def execute(action: str, thoughts: str, content: str,
                 and wake_cache_info.get('unified_main_chat_proactive') is True
             )
             author = 'assistant' if unified_main_chat else 'fyodor'
-            if (
-                unified_main_chat
-                and 'tool_calls' in msg_cols
-                and 'cache_info' in msg_cols
-                and 'source_kind' in msg_cols
-            ):
+            if unified_main_chat:
+                insert_columns = ['author', 'content', 'thinking']
+                insert_values = [author, content, thoughts]
+                if 'tool_calls' in msg_cols:
+                    insert_columns.append('tool_calls')
+                    insert_values.append(tool_calls_json or '')
+                if 'cache_info' in msg_cols:
+                    insert_columns.append('cache_info')
+                    insert_values.append(cache_info_json)
+                if 'source_kind' in msg_cols:
+                    insert_columns.append('source_kind')
+                    insert_values.append('wake')
+                if 'display_segments' in msg_cols:
+                    insert_columns.append('display_segments')
+                    insert_values.append(display_segments_json or '')
                 conn.execute(
-                    "INSERT INTO chat_messages "
-                    "(author, content, thinking, tool_calls, cache_info, source_kind) "
-                    "VALUES (?,?,?,?,?,'wake')",
-                    (
-                        author,
-                        content,
-                        thoughts,
-                        tool_calls_json or '',
-                        cache_info_json,
+                    "INSERT INTO chat_messages (%s) VALUES (%s)" % (
+                        ', '.join(insert_columns),
+                        ', '.join('?' for _ in insert_columns),
                     ),
-                )
-            elif (
-                unified_main_chat
-                and 'tool_calls' in msg_cols
-                and 'source_kind' in msg_cols
-            ):
-                conn.execute(
-                    "INSERT INTO chat_messages "
-                    "(author, content, thinking, tool_calls, source_kind) "
-                    "VALUES (?,?,?,?, 'wake')",
-                    (author, content, thoughts, tool_calls_json or ''),
+                    tuple(insert_values),
                 )
             elif 'cache_info' in msg_cols and 'source_kind' in msg_cols:
                 conn.execute(
