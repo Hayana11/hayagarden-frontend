@@ -186,10 +186,10 @@ export function ProfileScreen() {
     } else {
       const error = displayThinkingResult.status === 'rejected'
         ? displayThinkingResult.reason
-        : new Error(displayThinkingResult.value.error || '可见思绪加载失败');
+        : new Error(displayThinkingResult.value.error || '自我状态加载失败');
       const detail = error instanceof HttpError && error.detail
         ? error.detail
-        : error instanceof Error ? error.message : '可见思绪加载失败';
+        : error instanceof Error ? error.message : '自我状态加载失败';
       setDisplayThinkingLoaded(false);
       setDisplayThinkingLoadError(detail);
       showToast(detail);
@@ -254,7 +254,7 @@ export function ProfileScreen() {
         const response = resetDisplayThinking
           ? await resetDisplayThinkingPrompt()
           : await saveDisplayThinkingPrompt(draftDisplayThinkingPrompt);
-        if (response.ok === false) throw new Error(response.error || '可见思绪保存失败');
+        if (response.ok === false) throw new Error(response.error || '自我状态保存失败');
         const prompt = typeof response.prompt === 'string' ? response.prompt : draftDisplayThinkingPrompt;
         setSavedDisplayThinkingPrompt(prompt);
         setDraftDisplayThinkingPrompt(prompt);
@@ -267,7 +267,7 @@ export function ProfileScreen() {
       }
       const messages = [];
       if (personaDirty) messages.push('费佳人设已保存，聊天网关正在重启');
-      if (displayThinkingDirty) messages.push('可见思绪已保存；下一轮聊天生效，未修改 persona.md');
+      if (displayThinkingDirty) messages.push('自我状态已保存；下一轮聊天生效，未修改 persona.md');
       showToast(messages.join('；'));
     } catch (error) {
       const detail = error instanceof HttpError && error.detail
@@ -357,8 +357,8 @@ export function ProfileScreen() {
           <section className="profile-section">
             <div className="profile-persona-heading">
               <div>
-                <div className="profile-section-title">think</div>
-                <div className="profile-help-text profile-section-hint">手写思维链</div>
+                <div className="profile-section-title">自我状态</div>
+                <div className="profile-help-text profile-section-hint">心里话</div>
               </div>
               <button
                 type="button"
@@ -374,13 +374,13 @@ export function ProfileScreen() {
             </div>
             <div className="profile-persona-card">
               {displayThinkingLoadError ? (
-                <div className="profile-help-text">读取可见思绪失败：{displayThinkingLoadError}。当前不展示伪造的 prompt，请稍后重新读取。</div>
+                <div className="profile-help-text">读取自我状态失败：{displayThinkingLoadError}。当前不展示伪造的 prompt，请稍后重新读取。</div>
               ) : (
                 <textarea
                   className="profile-persona-editor profile-thinking-editor"
                   value={draftDisplayThinkingPrompt}
                   spellCheck={false}
-                  aria-label="可见思绪 prompt"
+                  aria-label="自我状态 prompt"
                   maxLength={12000}
                   onChange={(event) => {
                     setDraftDisplayThinkingPrompt(event.target.value);
@@ -413,7 +413,7 @@ export function ProfileScreen() {
             )}
           </section>
 
-          <div className="profile-persona-note">Persona 保存会写入 persona.md 并重启 frontend-gw。可见思绪保存只影响界面展示的内心独白，不修改 persona.md。系统不会自动截断或改写原文。</div>
+          <div className="profile-persona-note">Persona 保存会写入 persona.md 并重启 frontend-gw。自我状态保存只影响界面展示的公开自述，不修改 persona.md。系统不会自动截断或改写原文。</div>
         </div>
       )}
       {toast && <div className="profile-toast"><span>{toast}</span></div>}
