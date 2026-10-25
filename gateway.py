@@ -9504,6 +9504,15 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 settlement_required=False,
             )
         except UnifiedNormalWakeSharedUnavailable as exc:
+            # S1 shadow (proactive cold start): observe only, never acts.
+            try:
+                from chat.proactive_cold_shadow import record_skip
+                record_skip(
+                    mode=mode, hot_reason=str(exc), wake_run_id=wake_run_id,
+                    db_path=DB_PATH,
+                )
+            except Exception:
+                pass
             return jsonify({
                 'ok': True,
                 'skipped': True,
