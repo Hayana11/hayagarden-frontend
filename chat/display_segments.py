@@ -42,7 +42,7 @@ def clean_display_text(text: str) -> str:
 
 
 class DisplaySegmentAccumulator:
-    """Merge adjacent deltas while retaining thinking/text/tool presentation order."""
+    """Merge adjacent deltas while retaining thinking/self-state/text/tool order."""
 
     def __init__(self) -> None:
         self._segments: list[dict[str, Any]] = []
@@ -58,6 +58,9 @@ class DisplaySegmentAccumulator:
 
     def append_thinking(self, text: str) -> None:
         self._append_delta('thinking', text)
+
+    def append_self_state(self, text: str) -> None:
+        self._append_delta('self_state', text)
 
     def append_text(self, text: str) -> None:
         self._append_delta('text', text)
@@ -166,7 +169,7 @@ def finalize_display_segments(segments: Iterable[dict[str, Any]], *, visible_tex
     cleaned: list[dict[str, Any]] = []
     for segment in source:
         kind = segment.get('type')
-        if kind in ('thinking', 'text'):
+        if kind in ('thinking', 'self_state', 'text'):
             text = clean_display_text(str(segment.get('text') or ''))
             if text:
                 cleaned.append({'type': kind, 'text': text})

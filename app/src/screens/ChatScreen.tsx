@@ -61,6 +61,7 @@ import {
 import { imageUrlsFromToolValue, type ChatMediaItem } from '../lib/chatMedia';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import {
+  appendSelfStateDelta,
   appendTextDelta,
   appendThinkingDelta,
   applyToolResult,
@@ -564,12 +565,12 @@ export function authoredPromptRowCopy(opts: {
   thinkingControl: ThinkingControlState;
 }): { title: string; note: string; checked: boolean } {
   if (opts.thinkingControl === 'native_locked' && !opts.authoredPromptEffective) {
-    return { title: '思考提示词', note: '使用原生思考，无需提示词', checked: false };
+    return { title: '自我状态提示词', note: '使用原生思考，无需提示词', checked: false };
   }
   if (opts.authoredPromptEffective) {
-    return { title: '思考提示词', note: '用于可见思绪；下一条消息起生效', checked: true };
+    return { title: '自我状态提示词', note: '用于心里话；下一条消息起生效', checked: true };
   }
-  return { title: '思考提示词', note: '给非原生思考模型注入可见思绪提示词', checked: false };
+  return { title: '自我状态提示词', note: '给非原生思考模型注入自我状态提示词', checked: false };
 }
 
 function ChatModelPopSwitch(props: {
@@ -796,7 +797,7 @@ export function ChatModelPickerSheet(props: {
                 <ChatModelPopSwitch
                   checked={promptCopy.checked}
                   disabled={props.busy}
-                  label="思考提示词"
+                  label="自我状态提示词"
                   onToggle={(checked) => {
                     if (!props.busy) props.onToggleAuthoredPrompt(checked);
                   }}
@@ -1376,7 +1377,7 @@ export function ChatScreen() {
     try {
       const result = await setDisplayThinkingAuthoredPrompt(enabled);
       if (!result.ok) {
-        showToast('思考提示词设置失败');
+        showToast('自我状态提示词设置失败');
         return;
       }
       applyDisplayThinking(result);
@@ -1759,6 +1760,10 @@ export function ChatScreen() {
         {
           onThink: (d) => {
             updateLive((l) => appendThinkingDelta(l, d));
+            scrollBottom({ source: 'stream-follow' });
+          },
+          onSelfState: (d) => {
+            updateLive((l) => appendSelfStateDelta(l, d));
             scrollBottom({ source: 'stream-follow' });
           },
           onText: (d) => {
@@ -2309,6 +2314,39 @@ export function ChatScreen() {
     );
   }
 
+  function renderSelfStateBlock(text: string, stateKey: string) {
+    if (!text) return null;
+    const label = `心里话 · ${text.length} 字`;
+    const open = Boolean(openThink[stateKey]);
+    const onClick = () => {
+      if (effThinkMode === 'drawer') {
+        setDrawer({ text, label, title: '心里话' });
+      } else {
+        setOpenThink((o) => ({ ...o, [stateKey]: !o[stateKey] }));
+      }
+    };
+    return (
+      <div className="vstack vstack-8">
+        <div onClick={onClick} className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}>
+          <span style={{ display: 'flex' }}>
+            <Svg d={IC.brain} size={17} sw={1.5} />
+          </span>
+          <span style={{ fontSize: 13, letterSpacing: 1 }}>{label}</span>
+          {effThinkMode === 'inline' && (
+            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ transition: 'transform .2s', transform: `rotate(${open ? 180 : 0}deg)` }}>
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          )}
+        </div>
+        {open && effThinkMode === 'inline' && (
+          <div style={{ borderRadius: 14, background: 'var(--card2)', padding: '14px 16px', fontSize: '0.88em', lineHeight: 1.95, color: 'var(--mut)', whiteSpace: 'pre-wrap', animation: 'chatFadeIn .2s ease' }}>
+            {text}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // What automatic recall put into this turn's prompt; sits above thinking.
   function renderMemoryRecall(recall: MemoryRecall | undefined, key: string) {
     if (!recall || recall.count <= 0) return null;
@@ -2604,6 +2642,13 @@ export function ChatScreen() {
               </Fragment>
             );
           }
+          if (segment.type === 'self_state') {
+            return (
+              <Fragment key={segmentKey}>
+                {renderSelfStateBlock(segment.text, thinkingStateKey(presentationKey, index) + '-self-state')}
+              </Fragment>
+            );
+          }
           if (segment.type === 'text') return (
             <Fragment key={segmentKey}>
               {segment.text && renderMarkdown(segment.text)}
@@ -2760,6 +2805,13 @@ export function ChatScreen() {
                           <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(var(--card2),transparent)' }} />
                         </div>
                       )}
+                    </Fragment>
+                  );
+                }
+                if (segment.type === 'self_state') {
+                  return (
+                    <Fragment key={segmentKey}>
+                      {renderSelfStateBlock(segment.text, presentationKey + '-self-state-' + segment.id)}
                     </Fragment>
                   );
                 }

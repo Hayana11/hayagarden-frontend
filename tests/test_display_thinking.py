@@ -39,28 +39,36 @@ def filtered(text_chunks, mode='auto', before=(), after=(), done_text=None):
     thinking = ''.join(
         str(payload) for event, payload in output if event == 'think'
     )
+    self_state = ''.join(
+        str(payload) for event, payload in output if event == 'self_state'
+    )
+    # Keep the historical helper's fourth value useful for old assertions;
+    # focused tests below inspect the two event channels separately.
+    display_channel = thinking or (
+        self_state if mode not in ('off', 'native') else ''
+    )
     done = next(payload for event, payload in output if event == 'done')
-    return output, text, thinking, done
+    return output, text, display_channel, done
 
 
 class DisplayThinkingStreamTests(unittest.TestCase):
     def test_t1_single_chunk(self):
-        _, text, thinking, done = filtered(['<思绪>A</思绪>B'])
+        _, text, thinking, done = filtered(['[[自我状态]]A[[/自我状态]]B'])
         self.assertEqual('A', thinking)
         self.assertEqual('B', text)
-        self.assertEqual(('B', 'A'), done[:2])
+        self.assertEqual(('B', ''), done[:2])
 
     def test_t2_opening_tag_split(self):
-        _, text, thinking, _ = filtered(['<思', '绪>A</思绪>B'])
+        _, text, thinking, _ = filtered(['[[自我', '状态]]A[[/自我状态]]B'])
         self.assertEqual(('A', 'B'), (thinking, text))
 
     def test_t3_closing_tag_split(self):
-        _, text, thinking, _ = filtered(['<思绪>A</思', '绪>B'])
+        _, text, thinking, _ = filtered(['[[自我状态]]A[[/自我', '状态]]B'])
         self.assertEqual(('A', 'B'), (thinking, text))
 
     def test_t4_both_tags_split(self):
         _, text, thinking, _ = filtered([
-            '<思', '绪>\n我在想', '什么', '</思', '绪>\n正式回复',
+            '[[自我', '状态]]\n我在想', '什么', '[[/自我', '状态]]\n正式回复',
         ])
         self.assertEqual('\n我在想什么', thinking)
         self.assertEqual('\n正式回复', text)
@@ -70,38 +78,91 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual('今天思绪很多。', text)
         self.assertEqual('', thinking)
 
-    def test_t6_native_seen_discards_authored_candidate(self):
-        output, text, thinking, done = filtered(
-            ['<思绪>A</思绪>B'],
+    def test_t6_native_and_self_state_are_both_retained(self):
+        output, text, _display_channel, done = filtered(
+            ['[[自我状态]]A[[/自我状态]]B'],
             before=[('think', 'N')],
         )
-        self.assertEqual('N', thinking)
+        self.assertEqual('N', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('A', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
         self.assertEqual('B', text)
         self.assertEqual(('B', 'N'), done[:2])
-        self.assertEqual(1, sum(1 for event, _ in output if event == 'think'))
 
-    def test_t7_authored_claims_owner_without_native(self):
-        _, text, thinking, done = filtered(['<思绪>A</思绪>B'])
-        self.assertEqual(('A', 'B'), (thinking, text))
-        self.assertEqual(('B', 'A'), done[:2])
+    def test_t7_self_state_does_not_enter_native_thinking(self):
+        output, text, _display_channel, done = filtered(
+            ['[[自我状态]]A[[/自我状态]]B'],
+        )
+        self.assertEqual('', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('A', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertEqual('B', text)
+        self.assertEqual(('B', ''), done[:2])
 
-    def test_t8_late_native_cannot_switch_authored_owner(self):
+    def test_t8_native_and_self_state_do_not_compete(self):
         events = [
-            ('text', '<思绪>A'),
+            ('text', '[[自我状态]]A'),
             ('think', 'LATE'),
-            ('text', '</思绪>B'),
-            ('done', ('<思绪>A</思绪>B', 'LATE', {})),
+            ('text', '[[/自我状态]]B'),
+            ('done', ('[[自我状态]]A[[/自我状态]]B', 'LATE', {})),
         ]
         output = list(filter_display_thinking_events(events, 'auto'))
         self.assertEqual(
-            'A',
+            'LATE',
             ''.join(p for event, p in output if event == 'think'),
+        )
+        self.assertEqual(
+            'A',
+            ''.join(p for event, p in output if event == 'self_state'),
         )
         self.assertEqual(
             'B',
             ''.join(p for event, p in output if event == 'text'),
         )
-        self.assertNotIn('LATE', repr(output))
+
+    def test_self_state_and_native_channels_are_distinct(self):
+        events = [
+            ('think', 'native thinking'),
+            ('text', '[[自我状态]]A[[/自我状态]]B'),
+            ('done', ('[[自我状态]]A[[/自我状态]]B', 'native thinking', {})),
+        ]
+        output = list(filter_display_thinking_events(events, 'auto'))
+        self.assertEqual(
+            ['native thinking'],
+            [p for event, p in output if event == 'think'],
+        )
+        self.assertEqual(
+            ['A'],
+            [p for event, p in output if event == 'self_state'],
+        )
+        self.assertEqual(
+            ['B'],
+            [p for event, p in output if event == 'text'],
+        )
+        done = next(payload for event, payload in output if event == 'done')
+        self.assertEqual(('B', 'native thinking'), done[:2])
+
+    def test_legacy_self_state_protocol_is_read_compatibly(self):
+        output = list(filter_display_thinking_events([
+            ('text', '<思绪>旧内容</思绪>正文'),
+            ('done', ('<思绪>旧内容</思绪>正文', '', {})),
+        ], 'auto'))
+        self.assertEqual(
+            '旧内容',
+            ''.join(p for event, p in output if event == 'self_state'),
+        )
+        self.assertEqual(
+            '正文',
+            ''.join(p for event, p in output if event == 'text'),
+        )
+        self.assertNotIn('<思绪>', repr(output))
+        self.assertNotIn('</思绪>', repr(output))
 
     def test_t9_no_tag_streams_text_unchanged(self):
         _, text, thinking, done = filtered(['普', '通', '正文'])
@@ -109,12 +170,15 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual('', thinking)
         self.assertEqual('普通正文', done[0])
 
-    def test_t10_unclosed_authored_never_becomes_content(self):
-        output, text, thinking, done = filtered(['<思绪>A', '还在想'])
+    def test_t10_unclosed_self_state_never_becomes_content(self):
+        output, text, thinking, done = filtered(['[[自我状态]]A', '还在想'])
         self.assertEqual('', text)
         self.assertEqual('A还在想', thinking)
-        self.assertEqual(('', 'A还在想'), done[:2])
-        self.assertNotIn('<思绪>', repr(output))
+        self.assertEqual(('', ''), done[:2])
+        self.assertEqual('A还在想', ''.join(
+            p for event, p in output if event == 'self_state'
+        ))
+        self.assertNotIn('[[自我状态]]', repr(output))
 
     def test_t10_partial_opening_at_eof_is_suppressed(self):
         output, text, thinking, done = filtered(['正文', '<思'])
@@ -125,75 +189,86 @@ class DisplayThinkingStreamTests(unittest.TestCase):
 
     def test_t11_text_after_close_keeps_streaming(self):
         _, text, thinking, _ = filtered([
-            '<思绪>A</思绪>', '正', '式', '回复',
+            '[[自我状态]]A[[/自我状态]]', '正', '式', '回复',
         ])
         self.assertEqual('A', thinking)
         self.assertEqual('正式回复', text)
 
     def test_r1_repeated_authored_tags_have_one_owner(self):
         _, text, thinking, _ = filtered(
-            ['<思绪>A</思绪>B<思绪>C</思绪>D'],
+            ['[[自我状态]]A[[/自我状态]]B[[自我状态]]C[[/自我状态]]D'],
         )
         self.assertEqual('BD', text)
         self.assertEqual('AC', thinking)
-        self.assertNotIn('<思绪>', text)
-        self.assertNotIn('</思绪>', text)
+        self.assertNotIn('[[自我状态]]', text)
+        self.assertNotIn('[[/自我状态]]', text)
 
     def test_r2_repeated_tags_split_across_chunks(self):
         _, text, thinking, _ = filtered([
-            '<思绪>A</思绪>B<思', '绪>C</思', '绪>D',
+            '[[自我状态]]A[[/自我状态]]B<思', '绪>C</思', '绪>D',
         ])
         self.assertEqual('BD', text)
         self.assertEqual('AC', thinking)
-        self.assertNotIn('<思绪>', text)
-        self.assertNotIn('</思绪>', text)
+        self.assertNotIn('[[自我状态]]', text)
+        self.assertNotIn('[[/自我状态]]', text)
 
-    def test_r3_native_owner_discards_all_authored_blocks(self):
-        output, text, thinking, _ = filtered(
-            ['<思绪>A</思绪>B<思绪>C</思绪>D'],
+    def test_r3_native_does_not_discard_repeated_self_state_blocks(self):
+        output, text, _display_channel, _ = filtered(
+            ['[[自我状态]]A[[/自我状态]]B[[自我状态]]C[[/自我状态]]D'],
             before=[('think', 'N')],
         )
         self.assertEqual('BD', text)
-        self.assertEqual('N', thinking)
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertEqual('N', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('AC', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_m1_stray_close_in_text_is_discarded(self):
-        output, text, thinking, done = filtered(['正文</思绪>继续'])
+        output, text, thinking, done = filtered(['正文[[/自我状态]]继续'])
         self.assertEqual('正文继续', text)
         self.assertEqual('', thinking)
         self.assertEqual(('正文继续', ''), done[:2])
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_m2_stray_close_split_across_chunks_is_discarded(self):
         output, text, thinking, _ = filtered(['正文</思', '绪>继续'])
         self.assertEqual(('正文继续', ''), (text, thinking))
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_m3_nested_open_in_thinking_is_discarded(self):
-        output, text, thinking, _ = filtered(['<思绪>A<思绪>B</思绪>C'])
+        output, text, thinking, _ = filtered(['[[自我状态]]A[[自我状态]]B[[/自我状态]]C'])
         self.assertEqual(('C', 'AB'), (text, thinking))
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_m4_nested_open_split_across_chunks_is_discarded(self):
         output, text, thinking, _ = filtered([
-            '<思绪>A<思', '绪>B</思绪>C',
+            '[[自我状态]]A<思', '绪>B[[/自我状态]]C',
         ])
         self.assertEqual(('C', 'AB'), (text, thinking))
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
-    def test_m5_native_owner_discards_malformed_authored_tags(self):
-        output, text, thinking, _ = filtered(
-            ['<思绪>A<思绪>B</思绪>C</思绪>D'],
+    def test_m5_native_keeps_malformed_self_state_parser_behavior(self):
+        output, text, _display_channel, _ = filtered(
+            ['[[自我状态]]A[[自我状态]]B[[/自我状态]]C[[/自我状态]]D'],
             before=[('think', 'native')],
         )
-        self.assertEqual(('CD', 'native'), (text, thinking))
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertEqual('CD', text)
+        self.assertEqual('native', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('AB', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_m6_partial_stray_close_at_eof_is_suppressed(self):
         output, text, thinking, done = filtered(['正文', '</思'])
@@ -201,40 +276,58 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual(('正文', ''), done[:2])
         self.assertNotIn('</思', repr(output))
 
-    def test_t12_off_does_not_prompt_or_show_authored(self):
+    def test_t12_off_does_not_prompt_but_keeps_parser_channels(self):
         original = 'hello'
         self.assertIs(
             original,
             append_authored_thinking_instruction(original, 'off'),
         )
-        _, text, thinking, done = filtered(
-            ['<思绪>A</思绪>B'], mode='off',
+        output, text, _display_channel, done = filtered(
+            ['[[自我状态]]A[[/自我状态]]B'], mode='off',
         )
-        self.assertEqual(('B', ''), (text, thinking))
+        self.assertEqual('', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('A', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertEqual('B', text)
         self.assertEqual(('B', ''), done[:2])
 
-    def test_t13_native_does_not_prompt_and_keeps_native(self):
+    def test_t13_native_does_not_prompt_but_keeps_both_channels(self):
         original = ['hello']
         prepared = append_authored_thinking_instruction(original, 'native')
         self.assertIs(original, prepared)
-        _, text, thinking, done = filtered(
-            ['<思绪>A</思绪>B'],
+        output, text, _display_channel, done = filtered(
+            ['[[自我状态]]A[[/自我状态]]B'],
             mode='native',
             before=[('think', 'N')],
         )
-        self.assertEqual(('B', 'N'), (text, thinking))
+        self.assertEqual('N', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('A', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertEqual('B', text)
         self.assertEqual(('B', 'N'), done[:2])
 
-    def test_t14_authored_prompts_and_suppresses_native(self):
+    def test_t14_authored_mode_keeps_native_and_self_state_independent(self):
         prepared = append_authored_thinking_instruction('hello', 'authored')
         self.assertIn(AUTHORED_THINKING_INSTRUCTION, prepared)
-        _, text, thinking, done = filtered(
-            ['<思绪>A</思绪>B'],
+        output, text, _display_channel, done = filtered(
+            ['[[自我状态]]A[[/自我状态]]B'],
             mode='authored',
             before=[('think', 'N')],
         )
-        self.assertEqual(('B', 'A'), (text, thinking))
-        self.assertEqual(('B', 'A'), done[:2])
+        self.assertEqual('N', ''.join(
+            str(payload) for event, payload in output if event == 'think'
+        ))
+        self.assertEqual('A', ''.join(
+            str(payload) for event, payload in output if event == 'self_state'
+        ))
+        self.assertEqual('B', text)
+        self.assertEqual(('B', 'N'), done[:2])
 
     def test_t15_auto_prompts_and_prefers_early_native(self):
         original = [{'type': 'text', 'text': 'hello'}]
@@ -242,7 +335,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertIsNot(original, prepared)
         self.assertEqual(2, len(prepared))
         _, text, thinking, _ = filtered(
-            ['<思绪>A</思绪>B'],
+            ['[[自我状态]]A[[/自我状态]]B'],
             mode='auto',
             before=[('think', 'N')],
         )
@@ -262,7 +355,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         )
 
     def test_empty_authored_and_one_character_chunks(self):
-        chunks = list('<思绪></思绪>正文')
+        chunks = list('[[自我状态]][[/自我状态]]正文')
         _, text, thinking, _ = filtered(chunks)
         self.assertEqual('正文', text)
         self.assertEqual('', thinking)
@@ -270,9 +363,9 @@ class DisplayThinkingStreamTests(unittest.TestCase):
     def test_normal_wake_filter_removes_authored_tags_and_preserves_tools(self):
         events = [
             ('tool_use', {'name': 'mcp__home__get_todos'}),
-            ('text', '<思绪>先看一眼</思绪>正式回复'),
+            ('text', '[[自我状态]]先看一眼[[/自我状态]]正式回复'),
             ('tool_result', {'result': 'ok'}),
-            ('done', ('<思绪>先看一眼</思绪>正式回复', '', {})),
+            ('done', ('[[自我状态]]先看一眼[[/自我状态]]正式回复', '', {})),
         ]
         output = list(filter_display_thinking_events(events, 'auto'))
         self.assertEqual(
@@ -281,21 +374,21 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         )
         self.assertEqual(
             '先看一眼',
-            ''.join(p for event, p in output if event == 'think'),
+            ''.join(p for event, p in output if event == 'self_state'),
         )
         self.assertIn(('tool_use', {'name': 'mcp__home__get_todos'}), output)
         self.assertIn(('tool_result', {'result': 'ok'}), output)
         done = next(p for event, p in output if event == 'done')
-        self.assertEqual(('正式回复', '先看一眼'), done[:2])
-        self.assertNotIn('<思绪>', repr(output))
-        self.assertNotIn('</思绪>', repr(output))
+        self.assertEqual(('正式回复', ''), done[:2])
+        self.assertNotIn('[[自我状态]]', repr(output))
+        self.assertNotIn('[[/自我状态]]', repr(output))
 
     def test_tool_events_are_unchanged(self):
         events = [
             ('tool_use', {'name': 'x'}),
-            ('text', '<思绪>A</思绪>B'),
+            ('text', '[[自我状态]]A[[/自我状态]]B'),
             ('tool_result', {'result': 'ok'}),
-            ('done', ('<思绪>A</思绪>B', '', {})),
+            ('done', ('[[自我状态]]A[[/自我状态]]B', '', {})),
         ]
         output = list(filter_display_thinking_events(events, 'auto'))
         self.assertIn(('tool_use', {'name': 'x'}), output)
@@ -311,16 +404,16 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual('formal', extract_text(blocks))
         self.assertEqual('native', extract_thinking(blocks))
 
-    def test_t8_opus55_auto_uses_native_and_omits_authored_suffix(self):
+    def test_t8_opus55_auto_keeps_self_state_suffix(self):
         mode = resolve_effective_display_thinking_mode(
             'auto', 'explicit:claude-opus-5-5',
         )
-        self.assertEqual('native', mode)
-        self.assertEqual('', authored_thinking_instruction_suffix(mode))
+        self.assertEqual('auto', mode)
+        self.assertIn(AUTHORED_THINKING_INSTRUCTION, authored_thinking_instruction_suffix(mode))
         plan = SimpleNamespace()
         prepare_daily_display_thinking_plan(plan, mode)
-        self.assertEqual('native', plan.provider_display_thinking_mode)
-        self.assertEqual('', plan.provider_display_thinking_suffix)
+        self.assertEqual('auto', plan.provider_display_thinking_mode)
+        self.assertIn(AUTHORED_THINKING_INSTRUCTION, plan.provider_display_thinking_suffix)
 
     def test_t9_explicit_authored_and_older_auto_behavior_are_preserved(self):
         self.assertEqual(
@@ -350,8 +443,8 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         def source():
             yield ('heartbeat', None)
             current['identity'] = 'explicit:claude-opus-5-5'
-            yield ('text', '<思绪>A</思绪>B')
-            yield ('done', ('<思绪>A</思绪>B', '', {}))
+            yield ('text', '[[自我状态]]A[[/自我状态]]B')
+            yield ('done', ('[[自我状态]]A[[/自我状态]]B', '', {}))
         def mode():
             calls.append(current['identity'])
             return resolve_effective_display_thinking_mode(
@@ -365,7 +458,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
     def test_t16_prompt_and_filter_are_solo_chat_scoped(self):
         source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
         tree = ast.parse(source)
-        owners = {'append_authored_thinking_instruction': set(),
+        owners = {'append_authored_self_state_instruction': set(),
                   'filter_display_thinking_events': set()}
 
         class Visitor(ast.NodeVisitor):
@@ -388,7 +481,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
                 '_cc_resident_stream_gen',
                 '_messages_with_display_instruction',
             },
-            owners['append_authored_thinking_instruction'],
+            owners['append_authored_self_state_instruction'],
         )
         self.assertEqual(
             {
@@ -556,7 +649,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             self.assertEqual(0, text.count(AUTHORED_THINKING_INSTRUCTION))
 
     def test_r17_runtime_prompt_fallback_save_and_turn_snapshot(self):
-        custom = '<思绪>custom</思绪> 请保持简短。'
+        custom = '[[自我状态]]custom[[/自我状态]] 请保持简短。'
         state = {'DISPLAY_THINKING_MODE': 'auto', DISPLAY_THINKING_PROMPT_KEY: ''}
 
         def getter(key, default):
@@ -567,14 +660,20 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual(custom, get_display_thinking_prompt(getter))
 
         frozen = get_display_thinking_snapshot(getter)
-        state[DISPLAY_THINKING_PROMPT_KEY] = '<思绪>new</思绪>'
+        state[DISPLAY_THINKING_PROMPT_KEY] = '[[自我状态]]new[[/自我状态]]'
         self.assertEqual(('auto', custom), frozen)
-        self.assertEqual('<思绪>new</思绪>', get_display_thinking_prompt(getter))
+        self.assertEqual('[[自我状态]]new[[/自我状态]]', get_display_thinking_prompt(getter))
 
-    def test_r18_prompt_validation_and_owner_contract(self):
-        valid = '<思绪>custom</思绪> 请保持简短。'
+    def test_r18_prompt_validation_and_self_state_contract(self):
+        valid = '[[自我状态]]custom[[/自我状态]] 请保持简短。'
         self.assertEqual(valid, validate_display_thinking_prompt(valid))
-        for invalid in ('', '没有标签', '</思绪><思绪>反序'):
+        self.assertIn('[[自我状态]]', AUTHORED_THINKING_INSTRUCTION)
+        self.assertNotIn('<思绪>', AUTHORED_THINKING_INSTRUCTION)
+        self.assertEqual(
+            valid,
+            validate_display_thinking_prompt('<思绪>custom</思绪> 请保持简短。'),
+        )
+        for invalid in ('', '没有标签', '[[/自我状态]][[自我状态]]反序'):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     validate_display_thinking_prompt(invalid)
@@ -588,7 +687,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertNotIn('[image]', prepared)
 
     def test_r19_daily_plan_keeps_one_frozen_prompt_for_rebuild(self):
-        valid = '<思绪>daily</思绪> 请保持简短。'
+        valid = '[[自我状态]]daily[[/自我状态]] 请保持简短。'
         plan = SimpleNamespace()
         prepare_daily_display_thinking_plan(plan, 'authored', valid)
         self.assertEqual(valid, plan.provider_display_thinking_prompt)
@@ -610,7 +709,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         import config_store
         from tempfile import TemporaryDirectory
 
-        custom = '<思绪>stored</思绪> 请保持简短。'
+        custom = '[[自我状态]]stored[[/自我状态]] 请保持简短。'
         original_db_path = config_store.DB_PATH
         with TemporaryDirectory() as tmp:
             try:
@@ -625,19 +724,15 @@ class DisplayThinkingStreamTests(unittest.TestCase):
 
 
 class DisplayThinkingConfigSurfaceTests(unittest.TestCase):
-    def test_opus55_auto_config_state_is_native_without_authored_suffix(self):
+    def test_opus55_auto_config_state_keeps_self_state_suffix(self):
         state = display_thinking_config_state(
             'auto', 'explicit:claude-opus-5-5',
         )
         self.assertEqual('auto', state['configured_mode'])
-        self.assertEqual('native', state['effective_mode'])
+        self.assertEqual('auto', state['effective_mode'])
         self.assertEqual('explicit:claude-opus-5-5', state['model_identity'])
-        self.assertFalse(state['authored_prompt_effective'])
-        self.assertEqual(
-            '',
-            authored_thinking_instruction_suffix(state['effective_mode']),
-        )
-        self.assertNotIn(
+        self.assertTrue(state['authored_prompt_effective'])
+        self.assertIn(
             AUTHORED_THINKING_INSTRUCTION,
             authored_thinking_instruction_suffix(state['effective_mode']),
         )
@@ -689,18 +784,24 @@ class DisplayThinkingConfigSurfaceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     configured_mode_from_authored_prompt_enabled(invalid)
 
-    def test_ui_toggle_cannot_reinject_opus55_authored_suffix(self):
-        for enabled in (True, False):
-            configured = configured_mode_from_authored_prompt_enabled(enabled)
-            state = display_thinking_config_state(
-                configured, 'explicit:claude-opus-5-5',
-            )
-            self.assertEqual('native', state['effective_mode'])
-            self.assertFalse(state['authored_prompt_effective'])
-            self.assertEqual(
-                '',
-                authored_thinking_instruction_suffix(state['effective_mode']),
-            )
+    def test_ui_toggle_keeps_opus55_native_and_self_state_independent(self):
+        enabled_state = display_thinking_config_state(
+            configured_mode_from_authored_prompt_enabled(True),
+            'explicit:claude-opus-5-5',
+        )
+        self.assertEqual('auto', enabled_state['effective_mode'])
+        self.assertTrue(enabled_state['authored_prompt_effective'])
+        self.assertIn(
+            AUTHORED_THINKING_INSTRUCTION,
+            authored_thinking_instruction_suffix(enabled_state['effective_mode']),
+        )
+
+        disabled_state = display_thinking_config_state(
+            configured_mode_from_authored_prompt_enabled(False),
+            'explicit:claude-opus-5-5',
+        )
+        self.assertEqual('native', disabled_state['effective_mode'])
+        self.assertFalse(disabled_state['authored_prompt_effective'])
 
     def test_config_routes_reuse_resolver_and_reject_mode_strings(self):
         source = (ROOT / 'app.py').read_text(encoding='utf-8')
@@ -724,9 +825,10 @@ class DisplayThinkingConfigSurfaceTests(unittest.TestCase):
             encoding='utf-8',
         )
         self.assertEqual(1, module.count('def resolve_effective_display_thinking_mode('))
-        self.assertEqual(1, module.count('def authored_thinking_instruction_suffix('))
+        self.assertEqual(1, module.count('def authored_self_state_instruction_suffix('))
         self.assertNotIn('--thinking-enabled', module)
         self.assertNotIn('--thinking ', module)
+        self.assertNotIn('thinking_owner', module)
 
 
 if __name__ == '__main__':

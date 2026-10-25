@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   appendTextDelta,
+  appendSelfStateDelta,
   appendThinkingDelta,
   applyToolResult,
   createLiveState,
@@ -31,6 +32,7 @@ assert.deepEqual(shape(state), [
 ]);
 
 state = appendThinkingDelta(createLiveState(), 'thinking A');
+state = appendSelfStateDelta(state, 'self-state A');
 state = appendTextDelta(state, 'text B');
 state = upsertToolUse(state, 0, tool('tool-a'));
 state = applyToolResult(state, 0, tool('tool-a', { result: 'done A', success: true }));
@@ -40,6 +42,7 @@ state = applyToolResult(state, 1, tool('tool-b', { result: 'done B', success: tr
 state = appendTextDelta(state, 'text D');
 assert.deepEqual(shape(state), [
   { type: 'thinking', text: 'thinking A' },
+  { type: 'self_state', text: 'self-state A' },
   { type: 'text', text: 'text B' },
   { type: 'tool', idx: 0, name: 'tool-a', running: false, result: 'done A' },
   { type: 'text', text: 'text C' },
@@ -74,6 +77,7 @@ const reconciled = replaceWithCanonicalProjection(preview, {
   thinking: 'thought',
   display_segments: [
     { type: 'thinking', text: 'thought' },
+    { type: 'self_state', text: 'self-state' },
     { type: 'text', text: '第一段' },
     { type: 'tool', tool_index: 0 },
     { type: 'text', text: '第二段' },
@@ -83,6 +87,7 @@ const reconciled = replaceWithCanonicalProjection(preview, {
 });
 assert.deepEqual(shape(reconciled), [
   { type: 'thinking', text: 'thought' },
+  { type: 'self_state', text: 'self-state' },
   { type: 'text', text: '第一段' },
   { type: 'tool', idx: 0, name: 'read', running: false, result: 'done' },
   { type: 'text', text: '第二段' },

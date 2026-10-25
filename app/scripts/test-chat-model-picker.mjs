@@ -385,17 +385,17 @@ const api = fs.readFileSync(apiPath, 'utf8');
     panel: 'effort',
     currentModel: 'claude-opus-5-5',
     modelMode: 'explicit',
-    authoredPromptEffective: false,
+    authoredPromptEffective: true,
   });
-  assert.match(opusAuto, /data-authored-prompt="off"/);
-  assert.match(opusAuto, /使用原生思考，无需提示词/);
+  assert.match(opusAuto, /data-authored-prompt="on"/);
+  assert.match(opusAuto, /用于心里话；下一条消息起生效/);
   assert.deepEqual(authoredPromptRowCopy({
-    authoredPromptEffective: false,
+    authoredPromptEffective: true,
     thinkingControl: 'native_locked',
   }), {
-    title: '思考提示词',
-    note: '使用原生思考，无需提示词',
-    checked: false,
+    title: '自我状态提示词',
+    note: '用于心里话；下一条消息起生效',
+    checked: true,
   });
 
   const sonnetAuto = renderSheet({
@@ -405,13 +405,13 @@ const api = fs.readFileSync(apiPath, 'utf8');
     authoredPromptEffective: true,
   });
   assert.match(sonnetAuto, /data-authored-prompt="on"/);
-  assert.match(sonnetAuto, /用于可见思绪；下一条消息起生效/);
+  assert.match(sonnetAuto, /用于心里话；下一条消息起生效/);
   assert.deepEqual(authoredPromptRowCopy({
     authoredPromptEffective: true,
     thinkingControl: 'unavailable',
   }), {
-    title: '思考提示词',
-    note: '用于可见思绪；下一条消息起生效',
+    title: '自我状态提示词',
+    note: '用于心里话；下一条消息起生效',
     checked: true,
   });
 
@@ -422,7 +422,7 @@ const api = fs.readFileSync(apiPath, 'utf8');
     authoredPromptEffective: false,
   });
   assert.match(sonnetNative, /data-authored-prompt="off"/);
-  assert.match(sonnetNative, /给非原生思考模型注入可见思绪提示词/);
+  assert.match(sonnetNative, /给非原生思考模型注入自我状态提示词/);
 
   let toggled;
   renderSheet({
@@ -454,7 +454,7 @@ const api = fs.readFileSync(apiPath, 'utf8');
   const promptStart = screen.indexOf('const selectAuthoredPrompt =');
   const promptEnd = screen.indexOf('useEffect(() => {', promptStart);
   const promptBody = screen.slice(promptStart, promptEnd);
-  assert.match(promptBody, /思考提示词设置失败/);
+  assert.match(promptBody, /自我状态提示词设置失败/);
   assert.match(promptBody, /if \(!result\.ok\)/);
   assert.doesNotMatch(promptBody, /sendChatMessage|streamChatReply|abortRef|forceUnlock|rollback|setChatModel/);
 }

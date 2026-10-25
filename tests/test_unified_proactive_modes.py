@@ -190,6 +190,56 @@ class ProactiveCanonicalHistoryTests(unittest.TestCase):
             self.assertEqual(info['wake_mode'], mode)
             self.assertIs(info['canonical_chat_history'], True)
 
+    def test_unified_normal_wake_persists_self_state_in_display_segments(self):
+        from wake.executor import execute
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = str(Path(temp_dir).joinpath('w.db'))
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE wake_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, thoughts TEXT, action TEXT,
+                    content TEXT, consumed INTEGER, woke_at TEXT, cache_info TEXT,
+                    wake_run_id TEXT
+                );
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT, content TEXT,
+                    thinking TEXT, tool_calls TEXT, cache_info TEXT,
+                    display_segments TEXT, source_kind TEXT
+                );
+                """
+            )
+            conn.commit()
+            conn.close()
+            segments = json.dumps([
+                {'type': 'thinking', 'text': 'native thinking'},
+                {'type': 'self_state', 'text': '公开自述'},
+                {'type': 'text', 'text': '正式回复'},
+            ], ensure_ascii=False)
+            with mock.patch('chat.window_identity.soft_window_enabled', return_value=False):
+                execute(
+                    'message', 'native thinking', '正式回复', 'normal',
+                    get_db_fn=lambda: sqlite3.connect(db_path),
+                    cache_info={
+                        'provider': 'claude_code',
+                        'source': 'wake',
+                        'b3_authority': True,
+                        'unified_chat_resident': True,
+                        'unified_main_chat_proactive': True,
+                    },
+                    wake_run_id='normal-self-state',
+                    settlement_required=False,
+                    display_segments_json=segments,
+                )
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                'SELECT thinking, display_segments FROM chat_messages'
+            ).fetchone()
+            conn.close()
+            self.assertEqual('native thinking', row[0])
+            self.assertEqual(json.loads(segments), json.loads(row[1]))
+
     def test_ritual_is_never_canonical(self):
         self.assertIs(self._execute('ritual')['canonical_chat_history'], False)
 
@@ -304,6 +354,30 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         result, _ = self._run(events=self._done('早安 [[SILENT]]'))
         self.assertFalse(result['silent'])
         self.assertEqual(result['text'], '早安')
+
+    def test_normal_wake_returns_native_and_self_state_segments(self):
+        events = [
+            ('think', 'native thinking'),
+            ('text', '[[自我状态]]公开自述[[/自我状态]]正式回复'),
+            ('done', (
+                '[[自我状态]]公开自述[[/自我状态]]正式回复',
+                'native thinking',
+                {'jsonl_usage': {'stream_totals_match': True}},
+                {},
+            )),
+        ]
+        result, _ = self._run(events=events)
+        self.assertEqual('native thinking', result['thinking'])
+        self.assertEqual('公开自述', result['self_state'])
+        self.assertEqual('正式回复', result['text'])
+        self.assertEqual(
+            [
+                {'type': 'thinking', 'text': 'native thinking'},
+                {'type': 'self_state', 'text': '公开自述'},
+                {'type': 'text', 'text': '正式回复'},
+            ],
+            json.loads(result['display_segments']),
+        )
 
     def test_empty_reply_is_still_an_error_not_silence(self):
         import gateway
