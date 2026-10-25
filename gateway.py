@@ -4300,8 +4300,8 @@ def _cc_resident_stream_gen(
         should_send_relationship,
     )
     from chat.display_thinking import (
-        append_authored_thinking_instruction,
-        authored_thinking_instruction_suffix,
+        append_authored_self_state_instruction,
+        authored_self_state_instruction_suffix,
         resolve_effective_display_thinking_mode,
     )
     from tools import cc_usage_observability as _cc_obs
@@ -4329,7 +4329,7 @@ def _cc_resident_stream_gen(
             return source_messages
         prepared = list(source_messages)
         last_message = dict(prepared[-1])
-        last_message['content'] = append_authored_thinking_instruction(
+        last_message['content'] = append_authored_self_state_instruction(
             last_message.get('content'), display_thinking_mode,
             display_thinking_prompt,
         )
@@ -4446,11 +4446,11 @@ def _cc_resident_stream_gen(
                 last_content = prepared_msgs[-1].get('content')
                 if (
                     isinstance(last_content, (str, list))
-                    and authored_thinking_instruction_suffix(
+                    and authored_self_state_instruction_suffix(
                         display_thinking_mode, display_thinking_prompt,
                     )
                 ):
-                    display_suffix_text = authored_thinking_instruction_suffix(
+                    display_suffix_text = authored_self_state_instruction_suffix(
                         display_thinking_mode, display_thinking_prompt,
                     )
             hb_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
@@ -4615,7 +4615,7 @@ def _cc_resident_stream_gen(
             content = [{'type': 'text', 'text': prefix}] + list(last_content)
         else:
             content = last_content
-        content = append_authored_thinking_instruction(
+        content = append_authored_self_state_instruction(
             content, display_thinking_mode, display_thinking_prompt,
         )
         commit_meta = {
@@ -5189,6 +5189,8 @@ def _run_unified_normal_main_chat_turn(
 
         text_acc = []
         thinking_acc = []
+        self_state_acc = []
+        display_segments = DisplaySegmentAccumulator()
         tool_calls = []
         tool_decisions = {}
         usage = {}
@@ -5200,8 +5202,13 @@ def _run_unified_normal_main_chat_turn(
         ):
             if evt == 'text':
                 text_acc.append(str(payload or ''))
+                display_segments.append_text(str(payload or ''))
             elif evt == 'think':
                 thinking_acc.append(str(payload or ''))
+                display_segments.append_thinking(str(payload or ''))
+            elif evt == 'self_state':
+                self_state_acc.append(str(payload or ''))
+                display_segments.append_self_state(str(payload or ''))
             elif evt == 'tool_use' and isinstance(payload, dict):
                 tool_name = str(payload.get('name') or 'unknown')
                 tool_decisions[payload.get('id')] = payload.get('lease_decision')
@@ -5218,6 +5225,7 @@ def _run_unified_normal_main_chat_turn(
                     'result': '',
                     'success': True,
                 })
+                display_segments.append_tool(len(tool_calls) - 1)
             elif evt == 'tool_result' and isinstance(payload, dict):
                 index = next(
                     (
@@ -5308,6 +5316,8 @@ def _run_unified_normal_main_chat_turn(
         result_cache_info.update(usage)
         result_cache_info['tool_calls'] = tool_calls
         result_cache_info['thinking'] = ''.join(thinking_acc)
+        result_cache_info['self_state'] = ''.join(self_state_acc)
+        result_cache_info['display_segments'] = display_segments.to_json()
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
         transcript_skip = commit_shared_transcript_watermark(
             watermark,
@@ -5338,6 +5348,8 @@ def _run_unified_normal_main_chat_turn(
             'text': text,
             'silent': silent,
             'thinking': ''.join(thinking_acc),
+            'self_state': ''.join(self_state_acc),
+            'display_segments': display_segments.to_json(),
             'tool_calls': tool_calls,
             'provider': 'claude_code',
             'model_identity': str(
@@ -6175,6 +6187,9 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
                 think_acc.append(str(payload or ''))
                 display_segments.append_thinking(str(payload or ''))
                 yield _sse_json({'t': 'think', 'd': payload})
+            elif evt == 'self_state':
+                display_segments.append_self_state(str(payload or ''))
+                yield _sse_json({'t': 'self_state', 'd': payload})
             elif evt == 'tool_use':
                 item = {
                     'id': payload.get('id'),
@@ -6427,6 +6442,8 @@ def _stream_cc_first_turn(
             if pevt == 'think':
                 thinking_acc.append(str(ppard or ''))
                 yield _sse_json({'t': 'think', 'd': ppard})
+            elif pevt == 'self_state':
+                yield _sse_json({'t': 'self_state', 'd': ppard})
             elif pevt == 'tool_use':
                 yield from _emit_tool_use(ppard)
             elif pevt == 'tool_result':
@@ -6681,9 +6698,11 @@ def _stream_cc_first_turn(
                         yield _sse_json({'t': 'ping'})
                     continue
 
-                if evt in ('think', 'tool_use', 'tool_result'):
+                if evt in ('think', 'self_state', 'tool_use', 'tool_result'):
                     if evt == 'think':
                         display_segments.append_thinking(str(payload or ''))
+                    elif evt == 'self_state':
+                        display_segments.append_self_state(str(payload or ''))
                     elif evt == 'tool_use':
                         display_segments.append_tool(display_tool_index)
                         display_tool_index += 1
@@ -6692,6 +6711,8 @@ def _stream_cc_first_turn(
                     elif evt == 'think':
                         thinking_acc.append(str(payload or ''))
                         yield _sse_json({'t': 'think', 'd': payload})
+                    elif evt == 'self_state':
+                        yield _sse_json({'t': 'self_state', 'd': payload})
                     elif evt == 'tool_use':
                         yield from _emit_tool_use(payload)
                     elif evt == 'tool_result':
@@ -7180,6 +7201,9 @@ def _stream_cc_daily_soft_window(
                 think_acc.append(str(payload or ''))
                 display_segments.append_thinking(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+            elif evt == 'self_state':
+                display_segments.append_self_state(str(payload or ''))
+                yield 'data: ' + json.dumps({'t': 'self_state', 'd': payload}) + SSE_END
             elif evt == 'tool_use':
                 cc_tool_calls.append({
                     'id': payload.get('id'), 'name': payload.get('name'),
@@ -7378,6 +7402,11 @@ def _stream_cc_daily_soft_window(
             live_content,
             display_segments.as_list(),
             thinking=''.join(think_acc),
+            self_state=''.join(
+                str(item.get('text') or '')
+                for item in display_segments.as_list()
+                if item.get('type') == 'self_state'
+            ),
             tool_calls=cc_tool_calls,
             choices=_live_choices,
         )
@@ -7402,6 +7431,7 @@ def _stream_cc_daily_soft_window(
                 'd': {
                     'content': canonical.content,
                     'thinking': canonical.thinking,
+                    'self_state': canonical.self_state,
                     'display_segments': json.loads(canonical.display_segments),
                     'tool_calls': [dict(tc) for tc in canonical.tool_calls],
                     'choices': list(canonical.choices),
@@ -7855,6 +7885,9 @@ def chat_stream():
                         elif evt == 'think':
                             display_segments.append_thinking(str(payload or ''))
                             yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+                        elif evt == 'self_state':
+                            display_segments.append_self_state(str(payload or ''))
+                            yield 'data: ' + json.dumps({'t': 'self_state', 'd': payload}) + SSE_END
                         elif evt == 'tool_use':
                             cc_tool_calls.append({'id': payload.get('id'), 'name': payload.get('name'),
                                                   'args': payload.get('args'), 'result': '', 'success': True})
@@ -9499,6 +9532,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     ],
                     ensure_ascii=False,
                 ),
+                display_segments_json=str(main_turn.get('display_segments') or ''),
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
                 settlement_required=False,
@@ -9615,6 +9649,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'action': wake_action,
             'content': str(main_turn.get('text') or ''),
             'thoughts': str(main_turn.get('thinking') or ''),
+            'self_state': str(main_turn.get('self_state') or ''),
+            'display_segments': json.loads(main_turn.get('display_segments') or '[]'),
             'provider': 'claude_code',
             'model': main_turn.get('model_identity'),
             'wake_run_id': wake_run_id,
