@@ -39,6 +39,8 @@ CHAT_WAKE_DEFAULTS = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "calendar.read",
+    "calendar.write",
     "web.search",
     "web.read",
     "health.read",

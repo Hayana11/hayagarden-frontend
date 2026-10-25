@@ -150,6 +150,13 @@ app.register_blueprint(create_context_usage_blueprint(
 app.register_blueprint(create_health_blueprint(
     db_path=HEALTH_DB_PATH,
 ))
+from tools import calendar_store
+from calendar_routes import create_calendar_blueprint
+calendar_store.ensure_schema(DB_PATH)
+app.register_blueprint(create_calendar_blueprint(
+    db_path=DB_PATH,
+    health_db_path=HEALTH_DB_PATH,
+))
 app.register_blueprint(create_flow_studio_blueprint(db_path=DB_PATH))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
@@ -4595,6 +4602,7 @@ from wake_push_routes import create_wake_push_blueprint
 app.register_blueprint(create_wake_push_blueprint(
     get_db, _fetch_pending_wake_row, _soft_window_enabled, HEALTH_DB_PATH,
     incoming_call=_voice_call_service.incoming_ringing_id,
+    calendar_pending=lambda device_id: calendar_store.has_pending_commands(DB_PATH, device_id),
 ))
 
 # ── Board 留言板 ───────────────────────────────────────────

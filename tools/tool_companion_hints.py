@@ -27,6 +27,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
+    ("calendar", "日历", ("calendar.read", "calendar.write")),
     ("health", "健康", ("health.read",)),
     ("gallery", "相册", ("gallery.save", "gallery.recall", "gallery.screenshot")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
@@ -74,6 +75,16 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "开始行动计时",
         "companion_hint": "当对话上下文表明一个具体行动适合马上计时时，可以创建行动计时；模糊建议、信息不足或没有具体动作时不创建。",
         "physical_boundary": "只创建行动计时任务；不会写待办、日期倒计时或自主触发，也不会替代完成反馈和浮窗。",
+    },
+    "calendar.read": {
+        "display_label": "查看手机日历",
+        "companion_hint": "她提到哪天要做什么、问自己有没有空，或者我想替她安排点什么之前，可以先看看她手机日历里的真实日程。数据是手机上次同步时的样子，过旧就说明，不要猜。",
+        "physical_boundary": "只读手机最近一次同步上来的系统日历事件；不会修改任何事件，也读不到同步窗口以外的日程。",
+    },
+    "calendar.write": {
+        "display_label": "写手机日历",
+        "companion_hint": "约好的事、该吃饭该睡觉的时间、她要我提醒的事，确定了时间就可以写进她手机里那本「费佳」日历，系统会按时提醒她。时间不明确时先问清楚。",
+        "physical_boundary": "只能在「费佳」这本日历里新建、修改、删除；她自己的日历只读不碰。写入先进队列，手机同步后才真正生效。",
     },
     "health.read": {
         "display_label": "查看健康数据",
