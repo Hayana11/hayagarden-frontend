@@ -3,6 +3,7 @@ import { parseDisplaySegments, rowToMsg } from '../src/lib/chat.ts';
 
 const ordered = [
   { type: 'thinking', text: 'think A' },
+  { type: 'self_state', text: 'public A' },
   { type: 'text', text: 'text B' },
   { type: 'tool', tool_index: 0 },
   { type: 'text', text: 'text C' },
@@ -11,6 +12,7 @@ const ordered = [
 ];
 assert.deepEqual(parseDisplaySegments(JSON.stringify(ordered), 2), [
   { type: 'thinking', text: 'think A' },
+  { type: 'self_state', text: 'public A' },
   { type: 'text', text: 'text B' },
   { type: 'tool', toolIndex: 0 },
   { type: 'text', text: 'text C' },
@@ -27,7 +29,7 @@ const msg = rowToMsg({
   tool_calls: JSON.stringify([{ name: 'tool-a' }, { name: 'tool-b' }]),
 });
 assert.deepEqual(msg.displaySegments?.map((segment) => segment.type), [
-  'thinking', 'text', 'tool', 'text', 'tool', 'text',
+  'thinking', 'self_state', 'text', 'tool', 'text', 'tool', 'text',
 ]);
 assert.deepEqual(msg.displaySegments?.filter((segment) => segment.type === 'tool'), [
   { type: 'tool', toolIndex: 0 },
@@ -70,6 +72,7 @@ assert.match(screen, /renderToolItems/);
 assert.match(screen, /renderLegacyAssistantContent/);
 assert.ok(screen.includes('segment.toolIndex >= m.toolCalls.length'));
 assert.match(screen, /clearLivePresentation/);
+assert.match(screen, /renderSelfStateBlock/);
 assert.match(screen, /onThink:/);
 assert.match(screen, /onText:/);
 assert.match(screen, /onToolUse:/);
