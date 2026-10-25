@@ -1,4 +1,5 @@
 import datetime
+import datetime
 import json
 import os
 import re
@@ -51,6 +52,20 @@ class ChatDurableOrderTests(unittest.TestCase):
             {'type': 'thinking', 'text': 'x'},
             {'type': 'text', 'text': 'cd'},
         ])
+
+    def test_t3_self_state_is_independent_and_ordered(self):
+        acc = DisplaySegmentAccumulator()
+        acc.append_thinking('native')
+        acc.append_self_state('public state')
+        acc.append_text('formal')
+        self.assertEqual(
+            finalize_display_segments(acc.as_list()),
+            [
+                {'type': 'thinking', 'text': 'native'},
+                {'type': 'self_state', 'text': 'public state'},
+                {'type': 'text', 'text': 'formal'},
+            ],
+        )
 
     def test_t3_tool_result_does_not_change_order(self):
         acc = DisplaySegmentAccumulator()
