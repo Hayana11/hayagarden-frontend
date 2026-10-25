@@ -1,9 +1,5 @@
 package com.bettermifitness.sync
 
-/**
- * Swift registers handlers via [AutoSyncBridge.setHandlers] at app launch so
- * Kotlin Settings can schedule/cancel BGAppRefresh and read status.
- */
 actual object AutoSyncPlatform {
     actual fun scheduleBackgroundRefresh() {
         AutoSyncBridge.invokeSchedule()
@@ -17,25 +13,24 @@ actual object AutoSyncPlatform {
         return AutoSyncBridge.invokeStatus()
     }
 
-    /** Debug test control removed from Settings UI; keep false so it never appears. */
+    actual fun supportsBatteryOptimization(): Boolean = false
+
+    actual fun batteryOptimizationStatus(): BatteryOptimizationStatus =
+        BatteryOptimizationStatus.UNAVAILABLE
+
+    actual fun requestBatteryOptimizationExemption(): Boolean = false
+
+    actual suspend fun currentBackgroundWorkState(): String = "UNAVAILABLE"
+
     actual fun supportsOpportunisticRefreshTest(): Boolean = false
 
     actual fun runOpportunisticRefreshTest(onDone: (String) -> Unit) {
-        if (!supportsOpportunisticRefreshTest()) {
-            onDone("skipped")
-            return
-        }
-        // Same path as BGAppRefreshTask (last 1 day, requires auto-sync ON).
-        BackgroundSync.runOpportunisticBackgroundSync(onDone)
+        onDone("skipped")
     }
 
     actual fun supportsShortcutsHelp(): Boolean = true
 }
 
-/**
- * Filled from Swift (BackgroundSyncManager.register) so commonMain can drive
- * BGTaskScheduler without importing Swift types into Kotlin.
- */
 object AutoSyncBridge {
     private var onSchedule: (() -> Unit)? = null
     private var onCancel: (() -> Unit)? = null

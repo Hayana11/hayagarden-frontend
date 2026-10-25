@@ -32,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -42,6 +43,10 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.bettermifitness.sync.BatteryOptimizationStatus
 import com.bettermifitness.sync.i18n.L10n
 import com.bettermifitness.sync.platform.appVersionLabel
 import com.bettermifitness.sync.theme.BrandShapes
@@ -63,6 +68,17 @@ private const val CREDIT_URL = "https://github.com/ilyasaftr"
 fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onLogout: () -> Unit = {}) {
     val state by viewModel.uiState.collectAsState()
     val healthName = state.healthServiceName.ifBlank { L10n.string(L10n.healthFallback) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshBackgroundDiagnostics()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(state.loggedOut) {
         if (state.loggedOut) {
@@ -128,6 +144,10 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onLogout: (
                     onAutoSyncChange = viewModel::setAutoSync,
                     onTestBg = viewModel::runBackgroundRefreshTest,
                 )
+                BackgroundSyncDiagnosticsCard(
+                    state = state,
+                    onBatteryRequest = viewModel::requestBatteryOptimizationExemption,
+                )
                 WhatToSyncCard(
                     enabledMetrics = state.enabledMetrics,
                     onToggle = viewModel::setMetricEnabled,
@@ -192,6 +212,76 @@ private fun StatusRow(label: String, value: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
+    }
+}
+
+
+@Composable
+private fun BackgroundSyncDiagnosticsCard(
+    state: SettingsUiState,
+    onBatteryRequest: () -> Unit,
+) {
+    SettingsGroup(title = L10n.string(L10n.settingsBackgroundDiagnostics)) {
+        if (!state.autoSync) {
+            Text(
+                L10n.string(L10n.settingsAutoSyncDisabled),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            )
+        } else {
+            if (state.showBatteryOptimization) {
+                StatusRow(
+                    label = L10n.string(L10n.settingsBatteryOptimization),
+                    value = when (state.batteryOptimizationStatus) {
+                        BatteryOptimizationStatus.EXEMPT ->
+                            L10n.string(L10n.settingsBatteryExempt)
+                        BatteryOptimizationStatus.NOT_EXEMPT ->
+                            L10n.string(L10n.settingsBatteryNotExempt)
+                        BatteryOptimizationStatus.UNAVAILABLE ->
+                            L10n.string(L10n.settingsBatteryUnavailable)
+                    },
+                )
+                if (state.batteryOptimizationStatus == BatteryOptimizationStatus.NOT_EXEMPT) {
+                    OutlinedButton(
+                        onClick = onBatteryRequest,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                    ) {
+                        Text(L10n.string(L10n.settingsRequestBatteryExemption))
+                    }
+                }
+            }
+            StatusRow(
+                label = L10n.string(L10n.settingsWorkManagerState),
+                value = state.workerStateLabel,
+            )
+            HorizontalDivider(
+                Modifier.padding(start = 14.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+            )
+            StatusRow(
+                label = L10n.string(L10n.settingsWorkerLastStarted),
+                value = state.lastWorkerStartedLabel,
+            )
+            StatusRow(
+                label = L10n.string(L10n.settingsWorkerLastFinished),
+                value = state.lastWorkerFinishedLabel,
+            )
+            StatusRow(
+                label = L10n.string(L10n.settingsWorkerLastResult),
+                value = state.lastWorkerOutcomeLabel,
+            )
+            state.lastWorkerError?.let { error ->
+                Text(
+                    text = "${L10n.string(L10n.settingsWorkerLastError)}: $error",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
+        }
     }
 }
 
