@@ -15,6 +15,7 @@ globalThis.fetch = async () => {
   const body = [
     'data: {"t":"ping"}\n\n',
     'data: {"t":"ping"}\n\n',
+    'data: {"t":"self_state","d":"public"}\n\n',
     'data: {"t":"text","d":"hello"}\n\n',
     'data: {"t":"done","ok":true}\n\n',
   ].join('');
@@ -27,6 +28,7 @@ globalThis.fetch = async () => {
 try {
   const seen = {
     think: [],
+    selfState: [],
     text: [],
     toolUse: [],
     toolResult: [],
@@ -36,6 +38,7 @@ try {
     42,
     {
       onThink: (value) => seen.think.push(value),
+      onSelfState: (value) => seen.selfState.push(value),
       onText: (value) => seen.text.push(value),
       onToolUse: (idx, value) => seen.toolUse.push([idx, value]),
       onToolResult: (idx, value) => seen.toolResult.push([idx, value]),
@@ -45,6 +48,7 @@ try {
   );
 
   assert.equal(result.ok, true);
+  assert.deepEqual(seen.selfState, ['public']);
   assert.deepEqual(seen.text, ['hello']);
   assert.deepEqual(seen.think, []);
   assert.deepEqual(seen.toolUse, []);
@@ -56,8 +60,8 @@ try {
   );
   assert.equal(
     safetyDelays.filter(({ delay }) => delay === 420000).length,
-    2,
-    'provider watchdog is armed initially and only by real provider text',
+    3,
+    'provider watchdog is armed initially and by provider self-state/text events',
   );
 } finally {
   globalThis.fetch = originalFetch;
