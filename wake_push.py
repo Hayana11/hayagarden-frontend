@@ -234,6 +234,13 @@ def with_call_delta(payload, delta):
     return out
 
 
+def with_calendar_flag(payload):
+    """Mark a payload (or an empty one) with ``calendar: true``: sync the calendar now."""
+    out = dict(payload) if payload is not None else {'has_message': False}
+    out['calendar'] = True
+    return out
+
+
 def poll(open_conn, take, wait_s, sleep=time.sleep, monotonic=time.monotonic):
     """Run ``take(conn)`` until it yields a payload or ``wait_s`` passes."""
     deadline = monotonic() + wait_s

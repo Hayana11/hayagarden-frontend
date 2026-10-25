@@ -305,3 +305,33 @@ class CallDeltaRouteTests(WakePushRouteTests):
     def test_a_malformed_known_call_counts_as_none(self):
         self.ringing = 'abc123'
         self.assertEqual(self.poll(known='x%27%3B--')['call']['id'], 'abc123')
+
+
+class CalendarFlagRouteTests(WakePushRouteTests):
+    """The same suite with the calendar flag wired (message protocol unchanged), plus
+    ``calendar: true`` for the device that has an unfetched calendar write."""
+
+    def setUp(self):
+        super().setUp()
+        self.pending_for = set()
+        app = Flask(__name__)
+        app.register_blueprint(create_wake_push_blueprint(
+            self.open_db, fetch_row, lambda: False, self.health_db,
+            calendar_pending=lambda device_id: device_id in self.pending_for))
+        self.client = app.test_client()
+
+    def poll(self, device, wait=0):
+        return self.get(self.headers(device), 'protocol=ack&wait=%d' % wait).get_json()
+
+    def test_pending_calendar_write_returns_at_once_for_that_device_only(self):
+        self.pending_for.add(self.a['deviceId'])
+        started = time.monotonic()
+        self.assertEqual(self.poll(self.a, wait=25), {'has_message': False, 'calendar': True})
+        self.assertLess(time.monotonic() - started, 5, 'does not wait out the long poll')
+        self.assertEqual(self.poll(self.b), {'has_message': False})
+
+    def test_flag_rides_beside_a_message(self):
+        wake = self.add_message('日历和消息')
+        self.pending_for.add(self.a['deviceId'])
+        body = self.poll(self.a)
+        self.assertEqual((body['id'], body['calendar']), ('wake-%d' % wake, True))
