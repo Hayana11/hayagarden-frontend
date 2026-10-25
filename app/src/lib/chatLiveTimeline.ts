@@ -3,16 +3,18 @@ import { lastItem } from './lastItem';
 
 export type LiveSegment =
   | { id: number; type: 'thinking'; text: string }
+  | { id: number; type: 'self_state'; text: string }
   | { id: number; type: 'text'; text: string }
   | { id: number; type: 'tool'; idx: number; tool: ChatToolCall };
 
-export type LiveEvent = 'connecting' | 'thinking' | 'text' | 'tool';
+export type LiveEvent = 'connecting' | 'thinking' | 'self_state' | 'text' | 'tool';
 
 export interface CanonicalLiveProjection {
   content: string;
   thinking?: string;
+  self_state?: string;
   display_segments: Array<{
-    type: 'thinking' | 'text' | 'tool';
+    type: 'thinking' | 'self_state' | 'text' | 'tool';
     text?: string;
     tool_index?: number;
   }>;
@@ -41,7 +43,7 @@ export function isTextCaretActive(state: LiveState): boolean {
   return state.lastEvent === 'text' && lastItem(state.segments)?.type === 'text';
 }
 
-function appendDelta(state: LiveState, type: 'thinking' | 'text', delta: string): LiveState {
+function appendDelta(state: LiveState, type: 'thinking' | 'self_state' | 'text', delta: string): LiveState {
   if (!delta) return state;
   const segments = [...state.segments];
   const last = segments[segments.length - 1];
@@ -55,6 +57,10 @@ function appendDelta(state: LiveState, type: 'thinking' | 'text', delta: string)
 
 export function appendThinkingDelta(state: LiveState, delta: string): LiveState {
   return appendDelta(state, 'thinking', delta);
+}
+
+export function appendSelfStateDelta(state: LiveState, delta: string): LiveState {
+  return appendDelta(state, 'self_state', delta);
 }
 
 export function appendTextDelta(state: LiveState, delta: string): LiveState {
@@ -110,7 +116,7 @@ export function replaceWithCanonicalProjection(
   let nextSegmentId = 0;
   let lastEvent: LiveEvent = 'connecting';
   for (const item of projection.display_segments || []) {
-    if (item.type === 'thinking' || item.type === 'text') {
+    if (item.type === 'thinking' || item.type === 'self_state' || item.type === 'text') {
       const text = typeof item.text === 'string' ? item.text : '';
       if (!text) continue;
       segments.push({ id: nextSegmentId, type: item.type, text });
