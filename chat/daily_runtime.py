@@ -8229,7 +8229,7 @@ def ensure_resident_and_stream(
             dict(snapshot) if isinstance(snapshot, Mapping) else {}
         )
         from chat.display_thinking import (
-            authored_thinking_instruction_suffix,
+            authored_self_state_instruction_suffix,
             normalize_display_thinking_mode,
             resolve_effective_display_thinking_mode,
         )
@@ -8245,7 +8245,7 @@ def ensure_resident_and_stream(
             getattr(plan, 'provider_display_thinking_prompt', '') or ''
         ).strip()
         if display_prompt:
-            plan.provider_display_thinking_suffix = authored_thinking_instruction_suffix(
+            plan.provider_display_thinking_suffix = authored_self_state_instruction_suffix(
                 effective_display_mode, display_prompt,
             )
         if not plan.is_cold and not plan.is_respawn and actual_cold:
