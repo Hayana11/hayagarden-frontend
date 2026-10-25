@@ -419,12 +419,13 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                 static_system='STATIC',
             )
 
-    def test_auto_display_thinking_uses_resident_model_authority(self):
+    def test_auto_display_thinking_keeps_self_state_for_all_resident_models(self):
+        from chat.display_thinking import AUTHORED_SELF_STATE_INSTRUCTION
         from chat.display_thinking import prepare_daily_display_thinking_plan
 
-        for identity, expected_suffix in (
-            ('explicit:claude-opus-5-5', False),
-            ('explicit:claude-opus-4-6', True),
+        for identity in (
+            'explicit:claude-opus-5-5',
+            'explicit:claude-opus-4-6',
         ):
             with self.subTest(model_identity=identity):
                 db = _tmp_db()
@@ -439,13 +440,9 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                     list(dr.stream_daily_resident_turn(
                         plan, resident=resident, env={}, static_system='STATIC',
                     ))
-                    marker = '正式回复不能为空。'
-                    self.assertEqual(expected_suffix, marker in resident.sent[0])
+                    self.assertIn(AUTHORED_SELF_STATE_INSTRUCTION, resident.sent[0])
                     self.assertEqual('auto', plan.provider_display_thinking_mode)
-                    self.assertEqual(
-                        'native' if not expected_suffix else 'auto',
-                        plan.provider_display_thinking_effective_mode,
-                    )
+                    self.assertEqual('auto', plan.provider_display_thinking_effective_mode)
                 finally:
                     if plan is not None:
                         dr._release_lease(plan)
