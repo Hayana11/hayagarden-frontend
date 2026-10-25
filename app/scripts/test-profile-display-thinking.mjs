@@ -11,10 +11,10 @@ const app = fs.readFileSync(path.join(root, '..', 'app.py'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
 
 const persona = profile.indexOf('profile-section-title">PROFILE');
-const thinking = profile.indexOf('profile-section-title">think');
+const selfState = profile.indexOf('profile-section-title">自我状态');
 const tools = profile.indexOf('profile-section-title">TOOL');
-assert.ok(persona >= 0 && thinking > persona && tools > thinking, 'profile order must be PROFILE -> think -> TOOL');
-assert.match(profile, /aria-label="可见思绪 prompt"/);
+assert.ok(persona >= 0 && selfState > persona && tools > selfState, 'profile order must be PROFILE -> 自我状态 -> TOOL');
+assert.match(profile, /aria-label="自我状态 prompt"/);
 assert.match(profile, /恢复默认/);
 assert.match(profile, /estimatePersonaTokens/);
 assert.match(profile, /aria-label="保存费佳档案"/);
