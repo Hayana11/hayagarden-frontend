@@ -1,4 +1,5 @@
 import json
+import json
 import sys
 import tempfile
 import types
@@ -109,12 +110,12 @@ class CanonicalTurnTests(unittest.TestCase):
         self.assertEqual([call['result'] for call in turn.tool_calls], ['result A', 'result B'])
         self.assertEqual([row['index'] for row in turn.provider_rounds], [1, 2, 3])
 
-    def test_native_and_authored_thinking_have_one_owner(self):
+    def test_native_and_self_state_project_to_independent_channels(self):
         rows = [
             _row('user', message={'role': 'user', 'content': 'question'}),
             _row('assistant', uuid='a1', message={'role': 'assistant', 'content': [
                 {'type': 'thinking', 'thinking': 'native thought'},
-                {'type': 'text', 'text': '<思绪>authored duplicate</思绪>formal'},
+                {'type': 'text', 'text': '[[自我状态]]authored public state[[/自我状态]]formal'},
             ]}),
             _row('result', stop_reason='end_turn'),
         ]
@@ -122,11 +123,34 @@ class CanonicalTurnTests(unittest.TestCase):
         authored = self._build(rows, mode='authored')
         auto = self._build(rows, mode='auto')
         self.assertEqual(native.thinking, 'native thought')
+        self.assertEqual(native.self_state, 'authored public state')
         self.assertEqual(native.content, 'formal')
-        self.assertEqual(authored.thinking, 'authored duplicate')
+        self.assertEqual(authored.thinking, 'native thought')
+        self.assertEqual(authored.self_state, 'authored public state')
         self.assertEqual(authored.content, 'formal')
         self.assertEqual(auto.thinking, 'native thought')
+        self.assertEqual(auto.self_state, 'authored public state')
         self.assertEqual(auto.content, 'formal')
+        self.assertEqual(
+            ['thinking', 'self_state', 'text'],
+            [item['type'] for item in json.loads(auto.display_segments)],
+        )
+
+    def test_legacy_authored_protocol_projects_as_self_state(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'content': [{'type': 'text', 'text': '<思绪>历史自述</思绪>正式内容'}],
+            }),
+            _row('result', stop_reason='end_turn'),
+        ])
+        self.assertEqual(turn.thinking, '')
+        self.assertEqual(turn.self_state, '历史自述')
+        self.assertEqual(turn.content, '正式内容')
+        self.assertEqual(
+            ['self_state', 'text'],
+            [item['type'] for item in json.loads(turn.display_segments)],
+        )
 
     def test_missing_final_provider_data_fails_closed(self):
         with self.assertRaises(CanonicalTurnError) as missing_result:
@@ -462,6 +486,18 @@ class CanonicalTurnTests(unittest.TestCase):
                 choices=['A', 'B'],
             ),
         )
+        self.assertNotEqual(
+            exact_left,
+            projection_hash(
+                'same text',
+                '[{"type":"text","text":"same text"}]',
+                thinking='same thinking',
+                self_state='public state',
+                tool_calls=[tool],
+                choices=['A', 'B'],
+            ),
+        )
+
         self.assertNotEqual(
             exact_left,
             projection_hash(
