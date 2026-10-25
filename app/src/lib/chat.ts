@@ -2,7 +2,7 @@
 // Mirrors the production backend exactly:
 //   - chat_messages rows (author/content/thinking/tool_calls/branches/...)
 //   - POST /api/chat/send -> { message_id }, then POST /api/gw/chat/stream
-//   - SSE events `data: {t, d, idx?}` — think/text/tool_use/tool_result/
+//   - SSE events `data: {t, d, idx?}` — think/self_state/text/tool_use/tool_result/
 //     trace_summary/usage/notice/done/err (家里 t/d 信封，chatnest 语义)
 import { chatDayKeyFromLocalTs } from './dailySoftWindow';
 import { sseUrl } from './http';
@@ -87,6 +87,7 @@ export interface ChatAttachment {
 
 export type DisplaySegment =
   | { type: 'thinking'; text: string }
+  | { type: 'self_state'; text: string }
   | { type: 'text'; text: string }
   | { type: 'tool'; toolIndex: number };
 
@@ -250,7 +251,10 @@ export function parseDisplaySegments(raw: string | null | undefined, toolCount =
   for (const item of parsed) {
     if (!item || typeof item !== 'object') return undefined;
     const value = item as { type?: unknown; text?: unknown; tool_index?: unknown };
-    if ((value.type === 'thinking' || value.type === 'text') && typeof value.text === 'string') {
+    if (
+      (value.type === 'thinking' || value.type === 'self_state' || value.type === 'text')
+      && typeof value.text === 'string'
+    ) {
       out.push({ type: value.type, text: value.text });
       continue;
     }
@@ -449,6 +453,7 @@ export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefin
 
 export interface StreamHandlers {
   onThink: (delta: string) => void;
+  onSelfState?: (delta: string) => void;
   onText: (delta: string) => void;
   onToolUse: (idx: number, tc: ChatToolCall) => void;
   onToolResult: (idx: number, tc: ChatToolCall) => void;
@@ -583,6 +588,10 @@ export async function streamChatReply(
           case 'think':
             armProvider();
             handlers.onThink(String(ev.d ?? ''));
+            break;
+          case 'self_state':
+            armProvider();
+            handlers.onSelfState?.(String(ev.d ?? ''));
             break;
           case 'text':
             armProvider();
