@@ -157,7 +157,7 @@ jobs:
           python -m unittest tests.test_hidden_flow_activation_contract -v
           python -m unittest tests.test_hidden_flow_observability -v
       - name: Voice call server ordering and request-limit regressions
-        run: python -m unittest tests.test_voice_call tests.test_voice_call_pairs -v
+        run: python -m unittest tests.test_voice_call tests.test_voice_call_pairs tests.test_voice_call_cancel -v
 
       - name: Claude chat effort backend regressions
         env:
