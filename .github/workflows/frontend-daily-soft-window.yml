@@ -144,6 +144,8 @@ jobs:
           python -m unittest tests.test_chat_terminal_contract
           python -m unittest tests.test_health_bridge_r1 -v
           python -m unittest tests.test_canonical_turn -v
+          python -m unittest tests.test_display_thinking -v
+          python -m unittest tests.test_unified_proactive_modes -v
           python -m unittest tests.test_daily_runtime.DailyRuntimeCursorCASTests -v
           python -m unittest tests.test_memory_surface_daily -v
           python -m unittest tests.test_daily_runtime.DailyRuntimeTurnTests.test_cold_turn_atomic_persist_and_cursor
