@@ -9212,6 +9212,7 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
             try:
+                # A reconnect observes the existing logical turn and owns no lease.
                 if _owns_logical_turn:
                     release_turn(
                         conversation_id=_conv,
