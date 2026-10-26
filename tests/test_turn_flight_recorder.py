@@ -380,34 +380,35 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
 
     def test_persisted_reconnect_is_bounded_by_next_user_turn(self):
         def lookup(rows):
-            conn = sqlite3.connect(':memory:')
-            conn.row_factory = sqlite3.Row
-            conn.execute(
-                """
-                CREATE TABLE daily_message_contexts (
-                    message_id INTEGER PRIMARY KEY,
-                    context_id INTEGER NOT NULL,
-                    context_epoch INTEGER NOT NULL,
-                    role TEXT NOT NULL
-                )
-                """
-            )
-            conn.executemany(
-                """
-                INSERT INTO daily_message_contexts
-                    (message_id, context_id, context_epoch, role)
-                VALUES (?, ?, ?, ?)
-                """,
-                rows,
-            )
-            try:
-                with mock.patch.object(gateway, 'get_db', return_value=conn):
-                    return (
-                        gateway._find_persisted_assistant_after(13166),
-                        gateway._find_persisted_assistant_after(13168),
+            def one(user_message_id):
+                conn = sqlite3.connect(':memory:')
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    """
+                    CREATE TABLE daily_message_contexts (
+                        message_id INTEGER PRIMARY KEY,
+                        context_id INTEGER NOT NULL,
+                        context_epoch INTEGER NOT NULL,
+                        role TEXT NOT NULL
                     )
-            finally:
-                conn.close()
+                    """
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO daily_message_contexts
+                        (message_id, context_id, context_epoch, role)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                try:
+                    with mock.patch.object(gateway, 'get_db', return_value=conn):
+                        return gateway._find_persisted_assistant_after(
+                            user_message_id,
+                        )
+                finally:
+                    conn.close()
+            return one(13166), one(13168)
 
         self.assertEqual(
             (13167, 13169),
@@ -419,7 +420,7 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             ]),
         )
         self.assertEqual(
-            (None, 13168),
+            (None, 13169),
             lookup([
                 (13166, 32, 30, 'user'),
                 (13168, 32, 30, 'user'),
@@ -430,6 +431,7 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             (None, 13169),
             lookup([
                 (13166, 32, 30, 'user'),
+                (13167, 33, 31, 'assistant'),
                 (13168, 32, 30, 'user'),
                 (13169, 32, 30, 'assistant'),
             ]),
@@ -448,7 +450,7 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 gateway, '_find_persisted_assistant_after', return_value=None,
             ))
-            stack.enter_context(mock.patch.object(
+            active_lookup = stack.enter_context(mock.patch.object(
                 moments_turn,
                 'get_active_turn',
                 side_effect=[
@@ -471,7 +473,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             ))
         self.assertTrue(chunks)
         self.assertIn('same_turn_reconnect', ''.join(chunks))
-        sleep.assert_not_called()
+        self.assertEqual(2, active_lookup.call_count)
+        sleep.assert_called_once_with(0.5)
         self.assertNotIn('13167', ''.join(chunks))
 
 
