@@ -286,9 +286,6 @@ def _record_daily_stream_cancellation(
         'unsent_release': bool(unsent_release),
         'abort_requested': bool(abort_requested),
         'respawn_requested': bool(respawn_requested),
-        # This names the existing abort(respawn=True) decision; it does not
-        # add or change any resident lifecycle action.
-        'resident_respawned': bool(respawn_requested),
         'fail_closed': bool(
             abort_requested
             and state.get('stdin_flushed')
@@ -300,6 +297,25 @@ def _record_daily_stream_cancellation(
     if isinstance(turn_data, dict):
         turn_data['_terminal_contract_diag'] = diagnostic
     return diagnostic
+
+
+def _emit_terminal_contract_diag_once(turn_data):
+    """Emit the existing terminal sink once, including outer-generator unwind."""
+    if not isinstance(turn_data, dict):
+        return False
+    if turn_data.get('_terminal_contract_emitted'):
+        return False
+    diagnostic = turn_data.get('_terminal_contract_diag')
+    if not isinstance(diagnostic, dict) or not diagnostic:
+        return False
+    turn_data['_terminal_contract_emitted'] = True
+    payload = dict(diagnostic)
+    payload['lock_released'] = True
+    logging.getLogger('gateway').warning(
+        'chat_terminal_contract %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+    return True
 
 
 def _resident_display_thinking_mode(configured_mode):
@@ -7980,14 +7996,7 @@ def chat_stream():
                                 _gen_release(None)
                             else:
                                 _gen_release(None)
-                    _terminal_diag = _turn_data.get('_terminal_contract_diag')
-                    if _terminal_diag:
-                        _terminal_diag = dict(_terminal_diag)
-                        _terminal_diag['lock_released'] = True
-                        logging.getLogger('gateway').warning(
-                            'chat_terminal_contract %s',
-                            json.dumps(_terminal_diag, ensure_ascii=False, sort_keys=True),
-                        )
+                        _emit_terminal_contract_diag_once(_turn_data)
                     return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
