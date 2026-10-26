@@ -1489,11 +1489,7 @@ def _gen_release(
             # must not release a newer Chat owner.
             return False
         if force:
-            if (
-                expected_owner_token is not None
-                and expected_owner_token != _gen_owner_token
-            ):
-                return False
+            pass
         else:
             if (
                 _gen_owner_fence_required
