@@ -2204,6 +2204,47 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         ))
         self.assertEqual(0, partial_persist.call_count)
 
+    def test_repair_unlock_stops_after_target_owner_is_released(self):
+        import app
+
+        requests = []
+
+        def fake_request(method, path, payload=None):
+            if path == '/chat/cancel':
+                requests.append((method, path, payload))
+                return {'ok': True, 'released': True, 'owner_changed': False}
+            if path == '/chat/lock':
+                return {'busy': False, 'age_sec': 0}
+            raise AssertionError((method, path, payload))
+
+        with mock.patch.object(app, '_gw_json_request', side_effect=fake_request):
+            result = app._gw_unlock_gen_lock(rounds=4)
+
+        self.assertEqual(1, len(requests))
+        self.assertTrue(result['cancel']['released'])
+        self.assertTrue(result['ok'])
+
+    def test_repair_unlock_does_not_follow_owner_change(self):
+        import app
+
+        requests = []
+
+        def fake_request(method, path, payload=None):
+            if path == '/chat/cancel':
+                requests.append((method, path, payload))
+                return {'ok': True, 'released': False, 'owner_changed': True}
+            if path == '/chat/lock':
+                return {'busy': True, 'age_sec': 1}
+            raise AssertionError((method, path, payload))
+
+        with mock.patch.object(app, '_gw_json_request', side_effect=fake_request):
+            result = app._gw_unlock_gen_lock(rounds=4)
+
+        self.assertEqual(1, len(requests))
+        self.assertFalse(result['cancel']['released'])
+        self.assertTrue(result['cancel']['owner_changed'])
+        self.assertFalse(result['ok'])
+
     def test_cancel_after_provider_text_started_reports_partial_rescue(self):
         plan = self._plan()
         plan._resident_stream_entered = True
