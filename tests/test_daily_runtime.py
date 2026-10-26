@@ -7732,17 +7732,17 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     else member.content_hash
                 ),
                 span_start=(
-                    installed_request.span_start
+                    getattr(installed_request, 'span_start', None)
                     if member.source_kind == 'current_request'
                     else member.span_start
                 ),
                 span_end=(
-                    installed_request.span_end
+                    getattr(installed_request, 'span_end', None)
                     if member.source_kind == 'current_request'
                     else member.span_end
                 ),
                 branch_id=(
-                    installed_request.branch_id
+                    getattr(installed_request, 'branch_id', '')
                     if member.source_kind == 'current_request'
                     else member.branch_id
                 ),
