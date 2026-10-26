@@ -2274,6 +2274,102 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         )
         self.assertNotIn('lock_released', payload)
 
+    def _emitted_terminal_contract(self, turn_data):
+        with self.assertLogs('gateway', level='WARNING') as captured:
+            self.assertTrue(
+                gateway._emit_terminal_contract_diag_once(turn_data)
+            )
+        lines = [
+            line for line in captured.output
+            if 'chat_terminal_contract ' in line
+        ]
+        self.assertEqual(1, len(lines), captured.output)
+        return json.loads(lines[0].split('chat_terminal_contract ', 1)[1])
+
+    @staticmethod
+    def _cancelled_turn_data(recorder):
+        return {
+            '_terminal_contract_diag': {
+                'event': 'daily_stream_cancelled',
+                'terminal_reason': 'client_stream_cancelled_after_stdin',
+                'cleanup_action': 'abort_daily_turn',
+                'provider_event_seen': False,
+                'stdin_flushed': True,
+            },
+            '_turn_flight_recorder': recorder,
+        }
+
+    def test_terminal_contract_does_not_claim_release_rejected_for_stale_owner(self):
+        current = gateway.TurnFlightRecorder()
+        stale = gateway.TurnFlightRecorder()
+        owner = {}
+        self.assertEqual('own', gateway._gen_acquire_or_wait(
+            wait_timeout=0, flight_recorder=current, owner_token_out=owner,
+        )[0])
+        try:
+            # The stale turn cleans up with an owner token that no longer
+            # owns the lock; its release is rejected and must not be claimed.
+            self.assertFalse(gateway._gen_release(
+                None,
+                expected_owner_token=owner['token'] - 1,
+                flight_recorder=stale,
+            ))
+            self.assertTrue(gateway._gen_busy)
+            payload = self._emitted_terminal_contract(
+                self._cancelled_turn_data(stale),
+            )
+            self.assertNotIn('lock_released', payload)
+            self.assertNotIn(
+                'generation_lock_released',
+                [e.get('event') for e in payload['flight_snapshot']['events']],
+            )
+        finally:
+            self.assertTrue(gateway._gen_release(
+                None, expected_owner_token=owner['token'],
+            ))
+
+    def test_terminal_contract_does_not_claim_release_after_shared_wake_skip(self):
+        recorder = gateway.TurnFlightRecorder()
+        owner = {}
+        self.assertEqual('own', gateway._gen_acquire_or_wait(
+            wait_timeout=0, flight_recorder=recorder, owner_token_out=owner,
+        )[0])
+        wake_token = object()
+        gateway._gen_mark_pending_delivery(wake_token)
+        try:
+            with gateway.app.test_client() as client:
+                cancel = client.post(
+                    '/chat/cancel', json={'force': True},
+                ).get_json()
+            self.assertTrue(cancel['skipped'])
+            self.assertTrue(cancel['shared_wake'])
+            payload = self._emitted_terminal_contract(
+                self._cancelled_turn_data(recorder),
+            )
+            events = [e.get('event') for e in payload['flight_snapshot']['events']]
+            self.assertIn('force_unlock_applied', events)
+            self.assertNotIn('generation_lock_released', events)
+            self.assertNotIn('lock_released', payload)
+        finally:
+            self.assertTrue(gateway._gen_release(
+                None,
+                expected_pending_token=wake_token,
+                expected_owner_token=owner['token'],
+            ))
+
+    def test_terminal_contract_without_recorder_still_emits_once(self):
+        turn_data = {
+            '_terminal_contract_diag': {
+                'event': 'daily_stream_cancelled',
+                'terminal_reason': 'client_stream_cancelled_unsent',
+                'lock_released': True,
+            },
+        }
+        payload = self._emitted_terminal_contract(turn_data)
+        self.assertEqual('client_stream_cancelled_unsent', payload['terminal_reason'])
+        self.assertNotIn('lock_released', payload)
+        self.assertFalse(gateway._emit_terminal_contract_diag_once(turn_data))
+
     def test_repair_unlock_stops_on_shared_wake_skip(self):
         pil_module = types.ModuleType('PIL')
         pil_image_module = types.ModuleType('PIL.Image')

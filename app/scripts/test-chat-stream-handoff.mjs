@@ -7,6 +7,7 @@ import {
   createChatStreamHandoff,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
+  findReconnectedAssistantForHandoff,
   isLiveSegmentFresh,
   markChatHandoffFailed,
   markChatHandoffFinalized,
@@ -360,4 +361,71 @@ assert.doesNotMatch(
   /['"]t['"]\s*:\s*['"]done['"]\s*,\s*['"]ok['"]\s*:\s*False/,
 );
 
-console.log('test:chat-stream-handoff — T1-T20 + gateway terminal ID contract all checks passed');
+// T21: a same-turn reconnect without assistant id binds only this turn's own
+// persisted assistant, and never one past the next user message.
+{
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  assert.equal(findReconnectedAssistantForHandoff([
+    message(9, 'assistant', 'older'),
+    message(10, 'user', 'prompt'),
+    message(11, 'assistant', 'reply'),
+  ], handoff), 11);
+  assert.equal(findReconnectedAssistantForHandoff([
+    message(9, 'assistant', 'older'),
+    message(10, 'user', 'prompt'),
+  ], handoff), null);
+  assert.equal(findReconnectedAssistantForHandoff([
+    message(10, 'user', 'prompt'),
+    message(12, 'user', 'next prompt'),
+    message(13, 'assistant', 'reply to next'),
+  ], handoff), null);
+  assert.equal(findReconnectedAssistantForHandoff(null, handoff), null);
+  assert.equal(findReconnectedAssistantForHandoff([
+    message(11, 'assistant', 'reply'),
+  ], createChatStreamHandoff({ kind: 'confirmation', userMessageId: null })), null);
+  // The reconnect lookup does not depend on a prior finalization claim.
+  assert.equal(handoff.finalizationConfirmed, false);
+}
+
+// T22: ChatScreen treats reconnect-without-assistant as its own outcome:
+// authoritative refetch first, finalized only with a persisted assistant,
+// no second stream, no force unlock, and it returns before generic success.
+{
+  const screenSource = await (await import('node:fs/promises')).readFile(
+    new URL('../src/screens/ChatScreen.tsx', import.meta.url),
+    'utf8',
+  );
+  const start = screenSource.indexOf('const reconnectWithoutAssistant = (');
+  const end = screenSource.indexOf("return 'reconnect_no_result';", start);
+  const genericSuccess = screenSource.indexOf(
+    'if (res.ok && !res.deferredTool && !opts.rewriteId) {', start,
+  );
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.ok(end < genericSuccess, 'reconnect branch must return before generic success');
+  const branch = screenSource.slice(start, end);
+  assert.match(branch, /res\.sameTurnReconnect === true/);
+  assert.match(branch, /res\.assistantMessageId == null/);
+  assert.match(branch, /await refetchLatest\(\)/);
+  assert.match(branch, /findReconnectedAssistantForHandoff\(/);
+  assert.doesNotMatch(branch, /streamChatReply|forceUnlockChatGenLock|releaseGenLock|setChatError/);
+  const boundStart = branch.indexOf('if (finalMessageId !== null) {');
+  const boundEnd = branch.indexOf("return 'success';", boundStart);
+  assert.notEqual(boundStart, -1);
+  assert.notEqual(boundEnd, -1);
+  assert.equal(
+    (branch.match(/markChatHandoffFinalized\(/g) || []).length,
+    1,
+    'reconnect branch finalizes only once',
+  );
+  assert.ok(
+    branch.indexOf('markChatHandoffFinalized(') > boundStart
+      && branch.indexOf('markChatHandoffFinalized(') < boundEnd,
+    'reconnect branch finalizes only when a persisted assistant exists',
+  );
+  const noResult = branch.slice(boundEnd);
+  assert.match(noResult, /clearLivePresentation\(\)/);
+  assert.match(noResult, /showToast\('原回合已结束，正在同步消息'\)/);
+}
+
+console.log('test:chat-stream-handoff — T1-T22 + gateway terminal ID contract all checks passed');

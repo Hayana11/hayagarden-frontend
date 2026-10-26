@@ -545,6 +545,76 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertFalse(gateway._gen_busy)
         self.assertIsNone(gateway._gen_pending_delivery)
 
+    def test_shared_wake_fence_finish_releases_own_pending_token(self):
+        import gateway
+        from chat.unified_heartbeat_a1 import SharedWakeDeliveryFence
+
+        # Same acquisition shape as the shared Wake route: zero wait, no
+        # owner-token fence.
+        mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
+        self.assertEqual('own', mode)
+        fence = SharedWakeDeliveryFence(gateway=gateway, resident=None)
+        gateway._gen_mark_pending_delivery(fence.token)
+        try:
+            with gateway.app.test_client() as client:
+                payload = client.post(
+                    '/chat/cancel', json={'force': True},
+                ).get_json()
+            self.assertTrue(payload['skipped'])
+            self.assertTrue(payload['shared_wake'])
+            self.assertNotIn('released', payload)
+            self.assertTrue(gateway._gen_busy)
+
+            fence.release()
+            self.assertFalse(gateway._gen_busy)
+            self.assertIsNone(gateway._gen_pending_delivery)
+            owner = {}
+            self.assertEqual(
+                'own',
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0, owner_token_out=owner,
+                )[0],
+            )
+            self.assertTrue(
+                gateway._gen_release(None, expected_owner_token=owner['token'])
+            )
+        finally:
+            if gateway._gen_busy:
+                gateway._gen_release(None, force=True)
+        self.assertFalse(gateway._gen_busy)
+
+    def test_stale_shared_wake_finish_cannot_release_newer_chat(self):
+        import gateway
+        from chat.unified_heartbeat_a1 import SharedWakeDeliveryFence
+
+        mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
+        self.assertEqual('own', mode)
+        stale_fence = SharedWakeDeliveryFence(gateway=gateway, resident=None)
+        gateway._gen_mark_pending_delivery(stale_fence.token)
+        stale_token = stale_fence.token
+        try:
+            stale_fence.release()
+            self.assertFalse(gateway._gen_busy)
+            owner = {}
+            self.assertEqual(
+                'own',
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0, owner_token_out=owner,
+                )[0],
+            )
+            # A late finish from the old Wake must not release the new Chat.
+            self.assertFalse(
+                gateway._gen_release(None, expected_pending_token=stale_token)
+            )
+            self.assertTrue(gateway._gen_busy)
+            self.assertTrue(
+                gateway._gen_release(None, expected_owner_token=owner['token'])
+            )
+        finally:
+            if gateway._gen_busy:
+                gateway._gen_release(None, force=True)
+        self.assertFalse(gateway._gen_busy)
+
     def test_force_cancel_non_shared_generation_keeps_original_behavior(self):
         locks = _load_generation_lock_functions()
         locks.update({
