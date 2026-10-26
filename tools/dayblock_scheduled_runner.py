@@ -29,6 +29,7 @@ DAYBLOCK_STORE = Path(
 )
 UTC = dt.timezone.utc
 SHANGHAI = ZoneInfo('Asia/Shanghai')
+ERROR_DETAIL_MAX_CHARS = 500
 
 
 def _iso(value: dt.datetime) -> str:
@@ -39,9 +40,31 @@ def _local_iso(value: dt.datetime) -> str:
     return value.astimezone(SHANGHAI).isoformat(timespec='seconds')
 
 
+def _split_error(exc: BaseException) -> tuple[str, str | None]:
+    """Split '<stable_code>:<diagnostic detail>' without discarding the detail."""
+    code, _sep, detail = str(exc).partition(':')
+    detail = detail.strip()
+    return code[:120] or type(exc).__name__, detail[:ERROR_DETAIL_MAX_CHARS] or None
+
+
+def _blocking_reasons(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or '[]')
+        except (TypeError, ValueError):
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(str(item) for item in raw if item))
+
+
 def _result(status: str, *, run_id: str, started_at: dt.datetime, source_day: str,
             model_call_count: int = 0, error_code: str | None = None, **extra: Any) -> dict[str, Any]:
     local = started_at.astimezone(SHANGHAI)
+    if status == 'blocked':
+        reasons = _blocking_reasons(extra.get('blocking_reasons') or ([error_code] if error_code else []))
+        extra['blocking_reasons'] = reasons
+        error_code = error_code or (reasons[0] if reasons else None)
     return {
         'status': status, 'run_id': run_id, 'started_at_utc': _iso(started_at),
         'started_at_shanghai': _local_iso(started_at), 'source_day': source_day,
@@ -101,16 +124,24 @@ def _existing_result(jobs: list[sqlite3.Row], receipts: dict[str, sqlite3.Row], 
             return _result(state, run_id=run_id, started_at=started_at, source_day=source_day,
                            model_call_count=0, idempotent_replay=True,
                            job_id=str(receipt['generation_job_id']), generation_id=str(receipt['generation_id']),
-                           error_code=str(receipt['error_code'] or ''))
+                           error_code=str(receipt['error_code'] or ''),
+                           error_detail=receipt['error_detail'])
     statuses = {str(row['status']) for row in jobs}
     for state in ('ready', 'blocked', 'failed', 'stale'):
         if state in statuses:
-            # Ready without a receipt is an invariant failure and fails closed.
-            return _result('failed' if state == 'ready' else state,
-                           run_id=run_id, started_at=started_at, source_day=source_day,
+            if state == 'ready':
+                # Ready without a receipt is an invariant failure and fails closed.
+                return _result('failed', run_id=run_id, started_at=started_at, source_day=source_day,
+                               model_call_count=0, idempotent_replay=True,
+                               job_id=str(jobs[-1]['job_id']), error_code='ready_job_without_receipt')
+            # The job's blocking_reasons_json stays the source of truth for why.
+            matching = [row for row in jobs if str(row['status']) == state]
+            reasons = _blocking_reasons(matching[-1]['blocking_reasons_json'])
+            return _result(state, run_id=run_id, started_at=started_at, source_day=source_day,
                            model_call_count=0, idempotent_replay=True,
                            job_id=str(jobs[-1]['job_id']),
-                           error_code='ready_job_without_receipt' if state == 'ready' else None)
+                           error_code=reasons[0] if reasons else None,
+                           blocking_reasons=reasons)
     # An existing planned job may be a process that stopped before its atomic
     # claim. Never replace or implicitly retry it on a duplicate scheduled run.
     return _result('blocked', run_id=run_id, started_at=started_at, source_day=source_day,
@@ -176,7 +207,7 @@ def _claim(conn: sqlite3.Connection, job_id: str, source_day: str, generation_id
 
 def _finish(conn: sqlite3.Connection, *, generation_id: str, job_id: str,
             status: str, finished_at: dt.datetime, error_code: str | None = None,
-            body: str | None = None, body_hash: str | None = None,
+            error_detail: str | None = None, body: str | None = None, body_hash: str | None = None,
             output_token_estimate: int = 0, actual_executor: str | None = None,
             usage: dict[str, Any] | None = None) -> None:
     if status not in {'ready', 'failed', 'stale'}:
@@ -192,10 +223,11 @@ def _finish(conn: sqlite3.Connection, *, generation_id: str, job_id: str,
             raise RuntimeError('generation_claim_not_processing')
         conn.execute(
             '''UPDATE dayblock_generation_receipts SET status=?,summary_body=?,body_hash=?,
-               output_token_estimate=?,actual_executor=?,usage_json=?,error_code=?,finished_at=?
+               output_token_estimate=?,actual_executor=?,usage_json=?,error_code=?,error_detail=?,
+               finished_at=?
                WHERE generation_id=? AND generation_job_id=? AND status='processing' ''',
             (status, body if status == 'ready' else None, body_hash if status == 'ready' else None,
-             int(output_token_estimate), actual_executor, usage_json, error_code,
+             int(output_token_estimate), actual_executor, usage_json, error_code, error_detail,
              _local_iso(finished_at), generation_id, job_id),
         )
         conn.execute(
@@ -428,9 +460,11 @@ def run_scheduled_dayblock(
         )
         if not plan.get('ready_to_generate'):
             clean_plan = {key: value for key, value in plan.items() if key != '_runtime'}
+            reasons = _blocking_reasons(plan.get('blocking_reasons'))
             return _result(str(plan.get('status') or 'blocked'), run_id=run_id,
                            started_at=start, source_day=source_day, model_call_count=0,
-                           plan=clean_plan)
+                           plan=clean_plan, error_code=reasons[0] if reasons else None,
+                           blocking_reasons=reasons)
 
         runtime = plan.get('_runtime') or {}
         job = store.execute('SELECT * FROM dayblock_shadow_jobs WHERE job_id=?',
@@ -592,7 +626,7 @@ def run_scheduled_dayblock(
                 body_hash=body_hash, summary_body=body,
             )
         except Exception as exc:
-            code = str(exc).split(':', 1)[0][:120] or type(exc).__name__
+            code, detail = _split_error(exc)
             observed_executor = str(getattr(generated, 'actual_executor', '') or '') or None
             observed_usage = getattr(generated, 'usage', None)
             if not isinstance(observed_usage, dict):
@@ -600,12 +634,12 @@ def run_scheduled_dayblock(
             try:
                 _finish(store, generation_id=generation_id, job_id=str(job['job_id']),
                         status='failed', finished_at=dt.datetime.now(UTC),
-                        error_code=code, actual_executor=observed_executor,
+                        error_code=code, error_detail=detail, actual_executor=observed_executor,
                         usage=observed_usage)
             except Exception:
                 code = 'preview_failure_persistence_error'
             return _result('failed', run_id=run_id, started_at=start, source_day=source_day,
-                           model_call_count=provider_call_count, error_code=code,
+                           model_call_count=provider_call_count, error_code=code, error_detail=detail,
                            job_id=str(job['job_id']), generation_id=generation_id,
                            actual_executor=observed_executor,
                            provider_usage=observed_usage or {})
