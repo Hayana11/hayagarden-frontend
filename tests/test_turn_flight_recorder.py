@@ -134,7 +134,7 @@ class TurnFlightRecorderTests(unittest.TestCase):
         self.assertEqual(3, snapshot['stream_count'])
         self.assertEqual(2, snapshot['same_turn_collisions'])
         self.assertEqual(1, snapshot['provider_request_count'])
-        self.assertEqual(1, snapshot['assistant_message_id'])
+        self.assertEqual(13168, snapshot['assistant_message_id'])
 
     def test_tool_failure_does_not_fail_successful_turn(self):
         recorder = TurnFlightRecorder(user_message_id=13166)
