@@ -295,7 +295,11 @@ class TurnFlightRecorder:
             'stream_count': len(streams),
             'same_turn_collisions': same_turn,
             'different_turn_collisions': different_turn,
-            'provider_request_count': provider_started,
+            'provider_request_count': (
+                len(self._provider_request_hashes)
+                if self._provider_request_hashes
+                else provider_started
+            ),
             'last_completed_stage': (
                 self._events[-1].get('stage') if self._events else None
             ),
