@@ -7518,6 +7518,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
             return sqlite3.connect(db)
 
         runners = WakeRunners()
+        trace_events = []
+
+        def trace_event(_wake_run_id, stage, **fields):
+            trace_events.append((stage, dict(fields)))
+
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
             stack.enter_context(mock.patch.object(gateway, 'DB_PATH', db))
@@ -7532,6 +7537,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(gateway, '_wake_run_id_mark'))
             stack.enter_context(mock.patch.object(
                 gateway, '_wake_live_trace',
+                side_effect=trace_event,
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_chat_is_generating', return_value=False,
@@ -7626,7 +7632,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'gateway must carry Observation watermark skip into main turn',
         )
         self.assertEqual(resident.observation_turns, 1)
-        self.assertEqual(resident.main_turns, 1)
+        self.assertEqual(resident.main_turns, 1, trace_events)
         self.assertEqual(resident.ensure_calls, 0)
         self.assertEqual(resident.respawn_calls, 0)
         self.assertEqual(resident.session_id, 'sid-1')
