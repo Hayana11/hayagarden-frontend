@@ -1695,7 +1695,7 @@ def chat_cancel():
             })
         if not busy:
             return jsonify({'ok': True, 'skipped': True, 'age_sec': 0})
-    released = _gen_release(None)
+    released = _gen_release(None, force=True)
     if recorder is not None:
         recorder.record(
             'force_unlock_applied',
