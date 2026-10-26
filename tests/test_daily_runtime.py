@@ -7700,7 +7700,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         plan.transcript_model_identity = 'model-1'
         plan.tool_profile = dr.DAILY_TOOL_PROFILE
         plan.hot_desired_plan = context_plan
-        installed_members = tuple(installed_frozen['members'])
+        installed_members = tuple(dr._context_receipt_members(plan))
         plan.hot_receipt_frozen = {
             'receipt': ContextReceipt.build(
                 context_id=7,
