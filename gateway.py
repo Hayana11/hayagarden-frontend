@@ -1378,6 +1378,9 @@ _gen_pending_delivery = None
 _GEN_ZOMBIE_TTL = 320
 _gen_active_recorder = None   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
 _gen_active_identity = None
+_gen_owner_epoch = 0
+_gen_owner_token = None
+_gen_owner_fence_required = False
                         # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
 def _gen_logical_identity(value):
@@ -1407,12 +1410,16 @@ def _gen_acquire_or_wait(
     *,
     flight_recorder=None,
     logical_identity=None,
+    owner_token_out=None,
 ):
     """Acquire or reuse only when the owner proves the same logical turn."""
     global _gen_busy, _gen_busy_since, _gen_last_result
     global _gen_last_result_identity, _gen_pending_delivery
     global _gen_active_recorder, _gen_active_identity
+    global _gen_owner_epoch, _gen_owner_token, _gen_owner_fence_required
     identity = _gen_logical_identity(logical_identity)
+    if isinstance(owner_token_out, dict):
+        owner_token_out.pop('token', None)
     deadline = time.time() + wait_timeout
     wait_recorded = False
     with _gen_cond:
@@ -1424,6 +1431,11 @@ def _gen_acquire_or_wait(
                 _gen_last_result_identity = None
                 _gen_active_recorder = flight_recorder
                 _gen_active_identity = identity
+                _gen_owner_epoch += 1
+                _gen_owner_token = _gen_owner_epoch
+                _gen_owner_fence_required = isinstance(owner_token_out, dict)
+                if isinstance(owner_token_out, dict):
+                    owner_token_out['token'] = _gen_owner_token
                 if flight_recorder is not None:
                     flight_recorder.record(
                         'generation_lock_acquired',
@@ -1456,9 +1468,17 @@ def _gen_acquire_or_wait(
                 return ('reused', _gen_last_result)
 
 
-def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
+def _gen_release(
+    result,
+    *,
+    expected_pending_token=None,
+    expected_owner_token=None,
+    force=False,
+    flight_recorder=None,
+):
     global _gen_busy, _gen_last_result, _gen_last_result_identity
     global _gen_pending_delivery, _gen_active_recorder, _gen_active_identity
+    global _gen_owner_token, _gen_owner_fence_required
     recorder = flight_recorder
     with _gen_cond:
         if (
@@ -1468,6 +1488,17 @@ def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
             # A shared Wake that outlived the stale-lock observation window
             # must not release a newer Chat owner.
             return False
+        if not force:
+            if (
+                _gen_owner_fence_required
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+            if (
+                expected_owner_token is not None
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
         if recorder is None:
             recorder = _gen_active_recorder
         _gen_last_result = result
@@ -1476,6 +1507,8 @@ def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
         _gen_pending_delivery = None
         _gen_active_recorder = None
         _gen_active_identity = None
+        _gen_owner_token = None
+        _gen_owner_fence_required = False
         _gen_cond.notify_all()
     if recorder is not None:
         recorder.record(
