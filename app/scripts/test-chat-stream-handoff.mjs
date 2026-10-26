@@ -360,4 +360,50 @@ assert.doesNotMatch(
   /['"]t['"]\s*:\s*['"]done['"]\s*,\s*['"]ok['"]\s*:\s*False/,
 );
 
-console.log('test:chat-stream-handoff — T1-T20 + gateway terminal ID contract all checks passed');
+// T21: assistant pairing belongs to the backend. A same-turn reconnect
+// without assistant_message_id may refetch, but never guesses this turn's
+// reply from the transcript (Wake/call assistants look like replies there).
+{
+  const screenSource = await (await import('node:fs/promises')).readFile(
+    new URL('../src/screens/ChatScreen.tsx', import.meta.url),
+    'utf8',
+  );
+  const start = screenSource.indexOf('const reconnectWithoutAssistant = (');
+  const end = screenSource.indexOf("return 'reconnect_no_result';", start);
+  const genericSuccess = screenSource.indexOf(
+    'if (res.ok && !res.deferredTool && !opts.rewriteId) {', start,
+  );
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.ok(end < genericSuccess, 'reconnect branch must return before generic success');
+  const branch = screenSource.slice(start, end);
+  assert.match(branch, /res\.sameTurnReconnect === true/);
+  assert.match(branch, /res\.assistantMessageId == null/);
+  assert.match(branch, /await refetchLatest\(\)/);
+  assert.match(branch, /clearLivePresentation\(\)/);
+  assert.match(branch, /showToast\('原回合已结束，正在同步消息'\)/);
+  assert.doesNotMatch(
+    branch,
+    /markChatHandoffFinalized|commitChatPresentationBinding|find\w*Assistant\w*\(|role === 'assistant'|return 'success'/,
+    'reconnect without assistant_message_id must not bind or finalize',
+  );
+  assert.doesNotMatch(branch, /streamChatReply|forceUnlockChatGenLock|releaseGenLock|setChatError/);
+  // Callers bind a final message only on success.
+  assert.doesNotMatch(screenSource, /if \(streamResult !== 'failed'\) bindFinalMessage/);
+  assert.match(screenSource, /if \(streamResult === 'success'\) bindFinalMessage\(latest\);/);
+}
+
+// T22: an unfinalized reconnect handoff cannot adopt a transcript assistant
+// that merely follows its user message (for example a Wake or call reply).
+{
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  const transcript = [
+    message(10, 'user', 'prompt'),
+    message(11, 'assistant', 'wake row that is not this turn'),
+  ];
+  assert.equal(findPersistedAssistantForHandoff(transcript, handoff), null);
+  assert.equal(handoff.finalMessageId, null);
+  assert.equal(canHandoffToFinal(handoff), false);
+}
+
+console.log('test:chat-stream-handoff — T1-T22 + gateway terminal ID contract all checks passed');

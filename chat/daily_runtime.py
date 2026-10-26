@@ -8070,6 +8070,14 @@ def ensure_resident_and_stream(
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
     # From here on the resident may be touched; see is_unsent_daily_turn().
     plan._resident_stream_entered = True  # type: ignore[attr-defined]
+    _flight_recorder = getattr(plan, '_turn_flight_recorder', None)
+    if _flight_recorder is not None:
+        _flight_recorder.record(
+            'resident_selected',
+            resident_generation=getattr(plan, 'resident_generation', None),
+            process_generation=getattr(resident, 'generation', None),
+            dedupe=True,
+        )
     static_system = _effective_hidden_flow_static_system(plan, static_system)
     diagnostic = getattr(plan, 'cold_start_diagnostic', None)
     if resident is not None and isinstance(diagnostic, dict):
@@ -8455,8 +8463,39 @@ def ensure_resident_and_stream(
 
         _capture_transcript_start(plan, resident)
 
+        def _mark_turn_started(sequence: Any) -> None:
+            try:
+                plan._resident_turn_sequence = int(sequence)  # type: ignore[attr-defined]
+            except (TypeError, ValueError):
+                # An invalid identity is not usable as lifecycle provenance.
+                if hasattr(plan, '_resident_turn_sequence'):
+                    delattr(plan, '_resident_turn_sequence')
+                return
+            plan._current_user_stdin_write_started = False  # type: ignore[attr-defined]
+            recorder = getattr(plan, '_turn_flight_recorder', None)
+            if recorder is not None:
+                recorder.bind(
+                    resident_turn_sequence=plan._resident_turn_sequence,
+                    process_generation=getattr(resident, 'generation', None),
+                )
+                recorder.record(
+                    'resident_turn_started',
+                    resident_turn_sequence=plan._resident_turn_sequence,
+                    process_generation=getattr(resident, 'generation', None),
+                    dedupe=True,
+                )
+
+        def _mark_stdin_begin() -> None:
+            plan._current_user_stdin_write_started = True  # type: ignore[attr-defined]
+            recorder = getattr(plan, '_turn_flight_recorder', None)
+            if recorder is not None:
+                recorder.record('stdin_begin', dedupe=True)
+
         def _mark_stdin_flushed() -> None:
             _commit_capacity_swap_after_stdin_flush(plan)
+            recorder = getattr(plan, '_turn_flight_recorder', None)
+            if recorder is not None:
+                recorder.record('stdin_flushed', dedupe=True)
 
         send_kwargs: dict[str, Any] = {'commit_meta': commit_meta}
         try:
@@ -8465,6 +8504,21 @@ def ensure_resident_and_stream(
             accepts_kwargs = any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
             )
+            if 'on_turn_started' in params or accepts_kwargs:
+                send_kwargs['on_turn_started'] = _mark_turn_started
+            if 'on_lifecycle_event' in params or accepts_kwargs:
+                send_kwargs['on_lifecycle_event'] = (
+                    lambda stage, **fields: (
+                        getattr(plan, '_turn_flight_recorder', None).record(
+                            stage,
+                            **fields,
+                        )
+                        if getattr(plan, '_turn_flight_recorder', None) is not None
+                        else None
+                    )
+                )
+            if 'on_stdin_begin' in params or accepts_kwargs:
+                send_kwargs['on_stdin_begin'] = _mark_stdin_begin
             if 'on_stdin_flushed' in params or accepts_kwargs:
                 send_kwargs['on_stdin_flushed'] = _mark_stdin_flushed
             # Synthetic resident heartbeat keeps the browser transport alive

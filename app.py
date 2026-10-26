@@ -2763,7 +2763,17 @@ def _gw_unlock_gen_lock(rounds=4):
     """Force-release gen lock; repeat for multi-worker gunicorn."""
     last = {}
     for _ in range(max(1, int(rounds))):
-        last = _gw_json_request('POST', '/chat/cancel', {'force': True})
+        last = _gw_json_request(
+            'POST',
+            '/chat/cancel',
+            {'force': True, 'source': 'repair_unlock_gen'},
+        )
+        if isinstance(last, dict) and (
+            last.get('released') is True
+            or last.get('owner_changed') is True
+            or last.get('skipped') is True
+        ):
+            break
     lock = _gw_gen_lock_status()
     return {'cancel': last, 'lock': lock, 'ok': not lock.get('busy')}
 

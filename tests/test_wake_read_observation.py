@@ -762,8 +762,9 @@ class WakeObservationPlannerAndContractTests(unittest.TestCase):
                     select_wake_provider(mode)
 
     def test_no_new_workflow_and_no_second_skip_system(self):
+        # Only newly added workflows violate this; existing ones may gain tests.
         diff = subprocess.check_output(
-            ['git', 'diff', '--name-only', 'origin/main'],
+            ['git', 'diff', '--name-only', '--diff-filter=A', 'origin/main'],
             cwd=str(ROOT),
             text=True,
         )

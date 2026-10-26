@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging, uuid
 # Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
 # must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
@@ -19,6 +19,7 @@ from chat.display_segments import (
     finalize_display_segments_json,
     strip_save_markers,
 )
+from chat.turn_flight_recorder import TurnFlightRecorder, recorder_from
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -160,6 +161,317 @@ def _chat_sse_terminal_kind(chunk):
             return str(event['t'])
         return None
     return None
+
+
+def _daily_observation_hash(value):
+    """Hash one identity for cancellation diagnostics; never log the raw value."""
+    import hashlib
+    text = str(value or '').strip()
+    return hashlib.sha256(text.encode('utf-8')).hexdigest() if text else None
+
+
+def _daily_stream_cancellation_state(plan, resident, turn_data=None):
+    """Snapshot current-turn lifecycle evidence before gateway cleanup."""
+    data = turn_data if isinstance(turn_data, dict) else {}
+    resident_stream_entered = bool(
+        getattr(plan, '_resident_stream_entered', False)
+    ) if plan is not None else False
+    plan_stdin_write_started = bool(
+        getattr(plan, '_current_user_stdin_write_started', False)
+    ) if plan is not None else False
+    plan_stdin_flushed = bool(
+        getattr(plan, '_current_user_stdin_flushed', False)
+    ) if plan is not None else False
+
+    expected_turn_sequence = (
+        getattr(plan, '_resident_turn_sequence', None)
+        if plan is not None else None
+    )
+    active_turn_sequence = (
+        getattr(resident, '_active_turn_sequence', None)
+        if resident is not None else None
+    )
+    last_turn_sequence = (
+        getattr(resident, '_last_turn_sequence', None)
+        if resident is not None else None
+    )
+
+    def _sequence_matches(expected, observed):
+        if expected is None or observed is None:
+            return False
+        try:
+            return int(expected) == int(observed)
+        except (TypeError, ValueError):
+            return False
+
+    active_snapshot_matches = _sequence_matches(
+        expected_turn_sequence, active_turn_sequence,
+    )
+    last_snapshot_matches = _sequence_matches(
+        expected_turn_sequence, last_turn_sequence,
+    )
+    lifecycle_snapshot_matches = (
+        active_snapshot_matches or last_snapshot_matches
+    )
+    if active_snapshot_matches:
+        resident_write_started = bool(
+            getattr(resident, '_turn_write_started', False)
+        )
+        resident_stdin_flushed = bool(
+            getattr(resident, '_turn_stdin_flushed', False)
+        )
+        resident_provider_event_seen = bool(
+            getattr(resident, '_turn_provider_event_seen', False)
+        )
+        resident_provider_request_id_seen = bool(
+            getattr(resident, '_turn_provider_request_id_seen', False)
+        )
+        resident_first_text_or_thinking_seen = bool(
+            getattr(resident, '_turn_first_text_or_thinking_seen', False)
+        )
+        resident_claude_init_event_seen = bool(
+            getattr(resident, '_turn_claude_init_event_seen', False)
+        )
+    elif last_snapshot_matches:
+        resident_write_started = bool(
+            getattr(resident, '_last_turn_stdin_write_started', False)
+        )
+        resident_stdin_flushed = bool(
+            getattr(resident, '_last_turn_stdin_flushed', False)
+        )
+        resident_provider_event_seen = bool(
+            getattr(resident, '_last_turn_provider_event_seen', False)
+        )
+        resident_provider_request_id_seen = bool(
+            getattr(resident, '_last_turn_provider_request_id_seen', False)
+        )
+        resident_first_text_or_thinking_seen = bool(
+            getattr(resident, '_last_turn_first_text_or_thinking_seen', False)
+        )
+        resident_claude_init_event_seen = bool(
+            getattr(resident, '_last_turn_claude_init_event_seen', False)
+        )
+    else:
+        # No send_turn callback bound this resident snapshot to this Daily
+        # plan. Resident booleans are stale/unknown and must not be inherited.
+        resident_write_started = False
+        resident_stdin_flushed = False
+        resident_provider_event_seen = False
+        resident_provider_request_id_seen = False
+        resident_first_text_or_thinking_seen = False
+        resident_claude_init_event_seen = False
+
+    stdin_write_started = bool(
+        plan_stdin_write_started
+        or (
+            lifecycle_snapshot_matches
+            and resident_write_started
+        )
+    )
+    stdin_flushed = bool(
+        plan_stdin_flushed
+        or (
+            lifecycle_snapshot_matches
+            and resident_stdin_flushed
+        )
+    )
+    provider_event_seen = bool(
+        lifecycle_snapshot_matches
+        and resident_provider_event_seen
+    )
+    provider_request_id_seen = bool(
+        lifecycle_snapshot_matches
+        and resident_provider_request_id_seen
+    )
+    first_text_or_thinking_seen = bool(
+        lifecycle_snapshot_matches
+        and resident_first_text_or_thinking_seen
+    )
+    claude_init_event_seen = bool(
+        lifecycle_snapshot_matches
+        and resident_claude_init_event_seen
+    )
+
+    if not stdin_flushed:
+        stream_stage = (
+            'resident_stream_before_stdin_flush'
+            if resident_stream_entered
+            else 'prepare_before_resident_stream'
+        )
+    elif not provider_event_seen:
+        stream_stage = 'after_stdin_before_provider_event'
+    elif not first_text_or_thinking_seen:
+        stream_stage = 'after_provider_event_before_text_or_thinking'
+    else:
+        stream_stage = 'after_provider_text_or_thinking'
+    if not resident_stream_entered:
+        terminal_reason = 'client_stream_cancelled_unsent'
+    elif not stdin_flushed:
+        terminal_reason = 'client_stream_cancelled_before_stdin_flush'
+    elif not provider_event_seen:
+        terminal_reason = 'client_stream_cancelled_after_stdin'
+    else:
+        terminal_reason = 'client_stream_cancelled_after_provider_start'
+    session_id = (
+        getattr(resident, 'session_id', None)
+        or getattr(resident, '_session_id', None)
+    ) if lifecycle_snapshot_matches and resident is not None else None
+    return {
+        'user_message_id': (
+            getattr(plan, 'user_message_id', None)
+            if plan is not None else data.get('user_message_id')
+        ),
+        'request_id': (
+            getattr(plan, 'request_id', None)
+            or data.get('request_id')
+            if plan is not None else data.get('request_id')
+        ),
+        'turn_key': (
+            getattr(plan, 'turn_key', None)
+            or data.get('turn_key')
+            if plan is not None else data.get('turn_key')
+        ),
+        'context_id': getattr(plan, 'context_id', None) if plan is not None else None,
+        'context_epoch': getattr(plan, 'context_epoch', None) if plan is not None else None,
+        'resident_generation': (
+            getattr(plan, 'resident_generation', None)
+            if plan is not None else None
+        ),
+        'process_generation': (
+            getattr(resident, 'generation', None)
+            if resident is not None else None
+        ),
+        'resident_key_hash': _daily_observation_hash(
+            getattr(plan, 'resident_key', None) if plan is not None else None
+        ),
+        'claude_session_id_hash': _daily_observation_hash(session_id),
+        'stream_stage': stream_stage,
+        'resident_stream_entered': resident_stream_entered,
+        'stdin_write_started': stdin_write_started,
+        'stdin_flushed': stdin_flushed,
+        'claude_init_event_seen': claude_init_event_seen,
+        'provider_event_seen': provider_event_seen,
+        'provider_request_id_seen': provider_request_id_seen,
+        'first_text_or_thinking_seen': first_text_or_thinking_seen,
+        'terminal_reason': terminal_reason,
+    }
+
+def _record_daily_stream_cancellation(
+    turn_data,
+    state,
+    *,
+    cleanup_action,
+    partial_rescue_performed=False,
+    unsent_release=False,
+    abort_requested=False,
+    respawn_requested=False,
+):
+    """Write one safe cancellation observation into the existing terminal sink."""
+    diagnostic = {
+        'event': 'daily_stream_cancelled',
+        **dict(state or {}),
+        'partial_rescue_performed': bool(partial_rescue_performed),
+        'unsent_release': bool(unsent_release),
+        'abort_requested': bool(abort_requested),
+        'respawn_requested': bool(respawn_requested),
+        'fail_closed': bool(
+            abort_requested
+            and state.get('stdin_flushed')
+            and not state.get('provider_event_seen')
+        ),
+        'cancellation_kind': 'client_generator_cancelled',
+        'cleanup_action': str(cleanup_action or ''),
+    }
+    if isinstance(turn_data, dict):
+        turn_data['_terminal_contract_diag'] = diagnostic
+        recorder = turn_data.get('_turn_flight_recorder')
+        if isinstance(recorder, TurnFlightRecorder):
+            recorder.record(
+                'turn_cancelled',
+                terminal_reason=diagnostic.get('terminal_reason'),
+                cleanup_action=diagnostic.get('cleanup_action'),
+                provider_event_seen=diagnostic.get('provider_event_seen'),
+                provider_request_id_seen=diagnostic.get('provider_request_id_seen'),
+                stdin_write_started=diagnostic.get('stdin_write_started'),
+                stdin_flushed=diagnostic.get('stdin_flushed'),
+                assistant_persisted=False,
+                mapping_committed=False,
+            )
+    return diagnostic
+
+
+def _emit_turn_flight_terminal_once(recorder):
+    """Write one canonical bounded terminal snapshot to the durable logger."""
+    if not isinstance(recorder, TurnFlightRecorder):
+        return False
+    snapshot = recorder.terminal_snapshot
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    if not recorder.claim_terminal_emission():
+        return False
+    status = str(snapshot.get('terminal_status') or 'unknown')
+    level = (
+        logging.WARNING
+        if status in ('cancelled', 'failed', 'unknown')
+        else logging.INFO
+    )
+    logging.getLogger('gateway').log(
+        level,
+        'turn_flight_terminal %s',
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+    )
+    return True
+
+
+def _emit_terminal_contract_diag_once(turn_data):
+    """Emit the existing terminal sink once, including outer-generator unwind."""
+    if not isinstance(turn_data, dict):
+        return False
+    if turn_data.get('_terminal_contract_emitted'):
+        return False
+    diagnostic = turn_data.get('_terminal_contract_diag')
+    if not isinstance(diagnostic, dict) or not diagnostic:
+        return False
+    turn_data['_terminal_contract_emitted'] = True
+    payload = dict(diagnostic)
+    recorder = turn_data.get('_turn_flight_recorder')
+    snapshot = {}
+    if isinstance(recorder, TurnFlightRecorder):
+        snapshot = recorder.terminal(
+            terminal_status='cancelled',
+            terminal_reason=diagnostic.get('terminal_reason'),
+            cleanup_action=diagnostic.get('cleanup_action'),
+            provider_event_seen=diagnostic.get('provider_event_seen'),
+            provider_request_id_seen=diagnostic.get('provider_request_id_seen'),
+            stdin_write_started=diagnostic.get('stdin_write_started'),
+            stdin_flushed=diagnostic.get('stdin_flushed'),
+            assistant_persisted=False,
+            mapping_committed=False,
+        )
+        payload.update({
+            'turn_observation_id': snapshot.get('turn_observation_id'),
+            'terminal_status': snapshot.get('terminal_status'),
+            'stream_count': snapshot.get('stream_count'),
+            'same_turn_collisions': snapshot.get('same_turn_collisions'),
+            'different_turn_collisions': snapshot.get('different_turn_collisions'),
+            'provider_request_count': snapshot.get('provider_request_count'),
+            'last_completed_stage': snapshot.get('last_completed_stage'),
+            'flight_snapshot': snapshot,
+        })
+        _emit_turn_flight_terminal_once(recorder)
+    if any(
+        isinstance(event, dict)
+        and event.get('event') == 'generation_lock_released'
+        for event in (snapshot.get('events') or [])
+    ):
+        payload['lock_released'] = True
+    else:
+        payload.pop('lock_released', None)
+    logging.getLogger('gateway').warning(
+        'chat_terminal_contract %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+    return True
 
 
 def _resident_display_thinking_mode(configured_mode):
@@ -1068,54 +1380,160 @@ _gen_cond = threading.Condition()
 _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
+_gen_last_result_identity = None
 _gen_pending_delivery = None
-_GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
-                        # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
+# Compatibility constant, observation only: no control flow reads it. Lock age
+# never proves a zombie and never releases the generation lock. Normal Chat
+# stale locks need an explicit force unlock; a shared Wake pending delivery is
+# released only by its own SharedWakeDeliveryFence; a process restart clears
+# the in-memory lock. (History: aligned with the 300s relay timeout; the old
+# 90s TTL kicked slow generations mid-flight and ran two in parallel.)
+_GEN_ZOMBIE_TTL = 320
+_gen_active_recorder = None
+_gen_active_identity = None
+_gen_owner_epoch = 0
+_gen_owner_token = None
+_gen_owner_fence_required = False
 
-def _gen_acquire_or_wait(wait_timeout=15):
-    """返回 ('own', None) 表示本次调用应自己生成；
-    返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_busy_since, _gen_last_result, _gen_pending_delivery
+def _gen_logical_identity(value):
+    """Normalize the minimum identity needed to reuse one logical turn result."""
+    if not isinstance(value, dict):
+        return None
+    user_message_id = value.get('user_message_id')
+    if user_message_id not in (None, ''):
+        return ('user_message_id', str(user_message_id))
+    turn_key = value.get('turn_key')
+    if turn_key not in (None, ''):
+        return ('turn_key', str(turn_key))
+    return None
+
+
+def _gen_recorder_identity(recorder):
+    if recorder is None or not hasattr(recorder, 'logical_identity'):
+        return None
+    try:
+        return _gen_logical_identity(recorder.logical_identity())
+    except Exception:
+        return None
+
+
+def _gen_acquire_or_wait(
+    wait_timeout=15,
+    *,
+    flight_recorder=None,
+    logical_identity=None,
+    owner_token_out=None,
+):
+    """Acquire or reuse only when the owner proves the same logical turn."""
+    global _gen_busy, _gen_busy_since, _gen_last_result
+    global _gen_last_result_identity, _gen_pending_delivery
+    global _gen_active_recorder, _gen_active_identity
+    global _gen_owner_epoch, _gen_owner_token, _gen_owner_fence_required
+    identity = _gen_logical_identity(logical_identity)
+    if isinstance(owner_token_out, dict):
+        owner_token_out.pop('token', None)
     deadline = time.time() + wait_timeout
+    wait_recorded = False
     with _gen_cond:
         while True:
-            # 每次循环都检查 TTL；共享 Wake 只豁免正常时长内的恢复，
-            # 超过既有僵尸上限仍保留逃生门。
-            if (
-                _gen_busy
-                and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL
-            ):
-                _gen_busy = False
-                _gen_last_result = None
-                _gen_pending_delivery = None
             if not _gen_busy:
                 _gen_busy = True
                 _gen_busy_since = time.time()
                 _gen_last_result = None
+                _gen_last_result_identity = None
+                _gen_active_recorder = flight_recorder
+                _gen_active_identity = identity
+                _gen_owner_epoch += 1
+                _gen_owner_token = _gen_owner_epoch
+                _gen_owner_fence_required = isinstance(owner_token_out, dict)
+                if isinstance(owner_token_out, dict):
+                    owner_token_out['token'] = _gen_owner_token
+                if flight_recorder is not None:
+                    flight_recorder.record(
+                        'generation_lock_acquired',
+                        dedupe=True,
+                    )
                 return ('own', None)
-            # 等到有结果或者到期
+
+            if flight_recorder is not None and not wait_recorded:
+                wait_recorded = True
+                flight_recorder.record(
+                    'generation_lock_wait_begin',
+                    lock_age_sec=max(0, int(time.time() - _gen_busy_since)),
+                    dedupe=True,
+                )
+
             remaining = deadline - time.time()
             if remaining <= 0:
                 raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
-            _gen_cond.wait(timeout=min(remaining, 5))  # 每5秒重新检查一次TTL
-            if _gen_last_result is not None:
+            _gen_cond.wait(timeout=min(remaining, 5))
+            if (
+                _gen_last_result is not None
+                and identity is not None
+                and identity == _gen_last_result_identity
+            ):
+                if flight_recorder is not None:
+                    flight_recorder.record(
+                        'generation_lock_reused',
+                        dedupe=True,
+                    )
                 return ('reused', _gen_last_result)
 
-def _gen_release(result, *, expected_pending_token=None):
-    global _gen_busy, _gen_last_result, _gen_pending_delivery
+
+def _gen_release(
+    result,
+    *,
+    expected_pending_token=None,
+    expected_owner_token=None,
+    force=False,
+    flight_recorder=None,
+):
+    global _gen_busy, _gen_last_result, _gen_last_result_identity
+    global _gen_pending_delivery, _gen_active_recorder, _gen_active_identity
+    global _gen_owner_token, _gen_owner_fence_required
+    recorder = flight_recorder
     with _gen_cond:
         if (
             expected_pending_token is not None
             and _gen_pending_delivery is not expected_pending_token
         ):
-            # A shared Wake that outlived the zombie TTL must not release a
-            # newer Chat owner when its old stream finally returns.
+            # A shared Wake that outlived the stale-lock observation window
+            # must not release a newer Chat owner.
             return False
+        if force:
+            if (
+                expected_owner_token is not None
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+        else:
+            if (
+                _gen_owner_fence_required
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+            if (
+                expected_owner_token is not None
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+        if recorder is None:
+            recorder = _gen_active_recorder
         _gen_last_result = result
+        _gen_last_result_identity = _gen_active_identity
         _gen_busy = False
         _gen_pending_delivery = None
+        _gen_active_recorder = None
+        _gen_active_identity = None
+        _gen_owner_token = None
+        _gen_owner_fence_required = False
         _gen_cond.notify_all()
-        return True
+    if recorder is not None:
+        recorder.record(
+            'generation_lock_released',
+            dedupe=True,
+        )
+    return True
 
 
 def _gen_mark_pending_delivery(token):
@@ -1128,13 +1546,125 @@ def _gen_mark_pending_delivery(token):
 
 
 def _chat_is_generating() -> bool:
-    """True while the main chat generation lock is held (non-zombie)."""
+    """True while the main chat generation lock is held."""
     with _gen_cond:
-        if not _gen_busy:
-            return False
-        if (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
-            return False
-        return True
+        return bool(_gen_busy)
+
+
+def _find_persisted_assistant_after(user_message_id):
+    try:
+        user_id = int(user_message_id)
+    except (TypeError, ValueError):
+        return None
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT assistant_ctx.message_id
+            FROM daily_message_contexts AS user_ctx
+            JOIN daily_message_contexts AS assistant_ctx
+              ON assistant_ctx.context_id = user_ctx.context_id
+             AND assistant_ctx.context_epoch = user_ctx.context_epoch
+            WHERE user_ctx.message_id = ?
+              AND user_ctx.role = 'user'
+              AND assistant_ctx.role = 'assistant'
+              AND assistant_ctx.message_id > ?
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM daily_message_contexts AS next_user_ctx
+                    WHERE next_user_ctx.context_id = user_ctx.context_id
+                      AND next_user_ctx.context_epoch = user_ctx.context_epoch
+                      AND next_user_ctx.role = 'user'
+                      AND next_user_ctx.message_id > user_ctx.message_id
+                      AND next_user_ctx.message_id < assistant_ctx.message_id
+              )
+            ORDER BY assistant_ctx.message_id
+            LIMIT 1
+            """,
+            (user_id, user_id),
+        ).fetchone()
+        return int(row['message_id']) if row is not None else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _stream_same_turn_reconnect_wait(
+    *,
+    user_message_id,
+    recorder,
+    stream_instance_id,
+    timeout_sec=420,
+):
+    """Wait on authoritative persisted state without acquiring a second turn."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        assistant_id = _find_persisted_assistant_after(user_message_id)
+        if assistant_id is not None:
+            recorder.record(
+                'turn_reconciled',
+                assistant_message_id=assistant_id,
+                reconcile_applied=True,
+                stream_instance_id=stream_instance_id,
+                stream_role='reconnect',
+                dedupe=True,
+            )
+            yield _sse_json({
+                't': 'notice',
+                'd': 'same_turn_reconnect_wait',
+                'code': 'same_turn_reconnect_wait',
+            })
+            yield _sse_json({
+                't': 'done',
+                'ok': True,
+                'same_turn_reconnect': True,
+                'assistant_message_id': assistant_id,
+            })
+            return
+        try:
+            import moments_turn
+            active = moments_turn.get_active_turn(
+                DB_PATH, moments_turn.DEFAULT_CONVERSATION_ID,
+            )
+        except Exception:
+            active = None
+        active_user_message_id = None
+        if isinstance(active, dict):
+            active_user_message_id = active.get('user_message_id')
+        elif active is not None:
+            try:
+                active_user_message_id = active['user_message_id']
+            except (KeyError, TypeError, IndexError):
+                active_user_message_id = None
+        if active_user_message_id is None or str(active_user_message_id) != str(user_message_id):
+            # The original turn is terminal or another turn now owns the lane.
+            # Never wait through a different user's turn.
+            yield _sse_json({
+                't': 'notice',
+                'd': 'same_turn_reconnect_wait',
+                'code': 'same_turn_reconnect_wait',
+            })
+            yield _sse_json({
+                't': 'done',
+                'ok': True,
+                'same_turn_reconnect': True,
+            })
+            return
+        yield _sse_json({'t': 'ping'})
+        time.sleep(0.5)
+
+    yield _sse_json({
+        't': 'notice',
+        'd': 'same_turn_reconnect_wait',
+        'code': 'same_turn_reconnect_wait',
+    })
+    yield _sse_json({
+        't': 'done',
+        'ok': True,
+        'same_turn_reconnect': True,
+    })
+
 
 
 _wake_exec_lock = threading.Lock()
@@ -1150,24 +1680,88 @@ def chat_lock_status():
 
 @app.route('/chat/cancel', methods=['POST'])
 def chat_cancel():
-    """释放生成锁。force=true 时无条件释放（停止按钮/用户 abort）；
-    否则跳过 age<8s 的新锁，避免上一轮 stream 的延迟 cancel 误杀新一轮。"""
+    """Release the generation lock only on explicit force; otherwise observe."""
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force'))
+    source = str(data.get('source') or 'chat_cancel')[:80]
     with _gen_cond:
-        if _gen_busy:
-            age = time.time() - _gen_busy_since
-            if _gen_pending_delivery is not None and age <= _GEN_ZOMBIE_TTL:
-                return jsonify({
-                    'ok': True,
-                    'skipped': True,
-                    'shared_wake': True,
-                    'age_sec': round(age, 1),
-                })
-            if not force and age < 8.0:
-                return jsonify({'ok': True, 'skipped': True, 'age_sec': round(age, 1)})
-    _gen_release(None)
-    return jsonify({'ok': True})
+        busy = bool(_gen_busy)
+        age = time.time() - _gen_busy_since if busy else 0.0
+        recorder = _gen_active_recorder
+        target_owner_token = _gen_owner_token
+        if recorder is not None:
+            recorder.record(
+                'force_unlock_requested',
+                source=source,
+                lock_age_sec=max(0, int(age)),
+                reason='explicit_force' if force else 'non_force_observation',
+            )
+        if busy and _gen_pending_delivery is not None:
+            if recorder is not None:
+                recorder.record(
+                    'force_unlock_applied',
+                    source=source,
+                    lock_age_sec=max(0, int(age)),
+                    unlock_applied=False,
+                    unlock_skipped=True,
+                    reason='shared_wake_delivery_active',
+                )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'shared_wake': True,
+                'owner_changed': False,
+                'reason': 'shared_wake_delivery_active',
+                'age_sec': round(age, 1),
+            })
+        if busy and not force:
+            if recorder is not None:
+                recorder.record(
+                    'force_unlock_applied',
+                    source=source,
+                    lock_age_sec=max(0, int(age)),
+                    unlock_applied=False,
+                    unlock_skipped=True,
+                    reason='age_is_observation_only',
+                )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'age_sec': round(age, 1),
+                'reason': 'age_is_observation_only',
+                'owner_changed': False,
+            })
+        if not busy:
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'age_sec': 0,
+                'owner_changed': False,
+            })
+    released = _gen_release(
+        None,
+        force=True,
+        expected_owner_token=target_owner_token,
+    )
+    owner_changed = bool(
+        target_owner_token is not None and not released
+    )
+    if recorder is not None:
+        recorder.record(
+            'force_unlock_applied',
+            source=source,
+            lock_age_sec=max(0, int(age)),
+            unlock_applied=bool(released),
+            unlock_skipped=not bool(released),
+            reason='owner_changed' if owner_changed else 'explicit_force',
+        )
+    return jsonify({
+        'ok': True,
+        'released': bool(released),
+        'owner_changed': owner_changed,
+    })
+
+
 
 
 @app.route('/drawers/preview', methods=['GET'])
@@ -5786,8 +6380,15 @@ def chat():
         except Exception:
             pass
     _persisted = False
+    _gen_owner = {}
     try:
-        mode, reused = _gen_acquire_or_wait()
+        mode, reused = _gen_acquire_or_wait(
+            logical_identity={
+                'user_message_id': _turn_data.get('user_message_id'),
+                'turn_key': _turn_data.get('turn_key'),
+            },
+            owner_token_out=_gen_owner,
+        )
         if mode == 'reused':
             text, thinking_text = reused
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
@@ -5853,7 +6454,10 @@ def chat():
             except Exception:
                 pass
         finally:
-            _gen_release((text, thinking_text) if text else None)
+            _gen_release(
+                (text, thinking_text) if text else None,
+                expected_owner_token=_gen_owner.get('token'),
+            )
 
         return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
 
@@ -7673,6 +8277,9 @@ def _stream_cc_daily_soft_window(
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
+            cancellation_state = _daily_stream_cancellation_state(
+                _daily_plan, _CC_RESIDENT, _turn_data,
+            )
             released = None
             try:
                 # Provider never saw this turn: free the lease only, so the
@@ -7686,8 +8293,34 @@ def _stream_cc_daily_soft_window(
                 )
             if released is not None:
                 turn_terminal = True
+                _record_daily_stream_cancellation(
+                    _turn_data,
+                    cancellation_state,
+                    cleanup_action='unsent_release',
+                    unsent_release=True,
+                )
             else:
-                _rescue_and_abort('client_stream_cancelled', respawn=True)
+                cleanup = _rescue_and_abort(
+                    'client_stream_cancelled', respawn=True,
+                )
+                _record_daily_stream_cancellation(
+                    _turn_data,
+                    cancellation_state,
+                    cleanup_action='abort_daily_turn',
+                    partial_rescue_performed=bool(
+                        cleanup.get('partial_rescue_performed')
+                    ),
+                    abort_requested=True,
+                    respawn_requested=True,
+                )
+        elif _daily_plan is None and not turn_terminal:
+            _record_daily_stream_cancellation(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    None, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='prepare_incomplete',
+            )
 
 
 @app.route('/chat/stream', methods=['POST'])
@@ -7695,13 +8328,33 @@ def chat_stream():
     from flask import Response, stream_with_context
     if _get_provider() == 'claude_code':
         def gen_cc():
-            from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+            from moments_turn import (
+                prepare_turn,
+                activate_turn,
+                insert_user_message,
+                release_turn,
+                get_active_turn,
+                DEFAULT_CONVERSATION_ID,
+            )
 
             _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
             _persisted = [False]
+            _gen_owner = {}
             _turn_data: dict = {}
             assistant_id = None
+            _stream_instance_id = uuid.uuid4().hex
+            _flight_recorder = TurnFlightRecorder(
+                stream_instance_id=_stream_instance_id,
+                stream_role='original',
+                request_id=(
+                    request.headers.get('X-Request-ID')
+                    or request.headers.get('X-Request-Id')
+                ),
+            )
+            _flight_recorder.record('turn_created', dedupe=True)
+            _same_turn_reconnect = False
+            _owns_logical_turn = True
             phase = 'prepare_turn'
             try:
                 _request_data = request.get_json(silent=True) or {}
@@ -7712,7 +8365,9 @@ def chat_stream():
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
                 ):
-                    mode, _reused = _gen_acquire_or_wait()
+                    mode, _reused = _gen_acquire_or_wait(
+                        owner_token_out=_gen_owner,
+                    )
                     if mode != 'own':
                         yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
                         return
@@ -7722,17 +8377,37 @@ def chat_stream():
                             reality_context=request_reality_context,
                         )
                     finally:
-                        _gen_release(None)
+                        _gen_release(
+                            None,
+                            expected_owner_token=_gen_owner.get('token'),
+                        )
                     return
                 _turn_data = prepare_turn(
                     _request_data,
                     conversation_id=_conv,
                     memories_db_path=DB_PATH,
                 )
+                _turn_data['_turn_flight_recorder'] = _flight_recorder
+                _flight_recorder.bind(
+                    user_message_id=_turn_data.get('user_message_id'),
+                    turn_key=_turn_data.get('turn_key'),
+                    request_id=_turn_data.get('request_id'),
+                )
+                _flight_recorder.record('turn_created', dedupe=True)
                 _uc = (_turn_data.get('content') or '').strip()
                 phase = 'insert_user_message'
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+                )
+                # Keep the observation recorder attached even when a test seam or
+                # adapter returns a fresh turn_data mapping.
+                _turn_data['_turn_flight_recorder'] = _flight_recorder
+                _flight_recorder.bind(
+                    user_message_id=_turn_data.get('user_message_id'),
+                )
+                _flight_recorder.record(
+                    'user_message_persisted',
+                    dedupe=True,
                 )
                 _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
                 if _rewrite_id:
@@ -7741,6 +8416,100 @@ def chat_stream():
                     except Exception as _rw_exc:
                         yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
                         return
+
+                # An empty-content stream with an existing user_message_id is a
+                # transport reconnect candidate. Consult the authoritative
+                # active-turn row before touching the generation lock.
+                if not _rewrite_id and not _uc and _turn_data.get('user_message_id') is not None:
+                    try:
+                        _active_turn = get_active_turn(DB_PATH, _conv)
+                    except Exception:
+                        _active_turn = None
+                    _same_active = bool(
+                        _active_turn
+                        and _active_turn.get('user_message_id') is not None
+                        and int(_active_turn['user_message_id'])
+                        == int(_turn_data['user_message_id'])
+                    )
+                    _persisted_assistant = (
+                        _find_persisted_assistant_after(
+                            _turn_data['user_message_id'],
+                        )
+                        if not _same_active
+                        else None
+                    )
+                    if _same_active or _persisted_assistant is not None:
+                        _same_turn_reconnect = True
+                        _owns_logical_turn = False
+                        requested_identity = {
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        }
+                        active_owner_identity = _gen_active_identity
+                        active_recorder_identity = _gen_recorder_identity(
+                            _gen_active_recorder,
+                        )
+                        requested_logical_identity = _gen_logical_identity(
+                            requested_identity,
+                        )
+                        if (
+                            _same_active
+                            and _gen_active_recorder is not None
+                            and requested_logical_identity is not None
+                            and active_recorder_identity == requested_logical_identity
+                            and (
+                                active_owner_identity is None
+                                or active_owner_identity == requested_logical_identity
+                            )
+                        ):
+                            _flight_recorder = _gen_active_recorder
+                            _turn_data['_turn_flight_recorder'] = _flight_recorder
+                        if not _same_active:
+                            # A persisted-after-terminal reconnect owns a
+                            # separate observation; it must not adopt the
+                            # recorder of a newer active user turn.
+                            _flight_recorder.set_stream_role('reconnect')
+                        _flight_recorder.bind(
+                            turn_key=(
+                                _active_turn.get('turn_key')
+                                if _same_active else None
+                            ),
+                        )
+                        _flight_recorder.record(
+                            'same_turn_reconnect_detected',
+                            stream_instance_id=_stream_instance_id,
+                            stream_role='reconnect',
+                            reason=(
+                                'same_active_turn'
+                                if _same_active
+                                else 'persisted_turn_reconnect'
+                            ),
+                            dedupe=True,
+                        )
+                        if _persisted_assistant is not None:
+                            _flight_recorder.record(
+                                'turn_reconciled',
+                                assistant_message_id=_persisted_assistant,
+                                reconcile_applied=True,
+                                stream_instance_id=_stream_instance_id,
+                                stream_role='reconnect',
+                                dedupe=True,
+                            )
+                        phase = 'same_turn_reconnect_wait'
+                        yield from _stream_same_turn_reconnect_wait(
+                            user_message_id=_turn_data['user_message_id'],
+                            recorder=_flight_recorder,
+                            stream_instance_id=_stream_instance_id,
+                        )
+                        return
+                    if _active_turn is not None:
+                        _flight_recorder.record(
+                            'different_turn_lock_collision',
+                            stream_instance_id=_stream_instance_id,
+                            stream_role='original',
+                            dedupe=True,
+                        )
+
                 # touch_user_interaction() runs inside insert_user_message after persist.
                 if _uc:
                     try:
@@ -7754,11 +8523,25 @@ def chat_stream():
                 if _rewrite_id:
                     # Never reuse an unrelated prior result for staged rewrite.
                     while True:
-                        mode, reused = _gen_acquire_or_wait()
+                        mode, reused = _gen_acquire_or_wait(
+                            flight_recorder=_flight_recorder,
+                            logical_identity={
+                                'user_message_id': _turn_data.get('user_message_id'),
+                                'turn_key': _turn_data.get('turn_key'),
+                            },
+                            owner_token_out=_gen_owner,
+                        )
                         if mode == 'own':
                             break
                 else:
-                    mode, reused = _gen_acquire_or_wait()
+                    mode, reused = _gen_acquire_or_wait(
+                        flight_recorder=_flight_recorder,
+                        logical_identity={
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        },
+                        owner_token_out=_gen_owner,
+                    )
                     if mode == 'reused':
                         text, thinking = reused
                         if thinking:
@@ -7783,17 +8566,31 @@ def chat_stream():
                         for _chunk in _daily_stream:
                             if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
                                 _daily_out = _chunk
+                                if len(_chunk) > 1:
+                                    assistant_id = _chunk[1]
+                                _flight_recorder.record(
+                                    'assistant_persisted',
+                                    assistant_message_id=assistant_id,
+                                    assistant_persisted=True,
+                                    dedupe=True,
+                                )
                                 if not _released[0]:
                                     _released[0] = True
                                     _persisted[0] = True
-                                    _gen_release((_daily_out[1], _daily_out[2]))
+                                    _gen_release(
+                                        (_daily_out[1], _daily_out[2]),
+                                        expected_owner_token=_gen_owner.get('token'),
+                                    )
                                 continue
                             if _chat_sse_terminal_kind(_chunk):
                                 if not _released[0]:
                                     _released[0] = True
                                     if _turn_data.get('_daily_partial_rescued'):
                                         _persisted[0] = True
-                                    _gen_release(None)
+                                    _gen_release(
+                                        None,
+                                        expected_owner_token=_gen_owner.get('token'),
+                                    )
                                 yield _chunk
                                 break
                             yield _chunk
@@ -7805,20 +8602,22 @@ def chat_stream():
                             _released[0] = True
                             if _daily_out:
                                 _persisted[0] = True
-                                _gen_release((_daily_out[1], _daily_out[2]))
+                                _gen_release(
+                                    (_daily_out[1], _daily_out[2]),
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                             elif _turn_data.get('_daily_partial_rescued'):
                                 _persisted[0] = True
-                                _gen_release(None)
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                             else:
-                                _gen_release(None)
-                    _terminal_diag = _turn_data.get('_terminal_contract_diag')
-                    if _terminal_diag:
-                        _terminal_diag = dict(_terminal_diag)
-                        _terminal_diag['lock_released'] = True
-                        logging.getLogger('gateway').warning(
-                            'chat_terminal_contract %s',
-                            json.dumps(_terminal_diag, ensure_ascii=False, sort_keys=True),
-                        )
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
+                        _emit_terminal_contract_diag_once(_turn_data)
                     return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
@@ -7953,7 +8752,10 @@ def chat_stream():
                                 })
                             yield 'data: ' + json.dumps({'t': 'tool_use', 'd': event_data, 'idx': len(cc_tool_calls) - 1}, ensure_ascii=False) + SSE_END
                             if deferred_payload is not None:
-                                _gen_release(None)
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                                 _released[0] = True
                                 yield _sse_json({'t': 'done', 'ok': True})
                                 return
@@ -8073,7 +8875,10 @@ def chat_stream():
                     if _rewrite_id:
                         _discard_staged_resident('staged_rewrite_end')
                     _released[0] = True
-                    _gen_release((text, thinking) if text and not _rewrite_id else None)
+                    _gen_release(
+                        (text, thinking) if text and not _rewrite_id else None,
+                        expected_owner_token=_gen_owner.get('token'),
+                    )
                 if cc_usage or cc_cache_read or cc_cache_create:
                     _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
                     if cc_usage:
@@ -8103,7 +8908,10 @@ def chat_stream():
                 )
                 if not _released[0]:
                     _released[0] = True
-                    _gen_release(None)
+                    _gen_release(
+                        None,
+                        expected_owner_token=_gen_owner.get('token'),
+                    )
                 _fail_staged_rewrite(_turn_data, str(e))
                 _partial = getattr(e, 'usage', None)
                 if isinstance(_partial, dict) and (
@@ -8121,12 +8929,46 @@ def chat_stream():
                     }}) + SSE_END
                 yield _sse_json(_chat_stream_failure_event(e))
             finally:
-                release_turn(
-                    conversation_id=_conv,
-                    memories_db_path=DB_PATH,
-                    turn_key=_turn_data.get('turn_key'),
-                    persisted=_persisted[0],
-                )
+                try:
+                    if _owns_logical_turn:
+                        release_turn(
+                            conversation_id=_conv,
+                            memories_db_path=DB_PATH,
+                            turn_key=_turn_data.get('turn_key'),
+                            persisted=_persisted[0],
+                        )
+                        if assistant_id is not None:
+                            _flight_recorder.record(
+                                'assistant_persisted',
+                                assistant_message_id=assistant_id,
+                                assistant_persisted=True,
+                                dedupe=True,
+                            )
+                            _flight_recorder.record(
+                                'terminal_mapping_committed',
+                                assistant_message_id=assistant_id,
+                                mapping_committed=True,
+                                dedupe=True,
+                            )
+                        _flight_recorder.terminal(
+                            terminal_status=(
+                                'success'
+                                if assistant_id is not None or _persisted[0]
+                                else 'failed'
+                            ),
+                            assistant_message_id=assistant_id,
+                            assistant_persisted=bool(
+                                assistant_id is not None or _persisted[0]
+                            ),
+                            mapping_committed=bool(assistant_id is not None),
+                            turn_terminal=True,
+                        )
+                        _emit_turn_flight_terminal_once(_flight_recorder)
+                finally:
+                    try:
+                        del _tool_ctx.user_message_id
+                    except AttributeError:
+                        pass
         return Response(stream_with_context(cc_history_rewrite.guard_cc_generation(gen_cc())), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
@@ -8134,6 +8976,7 @@ def chat_stream():
 
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
+        _gen_owner = {}
         _turn_data: dict = {}
         assistant_id = None
         _request_data = request.get_json(silent=True) or {}
@@ -8172,11 +9015,23 @@ def chat_stream():
                     pass
             if _rewrite_id:
                 while True:
-                    mode, reused = _gen_acquire_or_wait()
+                    mode, reused = _gen_acquire_or_wait(
+                        logical_identity={
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        },
+                        owner_token_out=_gen_owner,
+                    )
                     if mode == 'own':
                         break
             else:
-                mode, reused = _gen_acquire_or_wait()
+                mode, reused = _gen_acquire_or_wait(
+                    logical_identity={
+                        'user_message_id': _turn_data.get('user_message_id'),
+                        'turn_key': _turn_data.get('turn_key'),
+                    },
+                    owner_token_out=_gen_owner,
+                )
                 if mode == 'reused':
                     text, thinking = reused
                     if thinking:
@@ -8525,7 +9380,10 @@ def chat_stream():
                 if _rewrite_id:
                     _discard_staged_resident('staged_rewrite_end')
                 _released[0] = True
-                _gen_release((text, thinking) if text and not _rewrite_id else None)
+                _gen_release(
+                    (text, thinking) if text and not _rewrite_id else None,
+                    expected_owner_token=_gen_owner.get('token'),
+                )
             if tool_calls_acc and not thinking:
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:

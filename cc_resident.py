@@ -1677,10 +1677,23 @@ class ResidentSession:
         self._lock = threading.Lock()
         self._turn_state_lock = threading.Lock()
         self._turn_active = False
+        # Monotonic per-resident turn identity used only to bind lifecycle
+        # diagnostics to the Daily plan that actually started this send.
+        self._turn_sequence = 0
+        self._active_turn_sequence = None
+        self._last_turn_sequence = None
         self._turn_write_started = False
         self._turn_stdin_flushed = False
         self._last_turn_stdin_write_started = False
         self._last_turn_stdin_flushed = False
+        self._turn_provider_event_seen = False
+        self._turn_provider_request_id_seen = False
+        self._turn_first_text_or_thinking_seen = False
+        self._turn_claude_init_event_seen = False
+        self._last_turn_provider_event_seen = False
+        self._last_turn_provider_request_id_seen = False
+        self._last_turn_first_text_or_thinking_seen = False
+        self._last_turn_claude_init_event_seen = False
         self._runtime_identity = None
         self._runtime_rollback_pending = None
         self._next_spawn_reason = None
@@ -2875,13 +2888,28 @@ class ResidentSession:
 
     def send_turn(self, *args, **kwargs):
         """Hold the lifecycle lock for a turn so no spawn can kill it mid-stream."""
+        on_turn_started = kwargs.pop('on_turn_started', None)
+        turn_sequence = None
         with self._lock:
             with self._turn_state_lock:
                 if self._turn_active:
                     raise ResidentError('resident_turn_in_progress')
+                self._turn_sequence += 1
+                turn_sequence = self._turn_sequence
+                self._active_turn_sequence = turn_sequence
                 self._turn_active = True
                 self._turn_write_started = False
                 self._turn_stdin_flushed = False
+                self._turn_provider_event_seen = False
+                self._turn_provider_request_id_seen = False
+                self._turn_first_text_or_thinking_seen = False
+                self._turn_claude_init_event_seen = False
+            if callable(on_turn_started):
+                try:
+                    on_turn_started(turn_sequence)
+                except Exception:
+                    # Diagnostic provenance must never change the send contract.
+                    pass
             try:
                 yield from self._send_turn_impl(*args, **kwargs)
             except BaseException as exc:
@@ -2944,6 +2972,20 @@ class ResidentSession:
                 with self._turn_state_lock:
                     self._last_turn_stdin_write_started = bool(self._turn_write_started)
                     self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
+                    self._last_turn_provider_event_seen = bool(
+                        self._turn_provider_event_seen
+                    )
+                    self._last_turn_provider_request_id_seen = bool(
+                        self._turn_provider_request_id_seen
+                    )
+                    self._last_turn_first_text_or_thinking_seen = bool(
+                        self._turn_first_text_or_thinking_seen
+                    )
+                    self._last_turn_claude_init_event_seen = bool(
+                        self._turn_claude_init_event_seen
+                    )
+                    self._last_turn_sequence = turn_sequence
+                    self._active_turn_sequence = None
                     self._turn_active = False
                 self._active_terminal_authority = None
 
@@ -2957,6 +2999,7 @@ class ResidentSession:
         turn_runtime=None,
         jsonl_finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
         on_stdin_begin=None,
+        on_lifecycle_event=None,
         diagnostic_wake_run_id=None,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
@@ -2974,6 +3017,16 @@ class ResidentSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
+        def _emit_lifecycle(stage, **fields):
+            callback = on_lifecycle_event
+            if not callable(callback):
+                return
+            try:
+                callback(stage, **fields)
+            except Exception:
+                # Observation must never alter provider behavior.
+                pass
 
         # Bind one authority before any turn-side effect. The outer
         # send_turn exception path uses this same object for bounded cleanup.
@@ -3136,6 +3189,10 @@ class ResidentSession:
             value = str(value or '').strip()
             if value and value not in live_request_ids:
                 live_request_ids.append(value)
+                _emit_lifecycle(
+                    'provider_request_observed',
+                    _request_identity=value,
+                )
 
         def _transcript_timeout_snapshot():
             """Inspect bounded current-cursor metadata without sidechain finality."""
@@ -3656,6 +3713,56 @@ class ResidentSession:
                         except Exception:
                             pass
                     t = d.get('type')
+                    ev = d.get('event') or {}
+                    is_claude_init = (
+                        t == 'system' and d.get('subtype') == 'init'
+                    )
+                    is_provider_event = (
+                        t in ('assistant', 'result')
+                        or (
+                            t == 'stream_event'
+                            and ev.get('type') in (
+                                'message_start',
+                                'message_delta',
+                                'content_block_delta',
+                            )
+                        )
+                        or (
+                            t == 'system'
+                            and d.get('subtype') == 'model_refusal_no_fallback'
+                        )
+                    )
+                    if is_claude_init:
+                        self._turn_claude_init_event_seen = True
+                        _emit_lifecycle('claude_init_seen')
+                    if is_provider_event:
+                        if not self._turn_provider_event_seen:
+                            _emit_lifecycle('provider_started')
+                        self._turn_provider_event_seen = True
+                        if _diagnostic_request_id(d, ev):
+                            if not self._turn_provider_request_id_seen:
+                                _emit_lifecycle('provider_request_id_seen')
+                            self._turn_provider_request_id_seen = True
+                        if t == 'result':
+                            _emit_lifecycle('provider_terminal')
+                    if (
+                        t == 'stream_event'
+                        and ev.get('type') == 'content_block_delta'
+                    ):
+                        delta = ev.get('delta') or {}
+                        if (
+                            (
+                                delta.get('type') == 'text_delta'
+                                and delta.get('text')
+                            )
+                            or (
+                                delta.get('type') == 'thinking_delta'
+                                and delta.get('thinking')
+                            )
+                        ):
+                            if not self._turn_first_text_or_thinking_seen:
+                                _emit_lifecycle('first_output')
+                            self._turn_first_text_or_thinking_seen = True
                     _record_live_request_id(_diagnostic_request_id(d))
                     if t == 'system' and d.get('subtype') == 'init':
                         _cold_start_mark(
@@ -3769,6 +3876,24 @@ class ResidentSession:
                                     think_acc.append(chunk)
                                     yield from _downstream_yield(('think', chunk))
                     elif t == 'assistant':
+                        assistant_blocks = (
+                            (d.get('message') or {}).get('content') or []
+                        )
+                        if any(
+                            isinstance(block, dict)
+                            and (
+                                (
+                                    block.get('type') == 'text'
+                                    and block.get('text')
+                                )
+                                or (
+                                    block.get('type') == 'thinking'
+                                    and block.get('thinking')
+                                )
+                            )
+                            for block in assistant_blocks
+                        ):
+                            self._turn_first_text_or_thinking_seen = True
                         if d.get('isApiErrorMessage') is True:
                             provider_error = claimed_terminal['provider_error']
                             break

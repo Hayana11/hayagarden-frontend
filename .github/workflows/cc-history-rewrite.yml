@@ -6,6 +6,13 @@ on:
       - 'chat/cc_history_rewrite.py'
       - 'cc_resident.py'
       - 'tests/test_cc_history_rewrite.py'
+      # Generation lock, cancel and shared Wake fence contracts run here too.
+      - 'gateway.py'
+      - 'app.py'
+      - 'chat/unified_heartbeat_a1.py'
+      - 'chat/turn_flight_recorder.py'
+      - 'tests/test_unified_heartbeat_a1.py'
+      - 'tests/test_chat_terminal_contract.py'
   workflow_dispatch:
   push:
     branches: [main]
@@ -13,6 +20,13 @@ on:
       - 'chat/cc_history_rewrite.py'
       - 'cc_resident.py'
       - 'tests/test_cc_history_rewrite.py'
+      # Generation lock, cancel and shared Wake fence contracts run here too.
+      - 'gateway.py'
+      - 'app.py'
+      - 'chat/unified_heartbeat_a1.py'
+      - 'chat/turn_flight_recorder.py'
+      - 'tests/test_unified_heartbeat_a1.py'
+      - 'tests/test_chat_terminal_contract.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -46,6 +60,7 @@ jobs:
       - name: Run CC terminal and history rewrite regressions
         run: |
           python -m unittest tests.test_cc_history_rewrite -v
+          python -m unittest tests.test_unified_heartbeat_a1 -v
           python -m unittest tests.test_chat_terminal_contract -v
           python -m unittest tests.test_cc_runtime -v
           python -m unittest tests.test_daily_runtime.DailyRuntimeCursorCASTests -v
