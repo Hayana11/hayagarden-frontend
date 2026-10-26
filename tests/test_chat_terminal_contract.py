@@ -1833,6 +1833,25 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             **kwargs,
         )
 
+    def _mark_previous_turn_complete(self, resident):
+        resident._turn_sequence = 7
+        resident._active_turn_sequence = None
+        resident._last_turn_sequence = 7
+        for suffix in (
+            'write_started',
+            'stdin_flushed',
+            'provider_event_seen',
+            'provider_request_id_seen',
+            'first_text_or_thinking_seen',
+            'claude_init_event_seen',
+        ):
+            setattr(resident, '_turn_' + suffix, True)
+            setattr(resident, '_last_turn_' + suffix, True)
+
+    def _bind_current_turn_snapshot(self, plan, resident):
+        plan._resident_turn_sequence = 1
+        resident._last_turn_sequence = 1
+
     def test_cancel_before_resident_stream_is_unsent_without_respawn(self):
         plan = self._plan()
         resident = self._resident()
@@ -1849,10 +1868,64 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertFalse(diag['abort_requested'])
         self.assertFalse(diag['respawn_requested'])
 
+    def test_previous_successful_turn_does_not_contaminate_current_pre_send_cancellation(self):
+        plan = self._plan()
+        plan._resident_stream_entered = True
+        resident = self._resident()
+        self._mark_previous_turn_complete(resident)
+
+        diag = self._diag(
+            plan,
+            resident,
+            cleanup_action='abort_daily_turn',
+            abort_requested=True,
+            respawn_requested=True,
+        )
+
+        self.assertTrue(diag['resident_stream_entered'])
+        for field in (
+            'stdin_write_started',
+            'stdin_flushed',
+            'provider_event_seen',
+            'provider_request_id_seen',
+            'first_text_or_thinking_seen',
+            'claude_init_event_seen',
+        ):
+            self.assertFalse(diag[field], field)
+        self.assertEqual(
+            'client_stream_cancelled_before_stdin_flush',
+            diag['terminal_reason'],
+        )
+
+    def test_previous_provider_flags_do_not_contaminate_current_unsent_cancellation(self):
+        plan = self._plan()
+        resident = self._resident()
+        self._mark_previous_turn_complete(resident)
+
+        diag = self._diag(
+            plan,
+            resident,
+            cleanup_action='unsent_release',
+            unsent_release=True,
+        )
+
+        self.assertFalse(diag['resident_stream_entered'])
+        for field in (
+            'stdin_write_started',
+            'stdin_flushed',
+            'provider_event_seen',
+            'provider_request_id_seen',
+            'first_text_or_thinking_seen',
+            'claude_init_event_seen',
+        ):
+            self.assertFalse(diag[field], field)
+        self.assertEqual('client_stream_cancelled_unsent', diag['terminal_reason'])
+
     def test_cancel_after_resident_stream_before_flush_keeps_fail_closed_cleanup(self):
         plan = self._plan()
         plan._resident_stream_entered = True
         resident = self._resident()
+        self._bind_current_turn_snapshot(plan, resident)
         resident._last_turn_stdin_write_started = True
         diag = self._diag(
             plan,
@@ -1878,6 +1951,7 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
 
         plan = self._plan()
         resident = self._resident()
+        self._bind_current_turn_snapshot(plan, resident)
         resident._last_turn_stdin_write_started = True
         resident._last_turn_stdin_flushed = True
         resident._last_turn_provider_event_seen = False
@@ -1971,6 +2045,7 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
 
         plan = self._plan()
         resident = self._resident()
+        self._bind_current_turn_snapshot(plan, resident)
         resident._last_turn_stdin_write_started = True
         resident._last_turn_stdin_flushed = True
         resident._last_turn_provider_event_seen = False
@@ -2107,6 +2182,7 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         plan = self._plan()
         plan._resident_stream_entered = True
         resident = self._resident()
+        self._bind_current_turn_snapshot(plan, resident)
         resident._last_turn_stdin_write_started = True
         resident._last_turn_stdin_flushed = True
         resident._last_turn_provider_event_seen = True
