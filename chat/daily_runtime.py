@@ -8455,6 +8455,19 @@ def ensure_resident_and_stream(
 
         _capture_transcript_start(plan, resident)
 
+        def _mark_turn_started(sequence: Any) -> None:
+            try:
+                plan._resident_turn_sequence = int(sequence)  # type: ignore[attr-defined]
+            except (TypeError, ValueError):
+                # An invalid identity is not usable as lifecycle provenance.
+                if hasattr(plan, '_resident_turn_sequence'):
+                    delattr(plan, '_resident_turn_sequence')
+                return
+            plan._current_user_stdin_write_started = False  # type: ignore[attr-defined]
+
+        def _mark_stdin_begin() -> None:
+            plan._current_user_stdin_write_started = True  # type: ignore[attr-defined]
+
         def _mark_stdin_flushed() -> None:
             _commit_capacity_swap_after_stdin_flush(plan)
 
@@ -8465,6 +8478,10 @@ def ensure_resident_and_stream(
             accepts_kwargs = any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
             )
+            if 'on_turn_started' in params or accepts_kwargs:
+                send_kwargs['on_turn_started'] = _mark_turn_started
+            if 'on_stdin_begin' in params or accepts_kwargs:
+                send_kwargs['on_stdin_begin'] = _mark_stdin_begin
             if 'on_stdin_flushed' in params or accepts_kwargs:
                 send_kwargs['on_stdin_flushed'] = _mark_stdin_flushed
             # Synthetic resident heartbeat keeps the browser transport alive
