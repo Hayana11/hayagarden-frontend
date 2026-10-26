@@ -876,6 +876,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             gateway._gen_last_result_identity,
             gateway._gen_active_recorder,
             gateway._gen_active_identity,
+            gateway._gen_owner_token,
+            gateway._gen_owner_fence_required,
         )
         with gateway._gen_cond:
             gateway._gen_busy = True
@@ -884,6 +886,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             gateway._gen_last_result_identity = None
             gateway._gen_active_recorder = recorder
             gateway._gen_active_identity = gateway._gen_recorder_identity(recorder)
+            gateway._gen_owner_token = None
+            gateway._gen_owner_fence_required = False
         try:
             with mock.patch.object(
                 gateway, '_gen_release',
@@ -912,6 +916,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                     gateway._gen_last_result_identity,
                     gateway._gen_active_recorder,
                     gateway._gen_active_identity,
+                    gateway._gen_owner_token,
+                    gateway._gen_owner_fence_required,
                 ) = old_state
 
     def test_explicit_force_unlock_is_recorded_and_allowed(self):
@@ -924,12 +930,16 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             gateway._gen_busy_since,
             gateway._gen_last_result,
             gateway._gen_active_recorder,
+            gateway._gen_owner_token,
+            gateway._gen_owner_fence_required,
         )
         with gateway._gen_cond:
             gateway._gen_busy = True
             gateway._gen_busy_since = time.time() - 999
             gateway._gen_last_result = None
             gateway._gen_active_recorder = recorder
+            gateway._gen_owner_token = None
+            gateway._gen_owner_fence_required = False
         try:
             with mock.patch.object(gateway, '_gen_release', return_value=True) as release:
                 with gateway.app.test_client() as client:
@@ -950,6 +960,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                     gateway._gen_busy_since,
                     gateway._gen_last_result,
                     gateway._gen_active_recorder,
+                    gateway._gen_owner_token,
+                    gateway._gen_owner_fence_required,
                 ) = old_state
 
     def test_legacy_age_only_unlock_is_removed_from_legacy_path(self):
