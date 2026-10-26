@@ -7403,7 +7403,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         from chat import display_thinking, interaction_state
         from chat import unified_heartbeat_a1 as uh
         from chat import window_identity
-        from chat.context_receipt import ContextReceipt
+        from chat.context_receipt import ContextReceipt, ContextReceiptMember
         from chat.wake_read_observation import collect_wake_read_observation
         from tools import lease_signer
         from wake import unified_modes
@@ -7700,7 +7700,55 @@ class ContextPlanConsumerTests(unittest.TestCase):
         plan.transcript_model_identity = 'model-1'
         plan.tool_profile = dr.DAILY_TOOL_PROFILE
         plan.hot_desired_plan = context_plan
-        installed_members = tuple(dr._context_receipt_members(plan))
+        desired_members = tuple(dr._context_receipt_members(plan))
+        installed_request = installed_frozen['members'][0]
+        installed_members = tuple(
+            ContextReceiptMember(
+                installed_order=member.installed_order,
+                representation_id=(
+                    'current_request'
+                    if member.source_kind == 'current_request'
+                    else member.representation_id
+                ),
+                representation_kind=(
+                    'fixed'
+                    if member.source_kind == 'current_request'
+                    else member.representation_kind
+                ),
+                source_ref=(
+                    installed_request.source_ref
+                    if member.source_kind == 'current_request'
+                    else member.source_ref
+                ),
+                source_revision=(
+                    installed_request.source_revision
+                    if member.source_kind == 'current_request'
+                    else member.source_revision
+                ),
+                source_kind=member.source_kind,
+                content_hash=(
+                    installed_request.content_hash
+                    if member.source_kind == 'current_request'
+                    else member.content_hash
+                ),
+                span_start=(
+                    installed_request.span_start
+                    if member.source_kind == 'current_request'
+                    else member.span_start
+                ),
+                span_end=(
+                    installed_request.span_end
+                    if member.source_kind == 'current_request'
+                    else member.span_end
+                ),
+                branch_id=(
+                    installed_request.branch_id
+                    if member.source_kind == 'current_request'
+                    else member.branch_id
+                ),
+            )
+            for member in desired_members
+        )
         plan.hot_receipt_frozen = {
             'receipt': ContextReceipt.build(
                 context_id=7,
