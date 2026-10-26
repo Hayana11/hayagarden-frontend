@@ -8286,6 +8286,7 @@ def chat_stream():
             _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
             _persisted = [False]
+            _gen_owner = {}
             _turn_data: dict = {}
             assistant_id = None
             _stream_instance_id = uuid.uuid4().hex
@@ -8310,7 +8311,9 @@ def chat_stream():
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
                 ):
-                    mode, _reused = _gen_acquire_or_wait()
+                    mode, _reused = _gen_acquire_or_wait(
+                        owner_token_out=_gen_owner,
+                    )
                     if mode != 'own':
                         yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
                         return
@@ -8320,7 +8323,10 @@ def chat_stream():
                             reality_context=request_reality_context,
                         )
                     finally:
-                        _gen_release(None)
+                        _gen_release(
+                            None,
+                            expected_owner_token=_gen_owner.get('token'),
+                        )
                     return
                 _turn_data = prepare_turn(
                     _request_data,
@@ -8469,6 +8475,7 @@ def chat_stream():
                                 'user_message_id': _turn_data.get('user_message_id'),
                                 'turn_key': _turn_data.get('turn_key'),
                             },
+                            owner_token_out=_gen_owner,
                         )
                         if mode == 'own':
                             break
@@ -8479,6 +8486,7 @@ def chat_stream():
                             'user_message_id': _turn_data.get('user_message_id'),
                             'turn_key': _turn_data.get('turn_key'),
                         },
+                        owner_token_out=_gen_owner,
                     )
                     if mode == 'reused':
                         text, thinking = reused
@@ -8515,14 +8523,20 @@ def chat_stream():
                                 if not _released[0]:
                                     _released[0] = True
                                     _persisted[0] = True
-                                    _gen_release((_daily_out[1], _daily_out[2]))
+                                    _gen_release(
+                                        (_daily_out[1], _daily_out[2]),
+                                        expected_owner_token=_gen_owner.get('token'),
+                                    )
                                 continue
                             if _chat_sse_terminal_kind(_chunk):
                                 if not _released[0]:
                                     _released[0] = True
                                     if _turn_data.get('_daily_partial_rescued'):
                                         _persisted[0] = True
-                                    _gen_release(None)
+                                    _gen_release(
+                                        None,
+                                        expected_owner_token=_gen_owner.get('token'),
+                                    )
                                 yield _chunk
                                 break
                             yield _chunk
@@ -8534,12 +8548,21 @@ def chat_stream():
                             _released[0] = True
                             if _daily_out:
                                 _persisted[0] = True
-                                _gen_release((_daily_out[1], _daily_out[2]))
+                                _gen_release(
+                                    (_daily_out[1], _daily_out[2]),
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                             elif _turn_data.get('_daily_partial_rescued'):
                                 _persisted[0] = True
-                                _gen_release(None)
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                             else:
-                                _gen_release(None)
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                         _emit_terminal_contract_diag_once(_turn_data)
                     return
                 text, thinking = None, None
@@ -8675,7 +8698,10 @@ def chat_stream():
                                 })
                             yield 'data: ' + json.dumps({'t': 'tool_use', 'd': event_data, 'idx': len(cc_tool_calls) - 1}, ensure_ascii=False) + SSE_END
                             if deferred_payload is not None:
-                                _gen_release(None)
+                                _gen_release(
+                                    None,
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
                                 _released[0] = True
                                 yield _sse_json({'t': 'done', 'ok': True})
                                 return
@@ -8825,7 +8851,10 @@ def chat_stream():
                 )
                 if not _released[0]:
                     _released[0] = True
-                    _gen_release(None)
+                    _gen_release(
+                        None,
+                        expected_owner_token=_gen_owner.get('token'),
+                    )
                 _fail_staged_rewrite(_turn_data, str(e))
                 _partial = getattr(e, 'usage', None)
                 if isinstance(_partial, dict) and (
