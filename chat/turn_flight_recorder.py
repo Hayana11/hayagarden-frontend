@@ -112,6 +112,7 @@ _PROGRESS_STAGES = frozenset({
     'assistant_persisted',
     'terminal_mapping_committed',
     'turn_reconciled',
+    'generation_lock_released',
 })
 
 _NEXT_MISSING_STAGE = {
