@@ -75,6 +75,7 @@ def _load_generation_lock_functions():
         '_gen_acquire_or_wait',
         '_gen_release',
         '_gen_mark_pending_delivery',
+        '_gen_logical_identity',
         'chat_cancel',
     }
     namespace = {
@@ -88,7 +89,13 @@ def _load_generation_lock_functions():
         '_gen_busy': False,
         '_gen_busy_since': 0.0,
         '_gen_last_result': None,
+        '_gen_last_result_identity': None,
         '_gen_pending_delivery': None,
+        '_gen_active_recorder': None,
+        '_gen_active_identity': None,
+        '_gen_owner_epoch': 0,
+        '_gen_owner_token': None,
+        '_gen_owner_fence_required': False,
         '_GEN_ZOMBIE_TTL': 320,
     }
     for node in tree.body:
@@ -441,7 +448,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(turn_lease['issued_from'], 'default_policy')
         relay.assert_not_called()
 
-    def test_force_cancel_preserves_live_shared_wake_under_zombie_ttl(self):
+    def test_force_cancel_preserves_live_shared_wake_delivery(self):
         locks = _load_generation_lock_functions()
         token = object()
         locks.update({
@@ -453,32 +460,90 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         result = locks['chat_cancel']()
         self.assertTrue(result['skipped'])
         self.assertTrue(result['shared_wake'])
+        self.assertFalse(result['owner_changed'])
+        self.assertEqual(
+            'shared_wake_delivery_active',
+            result['reason'],
+        )
         self.assertTrue(locks['_gen_busy'])
         self.assertIs(locks['_gen_pending_delivery'], token)
 
-    def test_shared_wake_zombie_escape_releases_and_stale_finish_cannot_kill_new_chat(self):
+    def test_old_shared_wake_age_does_not_override_pending_delivery_fence(self):
         locks = _load_generation_lock_functions()
-        old_token = object()
-        locks.update({
-            '_gen_busy': True,
-            '_gen_busy_since': time.time() - 321,
-            '_gen_pending_delivery': old_token,
-            'request_data': {'force': True},
-        })
+        owner = {}
+        mode, _ = locks['_gen_acquire_or_wait'](
+            wait_timeout=0,
+            owner_token_out=owner,
+        )
+        self.assertEqual('own', mode)
+        wake_token = object()
+        locks['_gen_mark_pending_delivery'](wake_token)
+        locks['_gen_busy_since'] = time.time() - 999
+        locks['request_data'] = {'force': True}
+
         result = locks['chat_cancel']()
-        self.assertTrue(result['ok'])
+        self.assertTrue(result['skipped'])
+        self.assertTrue(result['shared_wake'])
+        self.assertEqual(
+            'shared_wake_delivery_active',
+            result['reason'],
+        )
+        self.assertTrue(result['age_sec'] >= 900)
+        self.assertTrue(locks['_gen_busy'])
+        self.assertIs(locks['_gen_pending_delivery'], wake_token)
+
+        self.assertTrue(
+            locks['_gen_release'](
+                None,
+                expected_pending_token=wake_token,
+                expected_owner_token=owner['token'],
+            )
+        )
         self.assertFalse(locks['_gen_busy'])
         self.assertIsNone(locks['_gen_pending_delivery'])
 
-        mode, _ = locks['_gen_acquire_or_wait'](wait_timeout=0)
-        self.assertEqual(mode, 'own')
-        self.assertFalse(
-            locks['_gen_release'](
-                None,
-                expected_pending_token=old_token,
-            )
+    def test_flask_chat_cancel_preserves_live_shared_wake_delivery(self):
+        import gateway
+
+        owner = {}
+        mode, _ = gateway._gen_acquire_or_wait(
+            wait_timeout=0,
+            owner_token_out=owner,
         )
-        self.assertTrue(locks['_gen_busy'])
+        self.assertEqual('own', mode)
+        wake_token = object()
+        gateway._gen_mark_pending_delivery(wake_token)
+        try:
+            with gateway.app.test_client() as client:
+                response = client.post(
+                    '/chat/cancel',
+                    json={'force': True},
+                )
+            self.assertEqual(200, response.status_code)
+            payload = response.get_json()
+            self.assertTrue(payload['skipped'])
+            self.assertTrue(payload['shared_wake'])
+            self.assertFalse(payload['owner_changed'])
+            self.assertEqual(
+                'shared_wake_delivery_active',
+                payload['reason'],
+            )
+            with gateway._gen_cond:
+                self.assertTrue(gateway._gen_busy)
+                self.assertIs(gateway._gen_pending_delivery, wake_token)
+            with self.assertRaises(RuntimeError):
+                gateway._gen_acquire_or_wait(wait_timeout=0)
+        finally:
+            if gateway._gen_busy:
+                self.assertTrue(
+                    gateway._gen_release(
+                        None,
+                        expected_pending_token=wake_token,
+                        expected_owner_token=owner['token'],
+                    )
+                )
+        self.assertFalse(gateway._gen_busy)
+        self.assertIsNone(gateway._gen_pending_delivery)
 
     def test_force_cancel_non_shared_generation_keeps_original_behavior(self):
         locks = _load_generation_lock_functions()
