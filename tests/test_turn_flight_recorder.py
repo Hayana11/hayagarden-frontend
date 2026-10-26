@@ -835,6 +835,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                 'user_message_id': 13166,
                 'turn_key': 'turn-13166',
             })
+            gateway._gen_owner_token = None
+            gateway._gen_owner_fence_required = False
         try:
             with self.assertRaises(RuntimeError):
                 gateway._gen_acquire_or_wait(
