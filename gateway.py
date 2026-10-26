@@ -8145,13 +8145,32 @@ def chat_stream():
     from flask import Response, stream_with_context
     if _get_provider() == 'claude_code':
         def gen_cc():
-            from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
+            from moments_turn import (
+                prepare_turn,
+                activate_turn,
+                insert_user_message,
+                release_turn,
+                get_active_turn,
+                DEFAULT_CONVERSATION_ID,
+            )
 
             _conv = DEFAULT_CONVERSATION_ID
             _released = [False]
             _persisted = [False]
             _turn_data: dict = {}
             assistant_id = None
+            _stream_instance_id = uuid.uuid4().hex
+            _flight_recorder = TurnFlightRecorder(
+                stream_instance_id=_stream_instance_id,
+                stream_role='original',
+                request_id=(
+                    request.headers.get('X-Request-ID')
+                    or request.headers.get('X-Request-Id')
+                ),
+            )
+            _flight_recorder.record('turn_created', dedupe=True)
+            _same_turn_reconnect = False
+            _owns_logical_turn = True
             phase = 'prepare_turn'
             try:
                 _request_data = request.get_json(silent=True) or {}
@@ -8179,10 +8198,24 @@ def chat_stream():
                     conversation_id=_conv,
                     memories_db_path=DB_PATH,
                 )
+                _turn_data['_turn_flight_recorder'] = _flight_recorder
+                _flight_recorder.bind(
+                    user_message_id=_turn_data.get('user_message_id'),
+                    turn_key=_turn_data.get('turn_key'),
+                    request_id=_turn_data.get('request_id'),
+                )
+                _flight_recorder.record('turn_created', dedupe=True)
                 _uc = (_turn_data.get('content') or '').strip()
                 phase = 'insert_user_message'
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
+                )
+                _flight_recorder.bind(
+                    user_message_id=_turn_data.get('user_message_id'),
+                )
+                _flight_recorder.record(
+                    'user_message_persisted',
+                    dedupe=True,
                 )
                 _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
                 if _rewrite_id:
@@ -8191,6 +8224,70 @@ def chat_stream():
                     except Exception as _rw_exc:
                         yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
                         return
+
+                # An empty-content stream with an existing user_message_id is a
+                # transport reconnect candidate. Consult the authoritative
+                # active-turn row before touching the generation lock.
+                if not _rewrite_id and not _uc and _turn_data.get('user_message_id') is not None:
+                    try:
+                        _active_turn = get_active_turn(DB_PATH, _conv)
+                    except Exception:
+                        _active_turn = None
+                    _same_active = bool(
+                        _active_turn
+                        and _active_turn.get('user_message_id') is not None
+                        and int(_active_turn['user_message_id'])
+                        == int(_turn_data['user_message_id'])
+                    )
+                    _persisted_assistant = (
+                        _find_persisted_assistant_after(
+                            _turn_data['user_message_id'],
+                        )
+                        if not _same_active
+                        else None
+                    )
+                    if _same_active or _persisted_assistant is not None:
+                        _same_turn_reconnect = True
+                        _owns_logical_turn = False
+                        if _gen_active_recorder is not None:
+                            _flight_recorder = _gen_active_recorder
+                            _turn_data['_turn_flight_recorder'] = _flight_recorder
+                        _flight_recorder.bind(
+                            turn_key=(
+                                _active_turn.get('turn_key')
+                                if _same_active else None
+                            ),
+                        )
+                        _flight_recorder.record(
+                            'same_turn_reconnect_detected',
+                            stream_instance_id=_stream_instance_id,
+                            stream_role='reconnect',
+                            dedupe=True,
+                        )
+                        if _persisted_assistant is not None:
+                            _flight_recorder.record(
+                                'turn_reconciled',
+                                assistant_message_id=_persisted_assistant,
+                                reconcile_applied=True,
+                                stream_instance_id=_stream_instance_id,
+                                stream_role='reconnect',
+                                dedupe=True,
+                            )
+                        phase = 'same_turn_reconnect_wait'
+                        yield from _stream_same_turn_reconnect_wait(
+                            user_message_id=_turn_data['user_message_id'],
+                            recorder=_flight_recorder,
+                            stream_instance_id=_stream_instance_id,
+                        )
+                        return
+                    if _active_turn is not None:
+                        _flight_recorder.record(
+                            'different_turn_lock_collision',
+                            stream_instance_id=_stream_instance_id,
+                            stream_role='original',
+                            dedupe=True,
+                        )
+
                 # touch_user_interaction() runs inside insert_user_message after persist.
                 if _uc:
                     try:
@@ -8204,11 +8301,15 @@ def chat_stream():
                 if _rewrite_id:
                     # Never reuse an unrelated prior result for staged rewrite.
                     while True:
-                        mode, reused = _gen_acquire_or_wait()
+                        mode, reused = _gen_acquire_or_wait(
+                            flight_recorder=_flight_recorder,
+                        )
                         if mode == 'own':
                             break
                 else:
-                    mode, reused = _gen_acquire_or_wait()
+                    mode, reused = _gen_acquire_or_wait(
+                        flight_recorder=_flight_recorder,
+                    )
                     if mode == 'reused':
                         text, thinking = reused
                         if thinking:
@@ -8233,6 +8334,14 @@ def chat_stream():
                         for _chunk in _daily_stream:
                             if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
                                 _daily_out = _chunk
+                                if len(_chunk) > 1:
+                                    assistant_id = _chunk[1]
+                                _flight_recorder.record(
+                                    'assistant_persisted',
+                                    assistant_message_id=assistant_id,
+                                    assistant_persisted=True,
+                                    dedupe=True,
+                                )
                                 if not _released[0]:
                                     _released[0] = True
                                     _persisted[0] = True
@@ -9100,12 +9209,40 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
             try:
-                release_turn(
-                    conversation_id=_conv,
-                    memories_db_path=DB_PATH,
-                    turn_key=_turn_data.get('turn_key'),
-                    persisted=_persisted[0],
-                )
+                if not _same_turn_reconnect:
+                    release_turn(
+                        conversation_id=_conv,
+                        memories_db_path=DB_PATH,
+                        turn_key=_turn_data.get('turn_key'),
+                        persisted=_persisted[0],
+                    )
+                if _owns_logical_turn:
+                    if assistant_id is not None:
+                        _flight_recorder.record(
+                            'assistant_persisted',
+                            assistant_message_id=assistant_id,
+                            assistant_persisted=True,
+                            dedupe=True,
+                        )
+                        _flight_recorder.record(
+                            'terminal_mapping_committed',
+                            assistant_message_id=assistant_id,
+                            mapping_committed=True,
+                            dedupe=True,
+                        )
+                    _flight_recorder.terminal(
+                        terminal_status=(
+                            'success'
+                            if assistant_id is not None or _persisted[0]
+                            else 'failed'
+                        ),
+                        assistant_message_id=assistant_id,
+                        assistant_persisted=bool(
+                            assistant_id is not None or _persisted[0]
+                        ),
+                        mapping_committed=bool(assistant_id is not None),
+                        turn_terminal=True,
+                    )
             finally:
                 try:
                     del _tool_ctx.user_message_id
