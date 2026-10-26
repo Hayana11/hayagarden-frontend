@@ -2044,7 +2044,7 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
                 events, None,
             )
         )
-        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        self.assertEqual(['text', 'done'], [kind for kind, _ in chunks])
         self.assertTrue(session._last_turn_claude_init_event_seen)
         self.assertTrue(session._last_turn_provider_event_seen)
         self.assertTrue(session._last_turn_provider_request_id_seen)
