@@ -6294,7 +6294,12 @@ def chat():
             pass
     _persisted = False
     try:
-        mode, reused = _gen_acquire_or_wait()
+        mode, reused = _gen_acquire_or_wait(
+            logical_identity={
+                'user_message_id': _turn_data.get('user_message_id'),
+                'turn_key': _turn_data.get('turn_key'),
+            },
+        )
         if mode == 'reused':
             text, thinking_text = reused
             return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
@@ -8338,9 +8343,29 @@ def chat_stream():
                     if _same_active or _persisted_assistant is not None:
                         _same_turn_reconnect = True
                         _owns_logical_turn = False
-                        if _gen_active_recorder is not None:
+                        requested_identity = {
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        }
+                        active_identity = (
+                            _gen_active_identity
+                            or _gen_recorder_identity(_gen_active_recorder)
+                        )
+                        if (
+                            _same_active
+                            and _gen_active_recorder is not None
+                            and active_identity is not None
+                            and active_identity == _gen_logical_identity(
+                                requested_identity,
+                            )
+                        ):
                             _flight_recorder = _gen_active_recorder
                             _turn_data['_turn_flight_recorder'] = _flight_recorder
+                        if not _same_active:
+                            # A persisted-after-terminal reconnect owns a
+                            # separate observation; it must not adopt the
+                            # recorder of a newer active user turn.
+                            _flight_recorder.set_stream_role('reconnect')
                         _flight_recorder.bind(
                             turn_key=(
                                 _active_turn.get('turn_key')
@@ -8351,6 +8376,11 @@ def chat_stream():
                             'same_turn_reconnect_detected',
                             stream_instance_id=_stream_instance_id,
                             stream_role='reconnect',
+                            reason=(
+                                'same_active_turn'
+                                if _same_active
+                                else 'persisted_turn_reconnect'
+                            ),
                             dedupe=True,
                         )
                         if _persisted_assistant is not None:
@@ -8392,12 +8422,20 @@ def chat_stream():
                     while True:
                         mode, reused = _gen_acquire_or_wait(
                             flight_recorder=_flight_recorder,
+                            logical_identity={
+                                'user_message_id': _turn_data.get('user_message_id'),
+                                'turn_key': _turn_data.get('turn_key'),
+                            },
                         )
                         if mode == 'own':
                             break
                 else:
                     mode, reused = _gen_acquire_or_wait(
                         flight_recorder=_flight_recorder,
+                        logical_identity={
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        },
                     )
                     if mode == 'reused':
                         text, thinking = reused
@@ -8796,6 +8834,7 @@ def chat_stream():
                             mapping_committed=bool(assistant_id is not None),
                             turn_terminal=True,
                         )
+                        _emit_turn_flight_terminal_once(_flight_recorder)
                 finally:
                     try:
                         del _tool_ctx.user_message_id
@@ -8846,11 +8885,21 @@ def chat_stream():
                     pass
             if _rewrite_id:
                 while True:
-                    mode, reused = _gen_acquire_or_wait()
+                    mode, reused = _gen_acquire_or_wait(
+                        logical_identity={
+                            'user_message_id': _turn_data.get('user_message_id'),
+                            'turn_key': _turn_data.get('turn_key'),
+                        },
+                    )
                     if mode == 'own':
                         break
             else:
-                mode, reused = _gen_acquire_or_wait()
+                mode, reused = _gen_acquire_or_wait(
+                    logical_identity={
+                        'user_message_id': _turn_data.get('user_message_id'),
+                        'turn_key': _turn_data.get('turn_key'),
+                    },
+                )
                 if mode == 'reused':
                     text, thinking = reused
                     if thinking:
