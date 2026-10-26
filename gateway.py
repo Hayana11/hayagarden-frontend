@@ -1489,7 +1489,16 @@ def _gen_release(
             # must not release a newer Chat owner.
             return False
         if not force:
-            pass
+            if (
+                _gen_owner_fence_required
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+            if (
+                expected_owner_token is not None
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
         if recorder is None:
             recorder = _gen_active_recorder
         _gen_last_result = result
