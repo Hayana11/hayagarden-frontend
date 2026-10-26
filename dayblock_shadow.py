@@ -422,7 +422,7 @@ def _dayblock_auxiliary_members(
             seq=0, source_kind="attachment_span", source_ref=descriptor["source_ref"],
             source_revision=revision, role="attachment", content_hash=revision,
             logical_size=_token_estimate(json.dumps(
-                {k: v for k, v in descriptor.items() if k not in {"extracted_text", "source_revision"}},
+                {k: v for k, v in descriptor.items() if k != "extracted_text"},
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             )),
             created_at=str(row.get("created_at") or ""), branch_id="active-transcript",

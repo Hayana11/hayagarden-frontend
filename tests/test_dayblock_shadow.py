@@ -804,6 +804,34 @@ class ResentImageEvidenceTests(unittest.TestCase):
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         self.assertEqual(attachment.source_revision, expected)
 
+    def test_unaffected_attachments_match_pre_resend_fix_measurement(self):
+        # Golden values produced by the implementation before the resend fix
+        # (origin/main dayblock_shadow.py) on this exact fixture. Unaffected
+        # attachments must keep revision, logical_size and candidate revision.
+        self.image("img_a.jpg", b"first-image-bytes")
+        self.image("img_b.jpg", b"other-image-bytes")
+        members, _materialized, by_id = self.materialize(
+            self.resend_rows("看这个", "看这个呀", first_name="a.jpg", second_name="b.jpg"))
+        self.assertTrue(by_id[10]["critical_unavailable"])
+        attachments = {m.source_ref: m for m in members if m.source_kind == "attachment_span"}
+        self.assertEqual(
+            (attachments["attachment:10:0"].source_revision, attachments["attachment:10:0"].logical_size),
+            ("e55d3b8bee61cb2bb870dc3073e8df44cd81611f0e7082a20cff0e7ba256ba97", 123),
+        )
+        self.assertEqual(
+            (attachments["attachment:11:0"].source_revision, attachments["attachment:11:0"].logical_size),
+            ("ce7d68cbab87090e949ca0c9772262b8a596d49c34336748b2956bf561a2cb20", 124),
+        )
+        # logical_size keeps measuring the descriptor including source_revision.
+        sized = {k: v for k, v in by_id[11].items() if k != "extracted_text"}
+        self.assertIn("source_revision", sized)
+        self.assertEqual(attachments["attachment:11:0"].logical_size, dbs._token_estimate(json.dumps(
+            sized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+        self.assertEqual(
+            candidate_source_revision(members),
+            "36382d9246980c95b50f6b63764d3f936cee41c33f0ec8b2487128dac91df179",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
