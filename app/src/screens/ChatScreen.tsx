@@ -149,7 +149,6 @@ import {
   thinkingStateKey,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
-  findReconnectedAssistantForHandoff,
   isLiveSegmentFresh,
   markChatHandoffFinalized,
   type ChatHandoffKind,
@@ -1805,20 +1804,11 @@ export function ChatScreen() {
         && res.assistantMessageId == null
       );
       if (reconnectWithoutAssistant) {
-        const reconciled = await refetchLatest();
-        const finalMessageId = findReconnectedAssistantForHandoff(
-          reconciled,
-          handoff,
-        );
-        if (finalMessageId !== null) {
-          markChatHandoffFinalized(handoff);
-          commitChatPresentationBinding(
-            handoff,
-            finalMessageId,
-            presentationByMessageRef.current,
-          );
-          return 'success';
-        }
+        // Assistant pairing belongs to the backend: only assistant_message_id
+        // binds a turn. Without it, refetch so persisted rows can render, but
+        // never guess this turn's reply from the transcript (Wake/call rows
+        // are assistants too).
+        await refetchLatest();
         clearLivePresentation();
         showToast('原回合已结束，正在同步消息');
         return 'reconnect_no_result';
