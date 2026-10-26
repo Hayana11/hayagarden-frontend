@@ -1796,5 +1796,260 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertIn("'_daily_partial_rescued'", source)
 
 
+class DailyCancellationObservabilityTests(unittest.TestCase):
+    def _plan(self):
+        from chat import daily_runtime
+        return daily_runtime.DailyTurnPlan(
+            request_id='req-daily-cancel-test',
+            chat_id='default',
+            local_day='2026-10-26',
+            context_id=32,
+            context_epoch=30,
+            resident_generation=154,
+            resident_key='daily:default:32:154',
+            user_message_id=13136,
+            epoch_token={},
+            lease_owner='lease-owner',
+            is_cold=False,
+            is_respawn=False,
+            cursor_before=13135,
+            assembly={},
+            manifest={},
+        )
+
+    def _resident(self):
+        class Resident:
+            generation = 9
+            session_id = 'provider-session-secret'
+        return Resident()
+
+    def _diag(self, plan, resident, **kwargs):
+        state = gateway._daily_stream_cancellation_state(
+            plan, resident, {'user_message_id': plan.user_message_id},
+        )
+        return gateway._record_daily_stream_cancellation(
+            {},
+            state,
+            **kwargs,
+        )
+
+    def test_cancel_before_resident_stream_is_unsent_without_respawn(self):
+        plan = self._plan()
+        resident = self._resident()
+        diag = self._diag(
+            plan,
+            resident,
+            cleanup_action='unsent_release',
+            unsent_release=True,
+        )
+        self.assertFalse(diag['resident_stream_entered'])
+        self.assertFalse(diag['stdin_flushed'])
+        self.assertEqual('client_stream_cancelled_unsent', diag['terminal_reason'])
+        self.assertTrue(diag['unsent_release'])
+        self.assertFalse(diag['abort_requested'])
+        self.assertFalse(diag['respawn_requested'])
+        self.assertFalse(diag['resident_respawned'])
+
+    def test_cancel_after_resident_stream_before_flush_keeps_fail_closed_cleanup(self):
+        plan = self._plan()
+        plan._resident_stream_entered = True
+        resident = self._resident()
+        resident._last_turn_stdin_write_started = True
+        diag = self._diag(
+            plan,
+            resident,
+            cleanup_action='abort_daily_turn',
+            abort_requested=True,
+            respawn_requested=True,
+        )
+        self.assertTrue(diag['resident_stream_entered'])
+        self.assertTrue(diag['stdin_write_started'])
+        self.assertFalse(diag['stdin_flushed'])
+        self.assertEqual(
+            'client_stream_cancelled_before_stdin_flush',
+            diag['terminal_reason'],
+        )
+        self.assertTrue(diag['abort_requested'])
+        self.assertTrue(diag['resident_respawned'])
+
+    def test_gateway_cancel_after_flush_before_provider_event_is_core_regression(self):
+        from chat import context_window
+        from chat import daily_runtime
+        from chat import display_thinking
+        from chat import system_builder
+
+        plan = self._plan()
+        resident = self._resident()
+        resident._last_turn_stdin_write_started = True
+        resident._last_turn_stdin_flushed = True
+        resident._last_turn_provider_event_seen = False
+        resident._last_turn_provider_request_id_seen = False
+        resident._last_turn_first_text_or_thinking_seen = False
+        turn_data = {
+            'content': 'deterministic cancellation',
+            'user_message_id': plan.user_message_id,
+            'request_id': plan.request_id,
+        }
+
+        def fake_events(*_args, **_kwargs):
+            plan._resident_stream_entered = True
+            yield 'self_state', 'deterministic'
+            yield 'done', ('', '', {})
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
+            stack.enter_context(mock.patch.object(gateway, '_get_model', return_value='mock-model'))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_active_switch_intent', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_first_turn_finalize_pending', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'prepare_daily_turn', return_value=plan,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'stream_daily_resident_turn',
+                side_effect=fake_events,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'release_unsent_daily_turn', return_value=None,
+            ))
+            abort = stack.enter_context(mock.patch.object(
+                daily_runtime, 'abort_daily_turn', return_value={},
+            ))
+            stack.enter_context(mock.patch.object(
+                system_builder, 'build_cc_daily_static_parts',
+                return_value={'full_system': 'STATIC'},
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=('full', ''),
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'prepare_daily_display_thinking_plan',
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'filter_display_thinking_events',
+                side_effect=lambda events, _mode: events,
+            ))
+
+            stream = gateway._stream_cc_daily_soft_window(
+                turn_data, 'deterministic cancellation',
+            )
+            first = next(stream)
+            self.assertIn('self_state', first)
+            stream.close()
+
+        diag = turn_data['_terminal_contract_diag']
+        self.assertEqual('daily_stream_cancelled', diag['event'])
+        self.assertEqual(13136, diag['user_message_id'])
+        self.assertEqual('req-daily-cancel-test', diag['request_id'])
+        self.assertEqual('client_stream_cancelled_after_stdin', diag['terminal_reason'])
+        self.assertEqual('after_stdin_before_provider_event', diag['stream_stage'])
+        self.assertTrue(diag['resident_stream_entered'])
+        self.assertTrue(diag['stdin_write_started'])
+        self.assertTrue(diag['stdin_flushed'])
+        self.assertFalse(diag['provider_event_seen'])
+        self.assertFalse(diag['provider_request_id_seen'])
+        self.assertFalse(diag['first_text_or_thinking_seen'])
+        self.assertFalse(diag['partial_rescue_performed'])
+        self.assertFalse(diag['unsent_release'])
+        self.assertTrue(diag['abort_requested'])
+        self.assertTrue(diag['respawn_requested'])
+        self.assertTrue(diag['resident_respawned'])
+        self.assertTrue(diag['fail_closed'])
+        self.assertEqual(1, abort.call_count)
+        encoded = json.dumps(diag, ensure_ascii=False)
+        self.assertNotIn('provider-session-secret', encoded)
+        self.assertNotIn('daily:default:32:154', encoded)
+
+    def test_cancel_after_provider_text_started_reports_partial_rescue(self):
+        plan = self._plan()
+        plan._resident_stream_entered = True
+        resident = self._resident()
+        resident._last_turn_stdin_write_started = True
+        resident._last_turn_stdin_flushed = True
+        resident._last_turn_provider_event_seen = True
+        resident._last_turn_provider_request_id_seen = True
+        resident._last_turn_first_text_or_thinking_seen = True
+        diag = self._diag(
+            plan,
+            resident,
+            cleanup_action='abort_daily_turn',
+            partial_rescue_performed=True,
+            abort_requested=True,
+            respawn_requested=True,
+        )
+        self.assertEqual(
+            'client_stream_cancelled_after_provider_start',
+            diag['terminal_reason'],
+        )
+        self.assertTrue(diag['provider_event_seen'])
+        self.assertTrue(diag['provider_request_id_seen'])
+        self.assertTrue(diag['first_text_or_thinking_seen'])
+        self.assertTrue(diag['partial_rescue_performed'])
+        self.assertTrue(diag['abort_requested'])
+
+    def test_success_and_provider_exception_paths_do_not_use_cancel_reason(self):
+        source = (
+            pathlib.Path(__file__).resolve().parents[1] / 'gateway.py'
+        ).read_text(encoding='utf-8')
+        start = source.index('def _stream_cc_daily_soft_window(')
+        end = source.index("\n\n@app.route('/chat/stream'", start)
+        daily = source[start:end]
+        success = daily.index("turn_terminal = True")
+        self.assertNotIn(
+            '_record_daily_stream_cancellation(',
+            daily[success:daily.index('except CanonicalTurnError', success)],
+        )
+        self.assertIn(
+            "yield _sse_json(_chat_stream_failure_event(",
+            daily,
+        )
+        self.assertIn(
+            "cleanup = _rescue_and_abort(error_code, respawn=True)",
+            daily,
+        )
+
+    def test_resident_snapshots_init_separately_from_provider_output(self):
+        events = [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-r1',
+            },
+            {
+                'type': 'stream_event',
+                'request_id': 'provider-request-r1',
+                'event': {'type': 'message_start', 'message': {}},
+            },
+            {
+                'type': 'stream_event',
+                'request_id': 'provider-request-r1',
+                'event': {
+                    'type': 'content_block_delta',
+                    'delta': {'type': 'text_delta', 'text': 'hello'},
+                },
+            },
+            {
+                'type': 'result',
+                'is_error': False,
+                'stop_reason': 'end_turn',
+                'usage': {},
+            },
+        ]
+        chunks, session, _watchdogs, _kill_calls = (
+            ChatTerminalContractTests()._run_deterministic_send_turn(
+                events, None,
+            )
+        )
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        self.assertTrue(session._last_turn_claude_init_event_seen)
+        self.assertTrue(session._last_turn_provider_event_seen)
+        self.assertTrue(session._last_turn_provider_request_id_seen)
+        self.assertTrue(session._last_turn_first_text_or_thinking_seen)
+
+
 if __name__ == '__main__':
     unittest.main()
