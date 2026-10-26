@@ -97,6 +97,64 @@ class TurnFlightRecorderTests(unittest.TestCase):
         )
 
 
+    def test_cancel_after_stdin_reports_last_completed_stage_before_terminal(self):
+        recorder = TurnFlightRecorder(user_message_id=13166)
+        for stage in (
+            'turn_created',
+            'resident_turn_started',
+            'stdin_begin',
+            'stdin_flushed',
+        ):
+            recorder.record(stage, dedupe=True)
+        recorder.record(
+            'turn_cancelled',
+            terminal_reason='client_stream_cancelled_after_stdin',
+        )
+        snapshot = recorder.terminal(
+            terminal_status='cancelled',
+            terminal_reason='client_stream_cancelled_after_stdin',
+        )
+        self.assertEqual('stdin_flushed', snapshot['last_completed_stage'])
+        self.assertEqual('provider_started', snapshot['next_missing_stage'])
+        self.assertNotEqual('turn_cancelled', snapshot['last_completed_stage'])
+        self.assertNotEqual('turn_closed', snapshot['last_completed_stage'])
+
+
+    def test_success_summary_uses_last_progress_stage_not_terminal_meta(self):
+        recorder = TurnFlightRecorder(user_message_id=13166)
+        for stage in (
+            'turn_created',
+            'user_message_persisted',
+            'generation_lock_acquired',
+            'resident_selected',
+            'resident_turn_started',
+            'stdin_begin',
+            'stdin_flushed',
+            'provider_started',
+            'first_output',
+            'provider_terminal',
+            'assistant_persisted',
+            'terminal_mapping_committed',
+        ):
+            recorder.record(stage, dedupe=True)
+        snapshot = recorder.terminal(
+            terminal_status='success',
+            assistant_message_id=13168,
+            assistant_persisted=True,
+            mapping_committed=True,
+        )
+        self.assertEqual('terminal_mapping_committed', snapshot['last_completed_stage'])
+        self.assertIsNone(snapshot['next_missing_stage'])
+        self.assertNotEqual('turn_closed', snapshot['last_completed_stage'])
+
+
+    def test_provider_started_without_request_identity_reports_zero(self):
+        recorder = TurnFlightRecorder(user_message_id=13166)
+        recorder.record('provider_started', dedupe=True)
+        snapshot = recorder.terminal(terminal_status='failed')
+        self.assertEqual(0, snapshot['provider_request_count'])
+
+
     def test_provider_request_count_deduplicates_three_request_ids(self):
         recorder = TurnFlightRecorder(user_message_id=13166)
         for request_id in ('provider-a', 'provider-a', 'provider-b', 'provider-c', 'provider-c'):
@@ -210,6 +268,10 @@ class TurnFlightRecorderTests(unittest.TestCase):
         )
         recorder.record('generation_lock_acquired', dedupe=True)
         recorder.record('provider_started', dedupe=True)
+        recorder.record(
+            'provider_request_observed',
+            _request_identity='provider-reconnect-1',
+        )
         recorder.record(
             'same_turn_reconnect_detected',
             stream_instance_id='stream-b',
@@ -521,6 +583,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                 gateway._gen_pending_delivery,
                 gateway._gen_active_recorder,
                 gateway._gen_active_identity,
+                gateway._gen_owner_token,
+                gateway._gen_owner_fence_required,
             )
             gateway._gen_busy = True
             gateway._gen_busy_since = time.time()
@@ -529,6 +593,8 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             gateway._gen_pending_delivery = None
             gateway._gen_active_recorder = owner
             gateway._gen_active_identity = gateway._gen_logical_identity(identity_owner)
+            gateway._gen_owner_token = None
+            gateway._gen_owner_fence_required = False
         result = {}
 
         def wait_for_turn():
@@ -570,6 +636,175 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                     gateway._gen_pending_delivery,
                     gateway._gen_active_recorder,
                     gateway._gen_active_identity,
+                    gateway._gen_owner_token,
+                    gateway._gen_owner_fence_required,
+                ) = old_state
+
+
+    def test_stale_owner_after_force_unlock_cannot_release_new_owner(self):
+        owner_a = TurnFlightRecorder(user_message_id=13166, turn_key='turn-a')
+        owner_b = TurnFlightRecorder(user_message_id=13167, turn_key='turn-b')
+        identity_a = {'user_message_id': 13166, 'turn_key': 'turn-a'}
+        identity_b = {'user_message_id': 13167, 'turn_key': 'turn-b'}
+        old_state = (
+            gateway._gen_busy,
+            gateway._gen_busy_since,
+            gateway._gen_last_result,
+            gateway._gen_last_result_identity,
+            gateway._gen_pending_delivery,
+            gateway._gen_active_recorder,
+            gateway._gen_active_identity,
+            gateway._gen_owner_token,
+            gateway._gen_owner_fence_required,
+        )
+        try:
+            with gateway._gen_cond:
+                gateway._gen_busy = False
+                gateway._gen_last_result = None
+                gateway._gen_last_result_identity = None
+                gateway._gen_pending_delivery = None
+                gateway._gen_active_recorder = None
+                gateway._gen_active_identity = None
+                gateway._gen_owner_token = None
+                gateway._gen_owner_fence_required = False
+            token_a = {}
+            self.assertEqual(
+                ('own', None),
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0,
+                    flight_recorder=owner_a,
+                    logical_identity=identity_a,
+                    owner_token_out=token_a,
+                ),
+            )
+            self.assertIsNotNone(token_a.get('token'))
+            self.assertTrue(gateway._gen_release(None, force=True))
+
+            token_b = {}
+            self.assertEqual(
+                ('own', None),
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0,
+                    flight_recorder=owner_b,
+                    logical_identity=identity_b,
+                    owner_token_out=token_b,
+                ),
+            )
+            self.assertNotEqual(token_a['token'], token_b['token'])
+            before = (
+                gateway._gen_last_result,
+                gateway._gen_active_recorder,
+                gateway._gen_active_identity,
+            )
+            self.assertFalse(gateway._gen_release(
+                ('stale A result', ''),
+                expected_owner_token=token_a['token'],
+                flight_recorder=owner_a,
+            ))
+            self.assertTrue(gateway._gen_busy)
+            self.assertIs(owner_b, gateway._gen_active_recorder)
+            self.assertEqual(
+                gateway._gen_logical_identity(identity_b),
+                gateway._gen_active_identity,
+            )
+            self.assertEqual(before, (
+                gateway._gen_last_result,
+                gateway._gen_active_recorder,
+                gateway._gen_active_identity,
+            ))
+            self.assertTrue(gateway._gen_release(
+                ('B result', ''),
+                expected_owner_token=token_b['token'],
+                flight_recorder=owner_b,
+            ))
+        finally:
+            with gateway._gen_cond:
+                (
+                    gateway._gen_busy,
+                    gateway._gen_busy_since,
+                    gateway._gen_last_result,
+                    gateway._gen_last_result_identity,
+                    gateway._gen_pending_delivery,
+                    gateway._gen_active_recorder,
+                    gateway._gen_active_identity,
+                    gateway._gen_owner_token,
+                    gateway._gen_owner_fence_required,
+                ) = old_state
+
+
+    def test_stale_owner_release_cannot_clear_newer_lock_after_client_disconnect(self):
+        owner_a = TurnFlightRecorder(user_message_id=13166, turn_key='turn-a')
+        owner_b = TurnFlightRecorder(user_message_id=13167, turn_key='turn-b')
+        token_a = {}
+        token_b = {}
+        old_state = (
+            gateway._gen_busy,
+            gateway._gen_busy_since,
+            gateway._gen_last_result,
+            gateway._gen_last_result_identity,
+            gateway._gen_pending_delivery,
+            gateway._gen_active_recorder,
+            gateway._gen_active_identity,
+            gateway._gen_owner_token,
+            gateway._gen_owner_fence_required,
+        )
+        try:
+            with gateway._gen_cond:
+                gateway._gen_busy = False
+                gateway._gen_last_result = None
+                gateway._gen_last_result_identity = None
+                gateway._gen_pending_delivery = None
+                gateway._gen_active_recorder = None
+                gateway._gen_active_identity = None
+                gateway._gen_owner_token = None
+                gateway._gen_owner_fence_required = False
+            self.assertEqual(
+                ('own', None),
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0,
+                    flight_recorder=owner_a,
+                    logical_identity={'user_message_id': 13166, 'turn_key': 'turn-a'},
+                    owner_token_out=token_a,
+                ),
+            )
+            self.assertTrue(gateway._gen_release(
+                None,
+                expected_owner_token=token_a['token'],
+                flight_recorder=owner_a,
+            ))
+            self.assertEqual(
+                ('own', None),
+                gateway._gen_acquire_or_wait(
+                    wait_timeout=0,
+                    flight_recorder=owner_b,
+                    logical_identity={'user_message_id': 13167, 'turn_key': 'turn-b'},
+                    owner_token_out=token_b,
+                ),
+            )
+            self.assertFalse(gateway._gen_release(
+                ('late A result', ''),
+                expected_owner_token=token_a['token'],
+                flight_recorder=owner_a,
+            ))
+            self.assertTrue(gateway._gen_busy)
+            self.assertIs(owner_b, gateway._gen_active_recorder)
+            self.assertTrue(gateway._gen_release(
+                ('B result', ''),
+                expected_owner_token=token_b['token'],
+                flight_recorder=owner_b,
+            ))
+        finally:
+            with gateway._gen_cond:
+                (
+                    gateway._gen_busy,
+                    gateway._gen_busy_since,
+                    gateway._gen_last_result,
+                    gateway._gen_last_result_identity,
+                    gateway._gen_pending_delivery,
+                    gateway._gen_active_recorder,
+                    gateway._gen_active_identity,
+                    gateway._gen_owner_token,
+                    gateway._gen_owner_fence_required,
                 ) = old_state
 
 
