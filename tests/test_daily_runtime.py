@@ -7514,6 +7514,21 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 ),
             )
 
+        main_exceptions = []
+        real_main_turn = gateway._run_unified_normal_main_chat_turn
+
+        def run_main_with_capture(**kwargs):
+            try:
+                return real_main_turn(**kwargs)
+            except Exception as exc:
+                main_exceptions.append((
+                    type(exc).__name__,
+                    str(exc),
+                    type(exc.__cause__).__name__ if exc.__cause__ else None,
+                    str(exc.__cause__) if exc.__cause__ else None,
+                ))
+                raise
+
         def db_conn():
             return sqlite3.connect(db)
 
@@ -7610,7 +7625,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             run_spy = stack.enter_context(mock.patch.object(
                 gateway,
                 '_run_unified_normal_main_chat_turn',
-                wraps=gateway._run_unified_normal_main_chat_turn,
+                side_effect=run_main_with_capture,
             ))
 
             with gateway.app.app_context():
@@ -7632,7 +7647,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'gateway must carry Observation watermark skip into main turn',
         )
         self.assertEqual(resident.observation_turns, 1)
-        self.assertEqual(resident.main_turns, 1, trace_events)
+        self.assertEqual(resident.main_turns, 1, (trace_events, main_exceptions))
         self.assertEqual(resident.ensure_calls, 0)
         self.assertEqual(resident.respawn_calls, 0)
         self.assertEqual(resident.session_id, 'sid-1')
