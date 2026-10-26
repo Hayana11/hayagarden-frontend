@@ -1,7 +1,9 @@
 import json
 import os
 import pathlib
+import sys
 import tempfile
+import types
 import threading
 import time
 import unittest
@@ -2069,6 +2071,17 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         def fake_events(*_args, **_kwargs):
             stream_calls.append(True)
             plan._resident_stream_entered = True
+            plan._current_user_stdin_write_started = True
+            plan._current_user_stdin_flushed = True
+            recorder = turn_mapping.get('_turn_flight_recorder')
+            for event in (
+                'generation_lock_acquired',
+                'resident_selected',
+                'resident_turn_started',
+                'stdin_begin',
+                'stdin_flushed',
+            ):
+                recorder.record(event, dedupe=True)
             yield 'self_state', 'outer deterministic chunk'
 
         with ExitStack() as stack:
@@ -2205,7 +2218,14 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertEqual(0, partial_persist.call_count)
 
     def test_repair_unlock_stops_after_target_owner_is_released(self):
-        import app
+        pil_module = types.ModuleType('PIL')
+        pil_image_module = types.ModuleType('PIL.Image')
+        pil_module.Image = mock.MagicMock()
+        with mock.patch.dict(
+            sys.modules,
+            {'PIL': pil_module, 'PIL.Image': pil_image_module},
+        ):
+            import app
 
         requests = []
 
@@ -2225,7 +2245,14 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertTrue(result['ok'])
 
     def test_repair_unlock_does_not_follow_owner_change(self):
-        import app
+        pil_module = types.ModuleType('PIL')
+        pil_image_module = types.ModuleType('PIL.Image')
+        pil_module.Image = mock.MagicMock()
+        with mock.patch.dict(
+            sys.modules,
+            {'PIL': pil_module, 'PIL.Image': pil_image_module},
+        ):
+            import app
 
         requests = []
 
