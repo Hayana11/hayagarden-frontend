@@ -6326,12 +6326,14 @@ def chat():
         except Exception:
             pass
     _persisted = False
+    _gen_owner = {}
     try:
         mode, reused = _gen_acquire_or_wait(
             logical_identity={
                 'user_message_id': _turn_data.get('user_message_id'),
                 'turn_key': _turn_data.get('turn_key'),
             },
+            owner_token_out=_gen_owner,
         )
         if mode == 'reused':
             text, thinking_text = reused
@@ -6398,7 +6400,10 @@ def chat():
             except Exception:
                 pass
         finally:
-            _gen_release((text, thinking_text) if text else None)
+            _gen_release(
+                (text, thinking_text) if text else None,
+                expected_owner_token=_gen_owner.get('token'),
+            )
 
         return jsonify({'ok': True, 'content': text, 'thinking': thinking_text})
 
