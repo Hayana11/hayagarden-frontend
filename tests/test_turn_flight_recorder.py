@@ -284,7 +284,13 @@ class TurnFlightRecorderTests(unittest.TestCase):
 
 
 class SameTurnReconnectRouteTests(unittest.TestCase):
-    def _run_reconnect(self, *, active_turn, persisted_assistant=None):
+    def _run_reconnect(
+        self,
+        *,
+        active_turn,
+        persisted_assistant=None,
+        active_recorder=None,
+    ):
         import moments_turn
 
         prepared = {
@@ -299,6 +305,17 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(
                 gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_gen_active_recorder', new=active_recorder,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway,
+                '_gen_active_identity',
+                new=(
+                    gateway._gen_recorder_identity(active_recorder)
+                    if active_recorder is not None else None
+                ),
             ))
             stack.enter_context(mock.patch.object(
                 moments_turn, 'prepare_turn', return_value=dict(prepared),
@@ -361,42 +378,197 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             persisted_assistant=13168,
         )
 
-    def test_persisted_reconnect_requires_same_daily_context_mapping(self):
-        conn = sqlite3.connect(':memory:')
-        conn.row_factory = sqlite3.Row
-        conn.executescript(
-            """
-            CREATE TABLE chat_messages (
-                id INTEGER PRIMARY KEY,
-                author TEXT NOT NULL
-            );
-            CREATE TABLE daily_message_contexts (
-                message_id INTEGER PRIMARY KEY,
-                context_id INTEGER NOT NULL,
-                context_epoch INTEGER NOT NULL,
-                role TEXT NOT NULL
-            );
-            INSERT INTO chat_messages(id, author) VALUES
-                (13166, 'hayana'),
-                (13167, 'fyodor'),
-                (13168, 'fyodor'),
-                (13169, 'fyodor');
-            INSERT INTO daily_message_contexts
-                (message_id, context_id, context_epoch, role)
-            VALUES
-                (13166, 32, 30, 'user'),
-                (13168, 32, 30, 'assistant'),
-                (13169, 33, 31, 'assistant');
-            """
-        )
-        try:
-            with mock.patch.object(gateway, 'get_db', return_value=conn):
-                self.assertEqual(
-                    13168,
-                    gateway._find_persisted_assistant_after(13166),
+    def test_persisted_reconnect_is_bounded_by_next_user_turn(self):
+        def lookup(rows):
+            conn = sqlite3.connect(':memory:')
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """
+                CREATE TABLE daily_message_contexts (
+                    message_id INTEGER PRIMARY KEY,
+                    context_id INTEGER NOT NULL,
+                    context_epoch INTEGER NOT NULL,
+                    role TEXT NOT NULL
                 )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO daily_message_contexts
+                    (message_id, context_id, context_epoch, role)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+            try:
+                with mock.patch.object(gateway, 'get_db', return_value=conn):
+                    return (
+                        gateway._find_persisted_assistant_after(13166),
+                        gateway._find_persisted_assistant_after(13168),
+                    )
+            finally:
+                conn.close()
+
+        self.assertEqual(
+            (13167, 13169),
+            lookup([
+                (13166, 32, 30, 'user'),
+                (13167, 32, 30, 'assistant'),
+                (13168, 32, 30, 'user'),
+                (13169, 32, 30, 'assistant'),
+            ]),
+        )
+        self.assertEqual(
+            (None, 13168),
+            lookup([
+                (13166, 32, 30, 'user'),
+                (13168, 32, 30, 'user'),
+                (13169, 32, 30, 'assistant'),
+            ]),
+        )
+        self.assertEqual(
+            (None, 13169),
+            lookup([
+                (13166, 32, 30, 'user'),
+                (13168, 32, 30, 'user'),
+                (13169, 32, 30, 'assistant'),
+            ]),
+        )
+
+
+    def test_reconnect_wait_stops_when_active_turn_changes(self):
+        import moments_turn
+
+        recorder = TurnFlightRecorder(
+            user_message_id=13166,
+            turn_key='turn-13166',
+            stream_instance_id='reconnect-active-change',
+        )
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                gateway, '_find_persisted_assistant_after', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn,
+                'get_active_turn',
+                side_effect=[
+                    {
+                        'user_message_id': 13166,
+                        'turn_key': 'turn-13166',
+                    },
+                    {
+                        'user_message_id': 13167,
+                        'turn_key': 'turn-13167',
+                    },
+                ],
+            ))
+            sleep = stack.enter_context(mock.patch.object(gateway.time, 'sleep'))
+            chunks = list(gateway._stream_same_turn_reconnect_wait(
+                user_message_id=13166,
+                recorder=recorder,
+                stream_instance_id='reconnect-active-change',
+                timeout_sec=30,
+            ))
+        self.assertTrue(chunks)
+        self.assertIn('same_turn_reconnect', ''.join(chunks))
+        sleep.assert_not_called()
+        self.assertNotIn('13167', ''.join(chunks))
+
+
+    def test_persisted_reconnect_does_not_adopt_newer_active_recorder(self):
+        newer = TurnFlightRecorder(
+            user_message_id=13167,
+            turn_key='turn-13167',
+            stream_instance_id='newer-active',
+        )
+        before = newer.events()
+        self._run_reconnect(
+            active_turn=None,
+            persisted_assistant=13168,
+            active_recorder=newer,
+        )
+        self.assertEqual(before, newer.events())
+
+
+    def test_different_turn_waiter_never_reuses_previous_turn_result(self):
+        owner = TurnFlightRecorder(
+            user_message_id=13166,
+            turn_key='turn-13166',
+            stream_instance_id='owner',
+        )
+        waiter = TurnFlightRecorder(
+            user_message_id=13167,
+            turn_key='turn-13167',
+            stream_instance_id='waiter',
+        )
+        identity_owner = {
+            'user_message_id': 13166,
+            'turn_key': 'turn-13166',
+        }
+        identity_waiter = {
+            'user_message_id': 13167,
+            'turn_key': 'turn-13167',
+        }
+        with gateway._gen_cond:
+            old_state = (
+                gateway._gen_busy,
+                gateway._gen_busy_since,
+                gateway._gen_last_result,
+                gateway._gen_last_result_identity,
+                gateway._gen_pending_delivery,
+                gateway._gen_active_recorder,
+                gateway._gen_active_identity,
+            )
+            gateway._gen_busy = True
+            gateway._gen_busy_since = time.time()
+            gateway._gen_last_result = None
+            gateway._gen_last_result_identity = None
+            gateway._gen_pending_delivery = None
+            gateway._gen_active_recorder = owner
+            gateway._gen_active_identity = gateway._gen_logical_identity(identity_owner)
+        result = {}
+
+        def wait_for_turn():
+            result['value'] = gateway._gen_acquire_or_wait(
+                wait_timeout=2,
+                flight_recorder=waiter,
+                logical_identity=identity_waiter,
+            )
+
+        thread = threading.Thread(target=wait_for_turn)
+        thread.start()
+        deadline = time.time() + 1
+        while time.time() < deadline and not waiter.events():
+            time.sleep(0.001)
+        self.assertTrue(waiter.events())
+        gateway._gen_release(
+            ('owner text', 'owner thinking'),
+            flight_recorder=owner,
+        )
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        try:
+            self.assertEqual(('own', None), result['value'])
+            self.assertTrue(any(
+                event['event'] == 'generation_lock_acquired'
+                for event in waiter.events()
+            ))
+            self.assertFalse(any(
+                event['event'] == 'generation_lock_reused'
+                for event in waiter.events()
+            ))
         finally:
-            conn.close()
+            with gateway._gen_cond:
+                (
+                    gateway._gen_busy,
+                    gateway._gen_busy_since,
+                    gateway._gen_last_result,
+                    gateway._gen_last_result_identity,
+                    gateway._gen_pending_delivery,
+                    gateway._gen_active_recorder,
+                    gateway._gen_active_identity,
+                ) = old_state
+
 
     def test_different_turn_collision_keeps_lock_path_distinct(self):
         recorder = TurnFlightRecorder(
@@ -413,23 +585,36 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             old_busy = gateway._gen_busy
             old_since = gateway._gen_busy_since
             old_result = gateway._gen_last_result
+            old_result_identity = gateway._gen_last_result_identity
             old_recorder = gateway._gen_active_recorder
+            old_identity = gateway._gen_active_identity
             gateway._gen_busy = True
             gateway._gen_busy_since = time.time()
             gateway._gen_last_result = None
+            gateway._gen_last_result_identity = None
             gateway._gen_active_recorder = original
+            gateway._gen_active_identity = gateway._gen_logical_identity({
+                'user_message_id': 13166,
+                'turn_key': 'turn-13166',
+            })
         try:
             with self.assertRaises(RuntimeError):
                 gateway._gen_acquire_or_wait(
                     wait_timeout=0,
                     flight_recorder=recorder,
+                    logical_identity={
+                        'user_message_id': 13167,
+                        'turn_key': 'turn-13167',
+                    },
                 )
         finally:
             with gateway._gen_cond:
                 gateway._gen_busy = old_busy
                 gateway._gen_busy_since = old_since
                 gateway._gen_last_result = old_result
+                gateway._gen_last_result_identity = old_result_identity
                 gateway._gen_active_recorder = old_recorder
+                gateway._gen_active_identity = old_identity
         events = recorder.events()
         self.assertEqual('generation_lock_wait_begin', events[0]['event'])
         self.assertFalse(any(
@@ -450,13 +635,17 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             gateway._gen_busy,
             gateway._gen_busy_since,
             gateway._gen_last_result,
+            gateway._gen_last_result_identity,
             gateway._gen_active_recorder,
+            gateway._gen_active_identity,
         )
         with gateway._gen_cond:
             gateway._gen_busy = True
             gateway._gen_busy_since = time.time() - 999
             gateway._gen_last_result = None
+            gateway._gen_last_result_identity = None
             gateway._gen_active_recorder = recorder
+            gateway._gen_active_identity = gateway._gen_recorder_identity(recorder)
         try:
             with mock.patch.object(
                 gateway, '_gen_release',
@@ -470,13 +659,21 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                     payload = response.get_json()
             self.assertTrue(payload['skipped'])
             self.assertEqual('age_is_observation_only', payload['reason'])
+            self.assertTrue(all(
+                field not in event
+                for event in recorder.events()
+                if event['event'] == 'force_unlock_requested'
+                for field in ('owner_alive', 'resident_active', 'turn_terminal')
+            ))
         finally:
             with gateway._gen_cond:
                 (
                     gateway._gen_busy,
                     gateway._gen_busy_since,
                     gateway._gen_last_result,
+                    gateway._gen_last_result_identity,
                     gateway._gen_active_recorder,
+                    gateway._gen_active_identity,
                 ) = old_state
 
     def test_explicit_force_unlock_is_recorded_and_allowed(self):
