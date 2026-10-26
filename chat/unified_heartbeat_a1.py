@@ -317,6 +317,7 @@ def commit_shared_transcript_watermark(
         raise RuntimeError('uh_a1_watermark_commit_mismatch')
     return {
         'context_id': int(watermark.context_id),
+        'context_epoch': int(watermark.context_epoch),
         'resident_generation': int(watermark.resident_generation),
         'start_offset': int(watermark.expected_offset),
         'end_offset': end_offset,

@@ -5343,8 +5343,8 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 self.assertEqual(member.source_revision, 'anchor-revision')
                 self.assertEqual(member.content_hash, 'anchor-hash')
 
-    def _fake_hot_context_plan(self):
-        context_plan = self._fake_context_plan()
+    def _fake_hot_context_plan(self, member=None):
+        context_plan = self._fake_context_plan(member=member)
         context_plan.ordered_sections = (
             types.SimpleNamespace(
                 kind='invariant_system',
@@ -7139,6 +7139,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         duplicate_user=False,
         registry_offset=None,
         wake_skips=(),
+        wake_rows=(),
     ):
         from continuity.sources import evidence_ref
 
@@ -7224,7 +7225,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         conn.execute(
             'CREATE TABLE IF NOT EXISTS wake_log ('
-            'id INTEGER PRIMARY KEY AUTOINCREMENT, cache_info TEXT, '
+            'id INTEGER PRIMARY KEY AUTOINCREMENT, thoughts TEXT, action TEXT, '
+            'content TEXT, consumed INTEGER DEFAULT 0, woke_at TEXT, '
+            'cache_info TEXT, wake_run_id TEXT, chat_id TEXT, '
             'context_id INTEGER, context_epoch INTEGER, resident_generation INTEGER)'
         )
         for skip in wake_skips:
@@ -7237,6 +7240,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 (
                     json.dumps({'transcript_skip': {
                         'context_id': 7,
+                        'context_epoch': 3,
                         'resident_generation': generation,
                         'start_offset': start,
                         'end_offset': end,
@@ -7244,6 +7248,32 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     }}),
                     7, 3, generation,
                 ),
+            )
+        for row in wake_rows:
+            payload = {}
+            row_generation = int(row.get('row_generation', 1))
+            for field in ('observation', 'main'):
+                pair = row.get(field)
+                if pair is None:
+                    continue
+                start, end = pair[:2]
+                generation = pair[2] if len(pair) > 2 else row_generation
+                payload[
+                    'observation_transcript_skip'
+                    if field == 'observation' else 'transcript_skip'
+                ] = {
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': generation,
+                    'start_offset': start,
+                    'end_offset': end,
+                    'skipped_provider_round': True,
+                }
+            conn.execute(
+                'INSERT INTO wake_log '
+                '(cache_info, context_id, context_epoch, resident_generation) '
+                'VALUES (?,?,?,?)',
+                (json.dumps(payload), 7, 3, row_generation),
             )
         conn.commit()
         row = conn.execute(
@@ -7354,6 +7384,754 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         self.assertEqual(result['status'], 'pass')
         self.assertEqual(result['wake_skip_count'], 2)
+
+    def test_native_tail_passes_across_observation_and_wake_skip(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_rows=(
+                {'observation': (400, 520), 'main': (520, 650)},
+            ),
+        )
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['wake_skip_count'], 2)
+
+    def test_gateway_unified_wake_preserves_observation_skip_for_real_hot_noop(self):
+        import gateway
+        from chat import behavior_authority_b3 as b3
+        from chat import cc_history_rewrite, daily_runtime as dr
+        from chat import display_thinking, interaction_state
+        from chat import unified_heartbeat_a1 as uh
+        from chat import window_identity
+        from chat.context_receipt import ContextReceipt, ContextReceiptMember
+        from chat.wake_read_observation import collect_wake_read_observation
+        from tools import lease_signer
+        from wake import unified_modes
+
+        db, plan, installed_frozen, registry = self._native_tail_fixture(
+            registry_offset=650,
+        )
+
+        class Resident:
+            session_id = 'session-1'
+            generation = 1
+            process_generation = 1
+            _model_identity = 'model:test'
+
+            def __init__(self):
+                self.observation_turns = 0
+                self.main_turns = 0
+                self.ensure_calls = 0
+                self.respawn_calls = 0
+
+            def _alive(self):
+                return True
+
+            def ensure_alive(self, *args, **kwargs):
+                self.ensure_calls += 1
+                raise AssertionError('gateway hot Wake must not respawn')
+
+            def respawn(self, *args, **kwargs):
+                self.respawn_calls += 1
+                raise AssertionError('gateway hot Wake must not respawn')
+
+            def send_turn(self, content, **kwargs):
+                self.observation_turns += 1
+                yield (
+                    'done',
+                    (
+                        '{"observations":[]}',
+                        '',
+                        {'jsonl_usage': {'stream_totals_match': True}},
+                        {},
+                    ),
+                )
+
+        class Fence:
+            def __init__(self):
+                self.finished = []
+                self.released = 0
+
+            def release(self):
+                self.released += 1
+
+            def finish(self, delivered, **kwargs):
+                self.finished.append(bool(delivered))
+                self.release()
+
+        class WakeRunners:
+            def select_wake_provider(self, mode):
+                self.assert_mode = mode
+                return 'claude_code'
+
+        resident = Resident()
+        observation_fence = Fence()
+        main_fence = Fence()
+        observation_watermark = uh.SharedTranscriptWatermark(
+            context_id=7, context_epoch=3, resident_generation=1,
+            resident_key='chat:7:3:1', claude_session_id='session-1',
+            transcript_path='/tmp/session-1.jsonl', expected_offset=400,
+            process_generation=1,
+        )
+        main_watermark = uh.SharedTranscriptWatermark(
+            context_id=7, context_epoch=3, resident_generation=1,
+            resident_key='chat:7:3:1', claude_session_id='session-1',
+            transcript_path='/tmp/session-1.jsonl', expected_offset=520,
+            process_generation=1,
+        )
+        observation_skip = {
+            'context_id': 7, 'context_epoch': 3,
+            'resident_generation': 1, 'start_offset': 400,
+            'end_offset': 520, 'skipped_provider_round': True,
+        }
+        main_skip = {
+            'context_id': 7, 'context_epoch': 3,
+            'resident_generation': 1, 'start_offset': 520,
+            'end_offset': 650, 'skipped_provider_round': True,
+        }
+        identity = {
+            'chat_id': 'default',
+            'context_id': 7,
+            'context_epoch': 3,
+            'resident_generation': 1,
+        }
+        clock = types.SimpleNamespace(
+            reliable=True,
+            user_idle_hours=1.0,
+            effective_idle_hours=1.0,
+            last_user_at=None,
+        )
+
+        def main_stream(messages, **kwargs):
+            resident.main_turns += 1
+            yield (
+                'done',
+                (
+                    '[[SILENT]]',
+                    '',
+                    {'jsonl_usage': {'stream_totals_match': True}},
+                    {},
+                ),
+            )
+
+        main_exceptions = []
+        real_main_turn = gateway._run_unified_normal_main_chat_turn
+
+        def run_main_with_capture(**kwargs):
+            try:
+                return real_main_turn(**kwargs)
+            except Exception as exc:
+                main_exceptions.append((
+                    type(exc).__name__,
+                    str(exc),
+                    type(exc.__cause__).__name__ if exc.__cause__ else None,
+                    str(exc.__cause__) if exc.__cause__ else None,
+                ))
+                raise
+
+        def db_conn():
+            return sqlite3.connect(db)
+
+        runners = WakeRunners()
+        trace_events = []
+
+        def trace_event(_wake_run_id, stage, **fields):
+            trace_events.append((stage, dict(fields)))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
+            stack.enter_context(mock.patch.object(gateway, 'DB_PATH', db))
+            stack.enter_context(mock.patch.object(gateway, 'get_db', side_effect=db_conn))
+            stack.enter_context(mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ))
+            stack.enter_context(mock.patch.object(gateway, '_gen_release'))
+            stack.enter_context(mock.patch.object(
+                gateway, '_cc_resident_stream_gen',
+                side_effect=main_stream,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_wake_run_id_seen', return_value=False,
+            ))
+            stack.enter_context(mock.patch.object(gateway, '_wake_run_id_mark'))
+            stack.enter_context(mock.patch.object(
+                gateway, '_wake_live_trace',
+                side_effect=trace_event,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_chat_is_generating', return_value=False,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_ensure_wake_runners', return_value=runners,
+            ))
+            stack.enter_context(mock.patch.object(
+                config_store, 'get_float', return_value=30.0,
+            ))
+            stack.enter_context(mock.patch.object(
+                interaction_state, 'read_interaction_clock',
+                return_value=clock,
+            ))
+            stack.enter_context(mock.patch.object(
+                interaction_state, 'wake_guard_reason', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                b3, 'unified_normal_wake_enabled', return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                unified_modes, 'is_unified_main_chat_wake_mode',
+                return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+            ))
+            stack.enter_context(mock.patch.object(
+                window_identity, 'soft_window_enabled', return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                window_identity, 'capture_current_window_identity',
+                return_value=identity,
+            ))
+            stack.enter_context(mock.patch.object(
+                window_identity, 'read_current_window_identity_conn',
+                return_value=identity,
+            ))
+            stack.enter_context(mock.patch.object(
+                uh, 'prepare_shared_transcript_watermark',
+                side_effect=[
+                    (observation_watermark, 'ok'),
+                    (main_watermark, 'ok'),
+                ],
+            ))
+            stack.enter_context(mock.patch.object(
+                uh, 'begin_shared_wake_delivery_fence',
+                side_effect=[observation_fence, main_fence],
+            ))
+            stack.enter_context(mock.patch.object(
+                uh, 'commit_shared_transcript_watermark',
+                side_effect=[observation_skip, main_skip],
+            ))
+            stack.enter_context(mock.patch.object(
+                cc_history_rewrite, 'guard_cc_generation',
+                side_effect=lambda events: events,
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ))
+            stack.enter_context(mock.patch.object(
+                lease_signer, 'issue_turn_lease',
+                return_value={'turn_id': 'gateway-wake'},
+            ))
+            observation_spy = stack.enter_context(mock.patch(
+                'chat.wake_read_observation.collect_wake_read_observation',
+                wraps=collect_wake_read_observation,
+            ))
+            run_spy = stack.enter_context(mock.patch.object(
+                gateway,
+                '_run_unified_normal_main_chat_turn',
+                side_effect=run_main_with_capture,
+            ))
+
+            with gateway.app.app_context():
+                response = gateway._wake_decide_locked(
+                    {'mode': 'normal', 'wake_run_id': 'gateway-wake'},
+                    'normal',
+                    '',
+                    '',
+                )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body.get('ok'), body)
+        observation_spy.assert_called_once()
+        run_spy.assert_called_once()
+        self.assertEqual(
+            run_spy.call_args.kwargs['observation_transcript_skip'],
+            observation_skip,
+            'gateway must carry Observation watermark skip into main turn',
+        )
+        self.assertEqual(resident.observation_turns, 1)
+        self.assertEqual(resident.main_turns, 1, (trace_events, main_exceptions))
+        self.assertEqual(resident.ensure_calls, 0)
+        self.assertEqual(resident.respawn_calls, 0)
+        self.assertEqual(resident.session_id, 'session-1')
+        self.assertEqual(resident.generation, 1)
+        self.assertEqual(resident.process_generation, 1)
+        self.assertEqual(main_fence.finished, [True])
+
+        conn = sqlite3.connect(db)
+        persisted_row = conn.execute(
+            'SELECT cache_info FROM wake_log WHERE wake_run_id=?',
+            ('gateway-wake',),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(persisted_row)
+        persisted_cache = json.loads(persisted_row[0])
+        self.assertEqual(
+            persisted_cache['observation_transcript_skip'],
+            observation_skip,
+        )
+        self.assertEqual(persisted_cache['transcript_skip'], main_skip)
+
+        from chat.context_receipt import ContextReceipt
+
+        with mock.patch.object(
+            dr,
+            'get_same_context_last_good',
+            return_value={
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 1,
+                'claude_session_id': 'session-1',
+                'transcript_end_offset': 400,
+            },
+        ):
+            tail_probe = dr._hot_native_tail_proof(
+                plan,
+                frozen=installed_frozen,
+                registry=registry,
+            )
+        self.assertEqual(tail_probe['status'], 'pass', tail_probe)
+        context_plan = self._fake_hot_context_plan(
+            member=tail_probe['source_member'],
+        )
+        plan.chat_id = 'default'
+        plan.resident_key = 'default:e3:g1'
+        plan.worker_id = dr.WORKER_ID
+        plan.manifest = {'provider': 'claude_code', 'model': 'model-1'}
+        plan.transcript_model_identity = 'model-1'
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.hot_desired_plan = context_plan
+        desired_members = tuple(dr._context_receipt_members(plan))
+        installed_request = installed_frozen['members'][0]
+        installed_members = tuple(
+            ContextReceiptMember(
+                installed_order=member.installed_order,
+                representation_id=(
+                    'current_request'
+                    if member.source_kind == 'current_request'
+                    else member.representation_id
+                ),
+                representation_kind=(
+                    'fixed'
+                    if member.source_kind == 'current_request'
+                    else member.representation_kind
+                ),
+                source_ref=(
+                    installed_request.source_ref
+                    if member.source_kind == 'current_request'
+                    else member.source_ref
+                ),
+                source_revision=(
+                    installed_request.source_revision
+                    if member.source_kind == 'current_request'
+                    else member.source_revision
+                ),
+                source_kind=member.source_kind,
+                content_hash=(
+                    installed_request.content_hash
+                    if member.source_kind == 'current_request'
+                    else member.content_hash
+                ),
+                span_start=(
+                    getattr(installed_request, 'span_start', None)
+                    if member.source_kind == 'current_request'
+                    else member.span_start
+                ),
+                span_end=(
+                    getattr(installed_request, 'span_end', None)
+                    if member.source_kind == 'current_request'
+                    else member.span_end
+                ),
+                branch_id=(
+                    getattr(installed_request, 'branch_id', '')
+                    if member.source_kind == 'current_request'
+                    else member.branch_id
+                ),
+            )
+            for member in desired_members
+        )
+        plan.hot_receipt_frozen = {
+            'receipt': ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key=plan.resident_key,
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='session-1',
+                process_generation=1,
+                plan_id='plan:previous',
+                plan_hash='previous-plan-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=installed_members,
+            ),
+            'members': installed_members,
+            'receipt_missing': False,
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'expected_receipt_revision': 0,
+            'provider': 'claude_code',
+            'model_identity': 'model-1',
+            'session_id': 'session-1',
+            'process_generation': 1,
+            'receipt_read_error': None,
+        }
+        identity_registry = {
+            'context_id': 7,
+            'context_epoch': 3,
+            'resident_generation': 1,
+            'chat_id': 'default',
+            'claude_session_id': 'session-1',
+            'process_generation': 1,
+            'scan_status': 'READY',
+            'last_mapped_message_id': registry['last_mapped_message_id'],
+            'scan_offset': 650,
+        }
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', identity_registry),
+        ), mock.patch.object(
+            dr,
+            'get_same_context_last_good',
+            return_value={
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 1,
+                'claude_session_id': 'session-1',
+                'transcript_end_offset': 400,
+            },
+        ):
+            hot_decision = dr._reconcile_hot_context_plan(
+                plan,
+                resident=resident,
+            )
+        self.assertEqual(hot_decision, 'NO_OP')
+        self.assertEqual(plan.hot_decision, 'NO_OP')
+        self.assertEqual(plan.hot_decision_reason, '')
+        self.assertEqual(resident.generation, 1)
+        self.assertEqual(resident.process_generation, 1)
+        self.assertEqual(resident.session_id, 'session-1')
+        self.assertEqual(resident.ensure_calls, 0)
+        self.assertEqual(resident.respawn_calls, 0)
+
+    def test_unified_wake_observation_executor_persists_complete_tail(self):
+        import gateway
+        from chat import behavior_authority_b3 as b3
+        from chat import cc_history_rewrite, display_thinking
+        from chat import unified_heartbeat_a1 as uh
+        from chat.wake_read_observation import collect_wake_read_observation
+        from tools import lease_signer
+        from wake.executor import execute
+
+        db, plan, frozen, registry = self._native_tail_fixture(
+            registry_offset=650,
+        )
+
+        class Resident:
+            session_id = 'sid-1'
+            generation = 1
+            _model_identity = 'model:test'
+
+            def __init__(self):
+                self.observation_turns = 0
+                self.main_turns = 0
+                self.ensure_calls = 0
+
+            def _alive(self):
+                return True
+
+            def ensure_alive(self, *args, **kwargs):
+                self.ensure_calls += 1
+                raise AssertionError('hot Wake test must not respawn')
+
+            def send_turn(self, content, **kwargs):
+                self.observation_turns += 1
+                yield (
+                    'done',
+                    (
+                        '{"observations":[]}',
+                        '',
+                        {'jsonl_usage': {'stream_totals_match': True}},
+                        {},
+                    ),
+                )
+
+        class Fence:
+            def __init__(self):
+                self.token = object()
+                self.finished = []
+                self.released = 0
+
+            def release(self):
+                self.released += 1
+
+            def finish(self, delivered, **kwargs):
+                self.finished.append(bool(delivered))
+                self.release()
+
+        resident = Resident()
+        observation_fence = Fence()
+        main_fence = Fence()
+        observation_watermark = uh.SharedTranscriptWatermark(
+            context_id=7, context_epoch=3, resident_generation=1,
+            resident_key='chat:7:3:1', claude_session_id='sid-1',
+            transcript_path='/tmp/sid-1.jsonl', expected_offset=400,
+            process_generation=1,
+        )
+        main_watermark = uh.SharedTranscriptWatermark(
+            context_id=7, context_epoch=3, resident_generation=1,
+            resident_key='chat:7:3:1', claude_session_id='sid-1',
+            transcript_path='/tmp/sid-1.jsonl', expected_offset=520,
+            process_generation=1,
+        )
+        observation_skip = {
+            'context_id': 7, 'context_epoch': 3,
+            'resident_generation': 1, 'start_offset': 400,
+            'end_offset': 520, 'skipped_provider_round': True,
+        }
+        main_skip = {
+            'context_id': 7, 'context_epoch': 3,
+            'resident_generation': 1, 'start_offset': 520,
+            'end_offset': 650, 'skipped_provider_round': True,
+        }
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            DB_PATH=db,
+            _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
+            _gen_release=lambda *args, **kwargs: None,
+            _wake_live_trace=lambda *args, **kwargs: None,
+        )
+        with mock.patch.object(
+            b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+        ), mock.patch.object(
+            uh, 'prepare_shared_transcript_watermark',
+            return_value=(observation_watermark, 'ok'),
+        ), mock.patch.object(
+            uh, 'begin_shared_wake_delivery_fence',
+            return_value=observation_fence,
+        ), mock.patch.object(
+            uh, 'commit_shared_transcript_watermark',
+            return_value=observation_skip,
+        ), mock.patch.object(
+            cc_history_rewrite, 'guard_cc_generation',
+            side_effect=lambda events: events,
+        ):
+            observation = collect_wake_read_observation(
+                wake_run_id='integration-wake',
+                resident=resident,
+                db_path=db,
+                gateway_module=fake_gateway,
+            )
+        self.assertEqual(observation['status'], 'ok')
+        self.assertTrue(observation['started'])
+        self.assertEqual(observation['watermark_skip'], observation_skip)
+        self.assertEqual(observation_fence.released, 1)
+
+        def main_stream(messages, **kwargs):
+            resident.main_turns += 1
+            yield (
+                'done',
+                (
+                    '[[SILENT]]',
+                    '',
+                    {'jsonl_usage': {'stream_totals_match': True}},
+                    {},
+                ),
+            )
+
+        main_patches = [
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch.object(gateway, 'DB_PATH', db),
+            mock.patch.object(
+                gateway, '_gen_acquire_or_wait',
+                return_value=('own', None),
+            ),
+            mock.patch.object(gateway, '_gen_release'),
+            mock.patch.object(
+                gateway, '_cc_resident_stream_gen',
+                side_effect=main_stream,
+            ),
+            mock.patch.object(gateway, '_wake_live_trace'),
+            mock.patch.object(
+                b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'prepare_shared_transcript_watermark',
+                return_value=(main_watermark, 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'begin_shared_wake_delivery_fence',
+                return_value=main_fence,
+            ),
+            mock.patch.object(
+                uh, 'commit_shared_transcript_watermark',
+                return_value=main_skip,
+            ),
+            mock.patch.object(
+                cc_history_rewrite, 'guard_cc_generation',
+                side_effect=lambda events: events,
+            ),
+            mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ),
+            mock.patch.object(
+                lease_signer, 'issue_turn_lease',
+                return_value={'turn_id': 'integration-wake'},
+            ),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in main_patches:
+                stack.enter_context(patch)
+            main_turn = gateway._run_unified_normal_main_chat_turn(
+                wake_run_id='integration-wake',
+                now=datetime.datetime(2026, 10, 26, 12, 0),
+                t2_hours=1.0,
+                t_hours=1.0,
+                observation_transcript_skip=observation['watermark_skip'],
+            )
+        self.assertEqual(
+            main_turn['cache_info']['observation_transcript_skip'],
+            observation_skip,
+        )
+        self.assertEqual(main_turn['cache_info']['transcript_skip'], main_skip)
+
+        identity = {
+            'chat_id': 'default',
+            'context_id': 7,
+            'context_epoch': 3,
+            'resident_generation': 1,
+        }
+        executor_result = execute(
+            'none', '', '', 'normal',
+            get_db_fn=lambda: sqlite3.connect(db),
+            cache_info=main_turn['cache_info'],
+            wake_run_id='integration-wake',
+            window_identity=identity,
+            settlement_required=False,
+        )
+        main_fence.finish(
+            executor_result['delivered'],
+            cache_info=main_turn['cache_info'],
+            window_identity=identity,
+        )
+        self.assertTrue(executor_result['delivered'])
+        conn = sqlite3.connect(db)
+        persisted = conn.execute(
+            'SELECT cache_info FROM wake_log WHERE wake_run_id=?',
+            ('integration-wake',),
+        ).fetchone()
+        conn.close()
+        persisted_cache = json.loads(persisted[0])
+        self.assertEqual(
+            persisted_cache['observation_transcript_skip'],
+            observation_skip,
+        )
+        self.assertEqual(resident.observation_turns, 1)
+        self.assertEqual(resident.main_turns, 1)
+        self.assertEqual(resident.ensure_calls, 0)
+        self.assertEqual(resident.generation, 1)
+
+        with mock.patch.object(
+            dr,
+            'get_same_context_last_good',
+            return_value={
+                'context_id': 7, 'context_epoch': 3,
+                'resident_generation': 1,
+                'claude_session_id': 'session-1',
+                'transcript_end_offset': 400,
+            },
+        ):
+            proof = dr._hot_native_tail_proof(
+                plan,
+                frozen=frozen,
+                registry=registry,
+            )
+        self.assertEqual(proof['status'], 'pass')
+        self.assertEqual(proof['wake_skip_count'], 2)
+
+    def test_observation_success_without_wake_delivery_retires_resident(self):
+        import gateway
+        observation = {
+            'status': 'ok',
+            'started': True,
+            'watermark_skip': {
+                'context_id': 7, 'context_epoch': 3,
+                'resident_generation': 1, 'start_offset': 400,
+                'end_offset': 520, 'skipped_provider_round': True,
+            },
+        }
+        with mock.patch(
+            'chat.unified_heartbeat_a1.retire_shared_resident_after_failed_internal_turn',
+            return_value=True,
+        ) as retire:
+            result = gateway._retire_shared_resident_after_observation_failure(
+                observation=observation,
+                window_identity={
+                    'chat_id': 'default',
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                },
+                reason='normal_wake_pre_model_failed',
+            )
+        self.assertTrue(result)
+        retire.assert_called_once()
+
+    def test_native_tail_fails_when_observation_skip_is_not_durable(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_skips=((520, 650),),
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
+
+    def test_native_tail_observation_and_main_must_be_contiguous(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_rows=(
+                {'observation': (400, 510), 'main': (520, 650)},
+            ),
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
+
+    def test_native_tail_partial_observation_chain_fails_closed(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_rows=(
+                {'observation': (400, 520), 'main': (520, 640)},
+            ),
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
+
+    def test_native_tail_wrong_generation_observation_fails_closed(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_rows=(
+                {'observation': (400, 520, 2), 'main': (520, 650)},
+            ),
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_offset_mismatch')
+
+    def test_native_tail_passes_without_observation_when_main_covers_gap(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            registry_offset=650,
+            wake_skips=((400, 650),),
+        )
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['wake_skip_count'], 1)
 
     def test_native_tail_offset_gap_without_wake_skip_fails_closed(self):
         result = self._native_tail_result(
