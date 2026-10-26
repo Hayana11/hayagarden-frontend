@@ -349,7 +349,7 @@ def _dayblock_auxiliary_members(
         turn_by_message[int(assistant_row["id"])] = (visible_ref, True)
 
     attachments: list[dict[str, Any]] = []
-    attachment_members: list[Any] = []
+    attachment_rows: list[dict[str, Any]] = []
     for row in rows:
         mid = int(row.get("id") or 0)
         parent_ref, has_text = turn_by_message.get(mid, (f"row:{mid}", False))
@@ -392,21 +392,41 @@ def _dayblock_auxiliary_members(
                     if extracted is not None else None,
                 "extracted_text": extracted,
             }
-            revision = hashlib.sha256(json.dumps({
-                "parent_row_revision": row_revision(row),
-                "attachment": {k: v for k, v in descriptor.items() if k != "extracted_text"},
-            }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-            descriptor["source_revision"] = revision
             attachments.append(descriptor)
-            attachment_members.append(SourceMember(
-                seq=0, source_kind="attachment_span", source_ref=ref,
-                source_revision=revision, role="attachment", content_hash=revision,
-                logical_size=_token_estimate(json.dumps(
-                    {k: v for k, v in descriptor.items() if k != "extracted_text"},
-                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-                )),
-                created_at=str(row.get("created_at") or ""), branch_id="active-transcript",
-            ))
+            attachment_rows.append(row)
+
+    # An image re-sent with byte-identical content later the same day, where
+    # the later copy has visible reply evidence, satisfies the earlier one.
+    # Membership is unchanged; only the earlier critical flag is lifted.
+    for descriptor in attachments:
+        if not (descriptor["critical_unavailable"] and descriptor["type"] == "image"
+                and descriptor["file_sha256"]):
+            continue
+        for later in attachments:
+            if (later["type"] == "image" and later["file_sha256"] == descriptor["file_sha256"]
+                    and later["message_id"] > descriptor["message_id"]
+                    and later["text_context_available"] and not later["critical_unavailable"]
+                    and str(later["parent_source_ref"]).startswith(("turn:", DAYBLOCK_VISIBLE_TURN_PREFIX))):
+                descriptor["critical_unavailable"] = False
+                descriptor["evidence_satisfied_by"] = later["source_ref"]
+                break
+
+    attachment_members: list[Any] = []
+    for descriptor, row in zip(attachments, attachment_rows):
+        revision = hashlib.sha256(json.dumps({
+            "parent_row_revision": row_revision(row),
+            "attachment": {k: v for k, v in descriptor.items() if k != "extracted_text"},
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        descriptor["source_revision"] = revision
+        attachment_members.append(SourceMember(
+            seq=0, source_kind="attachment_span", source_ref=descriptor["source_ref"],
+            source_revision=revision, role="attachment", content_hash=revision,
+            logical_size=_token_estimate(json.dumps(
+                {k: v for k, v in descriptor.items() if k != "extracted_text"},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )),
+            created_at=str(row.get("created_at") or ""), branch_id="active-transcript",
+        ))
 
     from chat.daily_context import is_formal_chat_message
     unmatched = [
@@ -986,7 +1006,7 @@ CREATE TABLE IF NOT EXISTS dayblock_generation_receipts(
  input_token_estimate INTEGER NOT NULL, output_token_estimate INTEGER NOT NULL DEFAULT 0,
  actual_executor TEXT, usage_json TEXT NOT NULL DEFAULT '{}', summary_body TEXT, body_hash TEXT,
  status TEXT NOT NULL CHECK(status IN ('processing','ready','failed','stale')),
- error_code TEXT, created_at TEXT NOT NULL, finished_at TEXT,
+ error_code TEXT, error_detail TEXT, created_at TEXT NOT NULL, finished_at TEXT,
  FOREIGN KEY(generation_job_id) REFERENCES dayblock_shadow_jobs(job_id));
 CREATE TRIGGER IF NOT EXISTS dayblock_receipt_provenance_immutable
  BEFORE UPDATE OF generation_id,run_id,generation_job_id,candidate_id,source_day,source_hash,
@@ -1051,6 +1071,9 @@ def open_preview_store(path: str | Path = PREVIEW_DB) -> sqlite3.Connection:
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE dayblock_shadow_jobs ADD COLUMN {name} {definition}")
+    receipt_columns = {row[1] for row in conn.execute("PRAGMA table_info(dayblock_generation_receipts)")}
+    if "error_detail" not in receipt_columns:
+        conn.execute("ALTER TABLE dayblock_generation_receipts ADD COLUMN error_detail TEXT")
     conn.execute("DROP TRIGGER IF EXISTS dayblock_job_authority_immutable")
     conn.execute("""CREATE TRIGGER dayblock_job_authority_immutable
         BEFORE UPDATE OF candidate_id,snapshot_id,source_hash,source_revision,policy_version,

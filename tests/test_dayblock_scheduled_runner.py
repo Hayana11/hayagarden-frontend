@@ -306,5 +306,100 @@ class ScheduledDayBlockRunnerTests(unittest.TestCase):
         self.assertEqual(self.source_db.read_bytes(), before)
 
 
+    def test_cc_exit_failure_keeps_error_code_and_detail_and_replays_detail(self):
+        from chat.background_generation import BackgroundGenerationError
+
+        def exit_one(*_):
+            raise BackgroundGenerationError('cc_background_exit_1:REAL STDERR: auth expired')
+        result = self.run_once(generate=exit_one)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_code'], 'cc_background_exit_1')
+        self.assertIn('REAL STDERR', result['error_detail'])
+        receipt = self.receipt()[0]
+        self.assertEqual(receipt['error_code'], 'cc_background_exit_1')
+        self.assertIn('REAL STDERR', receipt['error_detail'])
+        self.assertEqual(json.loads(self.job_rows()[0]['blocking_reasons_json']), ['cc_background_exit_1'])
+        replay = self.run_once(generate=lambda *_: self.fail('failed job must not retry'))
+        self.assertEqual(replay['status'], 'failed')
+        self.assertTrue(replay['idempotent_replay'])
+        self.assertEqual(replay['error_code'], 'cc_background_exit_1')
+        self.assertEqual(replay['error_detail'], receipt['error_detail'])
+
+    def test_failure_persistence_error_reports_its_own_detail(self):
+        from chat.background_generation import BackgroundGenerationError
+
+        def exit_one(*_):
+            raise BackgroundGenerationError('cc_background_exit_1:REAL STDERR')
+        with patch.object(runner, '_finish', side_effect=RuntimeError('disk full')):
+            result = self.run_once(generate=exit_one)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_code'], 'preview_failure_persistence_error')
+        self.assertEqual(result['error_detail'], 'disk full')
+        self.assertNotIn('REAL STDERR', result['error_detail'])
+
+    def test_error_detail_is_bounded(self):
+        def noisy(*_):
+            raise RuntimeError('cc_background_exit_1:' + 'x' * 5000)
+        result = self.run_once(generate=noisy)
+        self.assertEqual(result['error_code'], 'cc_background_exit_1')
+        self.assertEqual(len(result['error_detail']), runner.ERROR_DETAIL_MAX_CHARS)
+        self.assertEqual(len(self.receipt()[0]['error_detail']), runner.ERROR_DETAIL_MAX_CHARS)
+
+    def test_new_and_replayed_plan_blocked_expose_reasons_at_top_level(self):
+        original = shadow.build_generation_input_plan
+        def incomplete(*args, **kwargs):
+            plan = original(*args, **kwargs)
+            plan['source_coverage'] = 0.5
+            plan['uncovered_source_count'] = 1
+            plan['blocking_reasons'] = ['dayblock_source_coverage_incomplete']
+            return plan
+        with patch.object(shadow, 'build_generation_input_plan', side_effect=incomplete):
+            result = self.run_once(generate=lambda *_: self.fail('blocked plan must not call'))
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIn('plan', result)
+        self.assertEqual(result['error_code'], result['blocking_reasons'][0])
+        self.assertIn('dayblock_source_coverage_incomplete', result['blocking_reasons'])
+        self.assertEqual(len(result['blocking_reasons']), len(set(result['blocking_reasons'])))
+        persisted = json.loads(self.job_rows()[0]['blocking_reasons_json'])
+        self.assertEqual(self.receipt(), [])
+
+        replay = self.run_once(generate=lambda *_: self.fail('blocked job must not call'))
+        self.assertEqual(replay['status'], 'blocked')
+        self.assertTrue(replay['idempotent_replay'])
+        self.assertEqual(replay['blocking_reasons'], list(dict.fromkeys(persisted)))
+        self.assertEqual(replay['error_code'], persisted[0])
+        self.assertEqual(self.receipt(), [])
+
+    def test_ready_output_and_exit_code_semantics_unchanged(self):
+        result = self.run_once()
+        self.assertEqual(result['status'], 'ready')
+        self.assertIsNone(result['error_code'])
+        self.assertNotIn('error_detail', result)
+        self.assertNotIn('blocking_reasons', result)
+        receipt = self.receipt()[0]
+        self.assertIsNone(receipt['error_code'])
+        self.assertIsNone(receipt['error_detail'])
+        for status, code in (('ready', 0), ('blocked', 0), ('processing', 0), ('stale', 0), ('failed', 1)):
+            with patch.object(runner, 'run_scheduled_dayblock', return_value={'status': status}), \
+                    patch('builtins.print'):
+                self.assertEqual(runner.main(), code)
+
+    def test_existing_receipt_table_gains_nullable_error_detail(self):
+        legacy = self.root / 'legacy.db'
+        conn = sqlite3.connect(legacy)
+        conn.executescript(shadow.SCHEMA_SQL.replace(' error_detail TEXT,', ''))
+        cols = {row[1] for row in conn.execute('PRAGMA table_info(dayblock_generation_receipts)')}
+        conn.close()
+        self.assertNotIn('error_detail', cols)
+        store = shadow.open_preview_store(legacy)
+        try:
+            info = {row[1]: row for row in store.execute('PRAGMA table_info(dayblock_generation_receipts)')}
+        finally:
+            store.close()
+        self.assertIn('error_detail', info)
+        self.assertEqual(info['error_detail'][3], 0)  # nullable
+        shadow.open_preview_store(legacy).close()  # idempotent
+
+
 if __name__ == '__main__':
     unittest.main()

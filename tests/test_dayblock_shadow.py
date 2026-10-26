@@ -658,5 +658,180 @@ class DayBlockShadowTests(unittest.TestCase):
             conn.close()
 
 
+class ResentImageEvidenceTests(unittest.TestCase):
+    """A byte-identical image re-sent later the same day lifts only the earlier critical flag."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="dayblock-resend-")
+        self.root = Path(self.temp.name)
+        self.static = self.root / "static"
+        (self.static / "uploads").mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def image(self, filename, payload):
+        (self.static / "uploads" / filename).write_bytes(payload)
+
+    @staticmethod
+    def attach(filename, name):
+        return json.dumps([{"type": "image", "url": f"/static/uploads/{filename}", "name": name}])
+
+    def materialize(self, rows, day="2026-10-24"):
+        db = self.root / "source.db"
+        make_source_db(db)
+        conn = sqlite3.connect(db)
+        conn.execute("DELETE FROM chat_messages")
+        conn.execute("DELETE FROM daily_message_contexts")
+        conn.execute("DELETE FROM wake_log")
+        conn.executemany("INSERT INTO chat_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.executemany("INSERT INTO daily_message_contexts VALUES(?,?,?)",
+                         [(row[0], 31, 9) for row in rows])
+        conn.commit()
+        conn.close()
+        source_rows = dbs.discover_natural_day_rows(db, day)
+        _snapshot, _turns, _events, members = dbs.derive_source_contract(
+            source_rows, day, "2026-10-25T03:00:00+08:00", static_dir=self.static,
+        )
+        materialized = dbs.materialize_raw_evidence(members, source_rows, static_dir=self.static)
+        by_id = {item["message_id"]: item for item in materialized.attachments}
+        return members, materialized, by_id
+
+    def resend_rows(self, first_text, second_text, *, first_file="img_a.jpg", second_file="img_b.jpg",
+                    first_name="29468.jpg", second_name="29468.jpg", reply="砂锅居。"):
+        rows = [
+            _chat_row(10, "hayana", first_text, "2026-10-24 14:22:48",
+                      attachments=self.attach(first_file, first_name)),
+            _chat_row(11, "hayana", second_text, "2026-10-24 14:28:20",
+                      attachments=self.attach(second_file, second_name)),
+        ]
+        if reply is not None:
+            rows.append(_chat_row(12, "fyodor", reply, "2026-10-24 14:29:42"))
+        return rows
+
+    def assert_still_critical(self, materialized, by_id):
+        self.assertTrue(by_id[10]["critical_unavailable"])
+        self.assertNotIn("evidence_satisfied_by", by_id[10])
+        self.assertIn("dayblock_critical_attachment_content_unavailable", materialized.blockers)
+
+    def test_same_sha_with_different_text_and_later_visible_turn_lifts_critical(self):
+        # Mirrors production 12857/12858: identical bytes, different words.
+        self.image("img_a.jpg", b"same-image-bytes")
+        self.image("img_b.jpg", b"same-image-bytes")
+        members, materialized, by_id = self.materialize(
+            self.resend_rows("爸爸小食选哪个", "喵喵喵爸爸选哪个"))
+        self.assertEqual(by_id[10]["file_sha256"], by_id[11]["file_sha256"])
+        self.assertFalse(by_id[10]["critical_unavailable"])
+        self.assertEqual(by_id[10]["evidence_satisfied_by"], "attachment:11:0")
+        self.assertFalse(by_id[11]["critical_unavailable"])
+        self.assertNotIn("evidence_satisfied_by", by_id[11])
+        self.assertFalse(materialized.blockers)
+        refs = {member.source_ref for member in members}
+        # Both user sources and both attachment spans stay members; nothing merges.
+        self.assertIn("incomplete_user:10", refs)
+        self.assertIn("attachment:10:0", refs)
+        self.assertIn("attachment:11:0", refs)
+        self.assertEqual(materialized.source_refs, tuple(member.source_ref for member in members))
+        self.assertEqual(len(refs), len(members))
+
+    def test_same_sha_with_same_text_lifts_critical(self):
+        # Mirrors production 12926/12927.
+        self.image("img_a.jpg", b"same-image-bytes")
+        self.image("img_b.jpg", b"same-image-bytes")
+        _members, materialized, by_id = self.materialize(
+            self.resend_rows("这是新的人机圈鄙视链吗", "这是新的人机圈鄙视链吗"))
+        self.assertFalse(by_id[10]["critical_unavailable"])
+        self.assertFalse(materialized.blockers)
+
+    def test_same_filename_but_different_sha_stays_critical(self):
+        self.image("img_a.jpg", b"first-image-bytes")
+        self.image("img_b.jpg", b"other-image-bytes")
+        _members, materialized, by_id = self.materialize(
+            self.resend_rows("看这个", "看这个呀", first_name="same.jpg", second_name="same.jpg"))
+        self.assert_still_critical(materialized, by_id)
+
+    def test_same_text_but_different_sha_stays_critical(self):
+        # Mirrors production 11879/11880.
+        self.image("img_a.jpg", b"first-image-bytes")
+        self.image("img_b.jpg", b"other-image-bytes")
+        _members, materialized, by_id = self.materialize(
+            self.resend_rows("试图叫个闪送", "试图叫个闪送", first_name="29040.jpg", second_name="29042.webp"))
+        self.assert_still_critical(materialized, by_id)
+
+    def test_same_sha_without_later_assistant_text_stays_critical(self):
+        self.image("img_a.jpg", b"same-image-bytes")
+        self.image("img_b.jpg", b"same-image-bytes")
+        _members, materialized, by_id = self.materialize(
+            self.resend_rows("爸爸小食选哪个", "喵喵喵爸爸选哪个", reply=None))
+        self.assert_still_critical(materialized, by_id)
+        self.assertTrue(by_id[11]["critical_unavailable"])
+
+    def test_same_sha_on_another_day_stays_critical(self):
+        self.image("img_a.jpg", b"same-image-bytes")
+        self.image("img_b.jpg", b"same-image-bytes")
+        rows = [
+            _chat_row(10, "hayana", "爸爸小食选哪个", "2026-10-24 23:58:00",
+                      attachments=self.attach("img_a.jpg", "29468.jpg")),
+            _chat_row(11, "hayana", "喵喵喵爸爸选哪个", "2026-10-25 00:02:00",
+                      attachments=self.attach("img_b.jpg", "29468.jpg")),
+            _chat_row(12, "fyodor", "砂锅居。", "2026-10-25 00:03:00"),
+        ]
+        _members, materialized, by_id = self.materialize(rows)
+        self.assertNotIn(11, by_id)
+        self.assert_still_critical(materialized, by_id)
+
+    def test_missing_hash_stays_critical(self):
+        # The earlier binary is unavailable, so byte identity cannot be proven.
+        self.image("img_b.jpg", b"same-image-bytes")
+        _members, materialized, by_id = self.materialize(
+            self.resend_rows("爸爸小食选哪个", "喵喵喵爸爸选哪个"))
+        self.assertIsNone(by_id[10]["file_sha256"])
+        self.assert_still_critical(materialized, by_id)
+
+    def test_unaffected_attachment_revision_is_unchanged(self):
+        self.image("img_a.jpg", b"first-image-bytes")
+        self.image("img_b.jpg", b"other-image-bytes")
+        members, _materialized, by_id = self.materialize(
+            self.resend_rows("看这个", "看这个呀"))
+        attachment = next(m for m in members if m.source_ref == "attachment:11:0")
+        descriptor = {k: v for k, v in by_id[11].items()
+                      if k not in {"extracted_text", "source_revision"}}
+        from continuity.sources import row_revision
+        rows = dbs.discover_natural_day_rows(self.root / "source.db", "2026-10-24")
+        row = next(r for r in rows if int(r["id"]) == 11)
+        expected = hashlib.sha256(json.dumps({
+            "parent_row_revision": row_revision(row), "attachment": descriptor,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.assertEqual(attachment.source_revision, expected)
+
+    def test_unaffected_attachments_match_pre_resend_fix_measurement(self):
+        # Golden values produced by the implementation before the resend fix
+        # (origin/main dayblock_shadow.py) on this exact fixture. Unaffected
+        # attachments must keep revision, logical_size and candidate revision.
+        self.image("img_a.jpg", b"first-image-bytes")
+        self.image("img_b.jpg", b"other-image-bytes")
+        members, _materialized, by_id = self.materialize(
+            self.resend_rows("看这个", "看这个呀", first_name="a.jpg", second_name="b.jpg"))
+        self.assertTrue(by_id[10]["critical_unavailable"])
+        attachments = {m.source_ref: m for m in members if m.source_kind == "attachment_span"}
+        self.assertEqual(
+            (attachments["attachment:10:0"].source_revision, attachments["attachment:10:0"].logical_size),
+            ("e55d3b8bee61cb2bb870dc3073e8df44cd81611f0e7082a20cff0e7ba256ba97", 123),
+        )
+        self.assertEqual(
+            (attachments["attachment:11:0"].source_revision, attachments["attachment:11:0"].logical_size),
+            ("ce7d68cbab87090e949ca0c9772262b8a596d49c34336748b2956bf561a2cb20", 124),
+        )
+        # logical_size keeps measuring the descriptor including source_revision.
+        sized = {k: v for k, v in by_id[11].items() if k != "extracted_text"}
+        self.assertIn("source_revision", sized)
+        self.assertEqual(attachments["attachment:11:0"].logical_size, dbs._token_estimate(json.dumps(
+            sized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+        self.assertEqual(
+            candidate_source_revision(members),
+            "36382d9246980c95b50f6b63764d3f936cee41c33f0ec8b2487128dac91df179",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
