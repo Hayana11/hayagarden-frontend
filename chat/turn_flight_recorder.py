@@ -315,8 +315,13 @@ class TurnFlightRecorder:
             1 for item in self._events
             if item.get('event') == 'different_turn_lock_collision'
         )
-        last_event = self._events[-1] if self._events else None
-        last_completed_stage = last_event.get('stage') if last_event else None
+        progress_events = [
+            item for item in self._events
+            if item.get('stage') in _PROGRESS_STAGES
+        ]
+        last_completed_stage = (
+            progress_events[-1].get('stage') if progress_events else None
+        )
         snapshot: dict[str, Any] = {
             **self._identity,
             'event': 'turn_closed',
