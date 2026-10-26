@@ -7607,12 +7607,13 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 wraps=gateway._run_unified_normal_main_chat_turn,
             ))
 
-            response = gateway._wake_decide_locked(
-                {'mode': 'normal', 'wake_run_id': 'gateway-wake'},
-                'normal',
-                '',
-                '',
-            )
+            with gateway.app.app_context():
+                response = gateway._wake_decide_locked(
+                    {'mode': 'normal', 'wake_run_id': 'gateway-wake'},
+                    'normal',
+                    '',
+                    '',
+                )
 
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
