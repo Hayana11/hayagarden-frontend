@@ -4993,7 +4993,6 @@ def _retire_shared_resident_after_observation_failure(
         )
     except Exception:
         return False
-   
 
 
 def _run_unified_normal_main_chat_turn(
