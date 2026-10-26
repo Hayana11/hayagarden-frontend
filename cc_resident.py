@@ -3189,6 +3189,10 @@ class ResidentSession:
             value = str(value or '').strip()
             if value and value not in live_request_ids:
                 live_request_ids.append(value)
+                _emit_lifecycle(
+                    'provider_request_observed',
+                    _request_identity=value,
+                )
 
         def _transcript_timeout_snapshot():
             """Inspect bounded current-cursor metadata without sidechain finality."""
