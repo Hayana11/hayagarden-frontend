@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging, uuid
 # Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
 # must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
@@ -19,6 +19,7 @@ from chat.display_segments import (
     finalize_display_segments_json,
     strip_save_markers,
 )
+from chat.turn_flight_recorder import TurnFlightRecorder, recorder_from
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -1312,53 +1313,77 @@ _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
 _gen_pending_delivery = None
-_GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
+# Kept for bounded lock-age observation only. Age never proves a zombie.
+_GEN_ZOMBIE_TTL = 320
+_gen_active_recorder = None   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
                         # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
-def _gen_acquire_or_wait(wait_timeout=15):
-    """返回 ('own', None) 表示本次调用应自己生成；
-    返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_busy_since, _gen_last_result, _gen_pending_delivery
+def _gen_acquire_or_wait(wait_timeout=15, *, flight_recorder=None):
+    """Acquire the existing lock or wait; observation never changes ownership."""
+    global _gen_busy, _gen_busy_since, _gen_last_result
+    global _gen_pending_delivery, _gen_active_recorder
     deadline = time.time() + wait_timeout
+    wait_recorded = False
     with _gen_cond:
         while True:
-            # 每次循环都检查 TTL；共享 Wake 只豁免正常时长内的恢复，
-            # 超过既有僵尸上限仍保留逃生门。
-            if (
-                _gen_busy
-                and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL
-            ):
-                _gen_busy = False
-                _gen_last_result = None
-                _gen_pending_delivery = None
             if not _gen_busy:
                 _gen_busy = True
                 _gen_busy_since = time.time()
                 _gen_last_result = None
+                _gen_active_recorder = flight_recorder
+                if flight_recorder is not None:
+                    flight_recorder.record(
+                        'generation_lock_acquired',
+                        dedupe=True,
+                    )
                 return ('own', None)
-            # 等到有结果或者到期
+
+            if flight_recorder is not None and not wait_recorded:
+                wait_recorded = True
+                flight_recorder.record(
+                    'generation_lock_wait_begin',
+                    lock_age_sec=max(0, int(time.time() - _gen_busy_since)),
+                    dedupe=True,
+                )
+
             remaining = deadline - time.time()
             if remaining <= 0:
                 raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
-            _gen_cond.wait(timeout=min(remaining, 5))  # 每5秒重新检查一次TTL
+            _gen_cond.wait(timeout=min(remaining, 5))
             if _gen_last_result is not None:
+                if flight_recorder is not None:
+                    flight_recorder.record(
+                        'generation_lock_reused',
+                        dedupe=True,
+                    )
                 return ('reused', _gen_last_result)
 
-def _gen_release(result, *, expected_pending_token=None):
+
+def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
     global _gen_busy, _gen_last_result, _gen_pending_delivery
+    global _gen_active_recorder
+    recorder = flight_recorder
     with _gen_cond:
         if (
             expected_pending_token is not None
             and _gen_pending_delivery is not expected_pending_token
         ):
-            # A shared Wake that outlived the zombie TTL must not release a
-            # newer Chat owner when its old stream finally returns.
+            # A shared Wake that outlived the stale-lock observation window
+            # must not release a newer Chat owner.
             return False
+        if recorder is None:
+            recorder = _gen_active_recorder
         _gen_last_result = result
         _gen_busy = False
         _gen_pending_delivery = None
+        _gen_active_recorder = None
         _gen_cond.notify_all()
-        return True
+    if recorder is not None:
+        recorder.record(
+            'generation_lock_released',
+            dedupe=True,
+        )
+    return True
 
 
 def _gen_mark_pending_delivery(token):
@@ -1371,13 +1396,99 @@ def _gen_mark_pending_delivery(token):
 
 
 def _chat_is_generating() -> bool:
-    """True while the main chat generation lock is held (non-zombie)."""
+    """True while the main chat generation lock is held."""
     with _gen_cond:
-        if not _gen_busy:
-            return False
-        if (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
-            return False
-        return True
+        return bool(_gen_busy)
+ 
+ 
+def _find_persisted_assistant_after(user_message_id):
+    try:
+        user_id = int(user_message_id)
+    except (TypeError, ValueError):
+        return None
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM chat_messages "
+            "WHERE id>? AND author IN ('assistant','claude','fyodor') "
+            "ORDER BY id LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return int(row['id']) if row is not None else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _stream_same_turn_reconnect_wait(
+    *,
+    user_message_id,
+    recorder,
+    stream_instance_id,
+    timeout_sec=420,
+):
+    """Wait on authoritative persisted state without acquiring a second turn."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        assistant_id = _find_persisted_assistant_after(user_message_id)
+        if assistant_id is not None:
+            recorder.record(
+                'turn_reconciled',
+                assistant_message_id=assistant_id,
+                reconcile_applied=True,
+                stream_instance_id=stream_instance_id,
+                stream_role='reconnect',
+                dedupe=True,
+            )
+            yield _sse_json({
+                't': 'notice',
+                'd': 'same_turn_reconnect_wait',
+                'code': 'same_turn_reconnect_wait',
+            })
+            yield _sse_json({
+                't': 'done',
+                'ok': True,
+                'same_turn_reconnect': True,
+                'assistant_message_id': assistant_id,
+            })
+            return
+        try:
+            import moments_turn
+            active = moments_turn.get_active_turn(
+                DB_PATH, moments_turn.DEFAULT_CONVERSATION_ID,
+            )
+        except Exception:
+            active = None
+        if active is None:
+            # The original turn is terminal but did not produce an assistant.
+            # Keep this a non-error reconnect result; the caller refetches the
+            # authoritative message list and does not resend the user message.
+            yield _sse_json({
+                't': 'notice',
+                'd': 'same_turn_reconnect_wait',
+                'code': 'same_turn_reconnect_wait',
+            })
+            yield _sse_json({
+                't': 'done',
+                'ok': True,
+                'same_turn_reconnect': True,
+            })
+            return
+        yield _sse_json({'t': 'ping'})
+        time.sleep(0.5)
+
+    yield _sse_json({
+        't': 'notice',
+        'd': 'same_turn_reconnect_wait',
+        'code': 'same_turn_reconnect_wait',
+    })
+    yield _sse_json({
+        't': 'done',
+        'ok': True,
+        'same_turn_reconnect': True,
+    })
+
 
 
 _wake_exec_lock = threading.Lock()
@@ -1393,24 +1504,55 @@ def chat_lock_status():
 
 @app.route('/chat/cancel', methods=['POST'])
 def chat_cancel():
-    """释放生成锁。force=true 时无条件释放（停止按钮/用户 abort）；
-    否则跳过 age<8s 的新锁，避免上一轮 stream 的延迟 cancel 误杀新一轮。"""
+    """Release the generation lock only on explicit force; otherwise observe."""
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force'))
+    source = str(data.get('source') or 'chat_cancel')[:80]
     with _gen_cond:
-        if _gen_busy:
-            age = time.time() - _gen_busy_since
-            if _gen_pending_delivery is not None and age <= _GEN_ZOMBIE_TTL:
-                return jsonify({
-                    'ok': True,
-                    'skipped': True,
-                    'shared_wake': True,
-                    'age_sec': round(age, 1),
-                })
-            if not force and age < 8.0:
-                return jsonify({'ok': True, 'skipped': True, 'age_sec': round(age, 1)})
-    _gen_release(None)
-    return jsonify({'ok': True})
+        busy = bool(_gen_busy)
+        age = time.time() - _gen_busy_since if busy else 0.0
+        recorder = _gen_active_recorder
+        if recorder is not None:
+            recorder.record(
+                'force_unlock_requested',
+                source=source,
+                lock_age_sec=max(0, int(age)),
+                owner_alive=True,
+                resident_active=True,
+                turn_terminal=False,
+                reason='explicit_force' if force else 'non_force_observation',
+            )
+        if busy and not force:
+            if recorder is not None:
+                recorder.record(
+                    'force_unlock_applied',
+                    source=source,
+                    lock_age_sec=max(0, int(age)),
+                    unlock_applied=False,
+                    unlock_skipped=True,
+                    reason='age_is_observation_only',
+                )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'age_sec': round(age, 1),
+                'reason': 'age_is_observation_only',
+            })
+        if not busy:
+            return jsonify({'ok': True, 'skipped': True, 'age_sec': 0})
+    released = _gen_release(None)
+    if recorder is not None:
+        recorder.record(
+            'force_unlock_applied',
+            source=source,
+            lock_age_sec=max(0, int(age)),
+            unlock_applied=bool(released),
+            unlock_skipped=not bool(released),
+            reason='explicit_force',
+        )
+    return jsonify({'ok': True, 'released': bool(released)})
+
+
 
 
 @app.route('/drawers/preview', methods=['GET'])
