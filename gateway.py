@@ -170,39 +170,127 @@ def _daily_observation_hash(value):
 
 
 def _daily_stream_cancellation_state(plan, resident, turn_data=None):
-    """Snapshot provider-side lifecycle evidence before gateway cleanup."""
+    """Snapshot current-turn lifecycle evidence before gateway cleanup."""
     data = turn_data if isinstance(turn_data, dict) else {}
     resident_stream_entered = bool(
         getattr(plan, '_resident_stream_entered', False)
     ) if plan is not None else False
+    plan_stdin_write_started = bool(
+        getattr(plan, '_current_user_stdin_write_started', False)
+    ) if plan is not None else False
     plan_stdin_flushed = bool(
         getattr(plan, '_current_user_stdin_flushed', False)
     ) if plan is not None else False
+
+    expected_turn_sequence = (
+        getattr(plan, '_resident_turn_sequence', None)
+        if plan is not None else None
+    )
+    active_turn_sequence = (
+        getattr(resident, '_active_turn_sequence', None)
+        if resident is not None else None
+    )
+    last_turn_sequence = (
+        getattr(resident, '_last_turn_sequence', None)
+        if resident is not None else None
+    )
+
+    def _sequence_matches(expected, observed):
+        if expected is None or observed is None:
+            return False
+        try:
+            return int(expected) == int(observed)
+        except (TypeError, ValueError):
+            return False
+
+    active_snapshot_matches = _sequence_matches(
+        expected_turn_sequence, active_turn_sequence,
+    )
+    last_snapshot_matches = _sequence_matches(
+        expected_turn_sequence, last_turn_sequence,
+    )
+    lifecycle_snapshot_matches = (
+        active_snapshot_matches or last_snapshot_matches
+    )
+    if active_snapshot_matches:
+        resident_write_started = bool(
+            getattr(resident, '_turn_write_started', False)
+        )
+        resident_stdin_flushed = bool(
+            getattr(resident, '_turn_stdin_flushed', False)
+        )
+        resident_provider_event_seen = bool(
+            getattr(resident, '_turn_provider_event_seen', False)
+        )
+        resident_provider_request_id_seen = bool(
+            getattr(resident, '_turn_provider_request_id_seen', False)
+        )
+        resident_first_text_or_thinking_seen = bool(
+            getattr(resident, '_turn_first_text_or_thinking_seen', False)
+        )
+        resident_claude_init_event_seen = bool(
+            getattr(resident, '_turn_claude_init_event_seen', False)
+        )
+    elif last_snapshot_matches:
+        resident_write_started = bool(
+            getattr(resident, '_last_turn_stdin_write_started', False)
+        )
+        resident_stdin_flushed = bool(
+            getattr(resident, '_last_turn_stdin_flushed', False)
+        )
+        resident_provider_event_seen = bool(
+            getattr(resident, '_last_turn_provider_event_seen', False)
+        )
+        resident_provider_request_id_seen = bool(
+            getattr(resident, '_last_turn_provider_request_id_seen', False)
+        )
+        resident_first_text_or_thinking_seen = bool(
+            getattr(resident, '_last_turn_first_text_or_thinking_seen', False)
+        )
+        resident_claude_init_event_seen = bool(
+            getattr(resident, '_last_turn_claude_init_event_seen', False)
+        )
+    else:
+        # No send_turn callback bound this resident snapshot to this Daily
+        # plan. Resident booleans are stale/unknown and must not be inherited.
+        resident_write_started = False
+        resident_stdin_flushed = False
+        resident_provider_event_seen = False
+        resident_provider_request_id_seen = False
+        resident_first_text_or_thinking_seen = False
+        resident_claude_init_event_seen = False
+
     stdin_write_started = bool(
-        getattr(resident, '_last_turn_stdin_write_started', False)
-        or getattr(resident, '_turn_write_started', False)
+        plan_stdin_write_started
+        or (
+            lifecycle_snapshot_matches
+            and resident_write_started
+        )
     )
     stdin_flushed = bool(
-        getattr(resident, '_last_turn_stdin_flushed', False)
-        or getattr(resident, '_turn_stdin_flushed', False)
-        or plan_stdin_flushed
+        plan_stdin_flushed
+        or (
+            lifecycle_snapshot_matches
+            and resident_stdin_flushed
+        )
     )
     provider_event_seen = bool(
-        getattr(resident, '_last_turn_provider_event_seen', False)
-        or getattr(resident, '_turn_provider_event_seen', False)
+        lifecycle_snapshot_matches
+        and resident_provider_event_seen
     )
     provider_request_id_seen = bool(
-        getattr(resident, '_last_turn_provider_request_id_seen', False)
-        or getattr(resident, '_turn_provider_request_id_seen', False)
+        lifecycle_snapshot_matches
+        and resident_provider_request_id_seen
     )
     first_text_or_thinking_seen = bool(
-        getattr(resident, '_last_turn_first_text_or_thinking_seen', False)
-        or getattr(resident, '_turn_first_text_or_thinking_seen', False)
+        lifecycle_snapshot_matches
+        and resident_first_text_or_thinking_seen
     )
     claude_init_event_seen = bool(
-        getattr(resident, '_last_turn_claude_init_event_seen', False)
-        or getattr(resident, '_turn_claude_init_event_seen', False)
+        lifecycle_snapshot_matches
+        and resident_claude_init_event_seen
     )
+
     if not stdin_flushed:
         stream_stage = (
             'resident_stream_before_stdin_flush'
@@ -226,7 +314,7 @@ def _daily_stream_cancellation_state(plan, resident, turn_data=None):
     session_id = (
         getattr(resident, 'session_id', None)
         or getattr(resident, '_session_id', None)
-    ) if resident is not None else None
+    ) if lifecycle_snapshot_matches and resident is not None else None
     return {
         'user_message_id': (
             getattr(plan, 'user_message_id', None)
@@ -266,7 +354,6 @@ def _daily_stream_cancellation_state(plan, resident, turn_data=None):
         'first_text_or_thinking_seen': first_text_or_thinking_seen,
         'terminal_reason': terminal_reason,
     }
-
 
 def _record_daily_stream_cancellation(
     turn_data,
