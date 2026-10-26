@@ -1,5 +1,7 @@
+import json
 import pathlib
 import sqlite3
+import threading
 import time
 import unittest
 from contextlib import ExitStack
@@ -60,6 +62,88 @@ class TurnFlightRecorderTests(unittest.TestCase):
         self.assertTrue(first['mapping_committed'])
         self.assertEqual('turn_closed', first['event'])
 
+
+    def test_normal_success_emits_one_canonical_terminal(self):
+        recorder = TurnFlightRecorder(
+            user_message_id=13166,
+            turn_key='turn-13166',
+            stream_instance_id='stream-success',
+        )
+        recorder.record('provider_started', dedupe=True)
+        recorder.record(
+            'provider_request_observed',
+            _request_identity='provider-request-1',
+        )
+        recorder.terminal(
+            terminal_status='success',
+            assistant_message_id=13168,
+            assistant_persisted=True,
+            mapping_committed=True,
+        )
+        with self.assertLogs('gateway', level='INFO') as captured:
+            self.assertTrue(gateway._emit_turn_flight_terminal_once(recorder))
+            self.assertFalse(gateway._emit_turn_flight_terminal_once(recorder))
+        lines = [
+            line for line in captured.output if 'turn_flight_terminal ' in line
+        ]
+        self.assertEqual(1, len(lines))
+        payload = json.loads(
+            lines[0].split('turn_flight_terminal ', 1)[1],
+        )
+        self.assertEqual('success', payload['terminal_status'])
+        self.assertEqual(
+            recorder.turn_observation_id,
+            payload['turn_observation_id'],
+        )
+
+
+    def test_provider_request_count_deduplicates_three_request_ids(self):
+        recorder = TurnFlightRecorder(user_message_id=13166)
+        for request_id in ('provider-a', 'provider-a', 'provider-b', 'provider-c', 'provider-c'):
+            recorder.record(
+                'provider_request_observed',
+                _request_identity=request_id,
+            )
+        snapshot = recorder.terminal(terminal_status='success')
+        self.assertEqual(3, snapshot['provider_request_count'])
+        self.assertEqual(
+            3,
+            len([
+                event for event in snapshot['events']
+                if event['event'] == 'provider_request_observed'
+            ]),
+        )
+        serialized = json.dumps(snapshot, ensure_ascii=False)
+        self.assertNotIn('provider-a', serialized)
+        self.assertNotIn('provider-b', serialized)
+        self.assertNotIn('provider-c', serialized)
+
+
+    def test_reconnect_does_not_emit_second_canonical_terminal(self):
+        recorder = TurnFlightRecorder(
+            user_message_id=13166,
+            turn_key='turn-13166',
+            stream_instance_id='stream-original',
+        )
+        recorder.terminal(
+            terminal_status='success',
+            assistant_message_id=13168,
+            assistant_persisted=True,
+            mapping_committed=True,
+        )
+        with self.assertLogs('gateway', level='INFO') as captured:
+            self.assertTrue(gateway._emit_turn_flight_terminal_once(recorder))
+            recorder.record(
+                'same_turn_reconnect_detected',
+                stream_instance_id='stream-reconnect',
+                stream_role='reconnect',
+            )
+            self.assertFalse(gateway._emit_turn_flight_terminal_once(recorder))
+        self.assertEqual(
+            1,
+            len([line for line in captured.output if 'turn_flight_terminal ' in line]),
+        )
+
     def test_daily_cancellation_snapshot_keeps_existing_contract(self):
         recorder = TurnFlightRecorder(
             user_message_id=13166,
@@ -89,17 +173,33 @@ class TurnFlightRecorderTests(unittest.TestCase):
             abort_requested=True,
             respawn_requested=True,
         )
-        with self.assertLogs('gateway', level='WARNING') as captured:
+        with self.assertLogs('gateway', level='INFO') as captured:
             self.assertTrue(gateway._emit_terminal_contract_diag_once(turn_data))
             self.assertFalse(gateway._emit_terminal_contract_diag_once(turn_data))
-        lines = [line for line in captured.output if 'chat_terminal_contract ' in line]
-        self.assertEqual(1, len(lines))
+        canonical_lines = [
+            line for line in captured.output if 'turn_flight_terminal ' in line
+        ]
+        contract_lines = [
+            line for line in captured.output if 'chat_terminal_contract ' in line
+        ]
+        self.assertEqual(1, len(canonical_lines))
+        self.assertEqual(1, len(contract_lines))
         self.assertEqual(
             'client_stream_cancelled_after_stdin',
             diag['terminal_reason'],
         )
-        self.assertIn('turn_observation_id', lines[0])
-        self.assertIn('flight_snapshot', lines[0])
+        canonical = json.loads(
+            canonical_lines[0].split('turn_flight_terminal ', 1)[1],
+        )
+        contract = json.loads(
+            contract_lines[0].split('chat_terminal_contract ', 1)[1],
+        )
+        self.assertEqual(
+            canonical['turn_observation_id'],
+            contract['turn_observation_id'],
+        )
+        self.assertIn('turn_observation_id', contract_lines[0])
+        self.assertIn('flight_snapshot', contract_lines[0])
 
     def test_network_reconnects_share_one_logical_terminal_summary(self):
         recorder = TurnFlightRecorder(
