@@ -264,7 +264,10 @@ class TurnFlightRecorder:
             'provider_request_observed',
             dedupe=False,
             fields={
-                'provider_request_count': len(self._provider_request_hashes),
+                'provider_request_count': len(self._provider_request_hashes) or int(any(
+                item.get('stage') == 'provider_started'
+                for item in self._events
+            )),
             },
         )
 
