@@ -1752,7 +1752,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
         moments_mock = mock.Mock()
         scoring_mock = mock.Mock()
 
-        def _track_gen_release(value):
+        def _track_gen_release(value, **_kwargs):
             gen_release_calls.append(value)
 
         def _track_release_turn(*_a, **kwargs):
@@ -1833,7 +1833,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 mock.patch.object(gateway, 'DB_PATH', db),
                 mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
                 mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
-                mock.patch.object(gateway, '_gen_release', side_effect=lambda v: gen_release_calls.append(v)),
+                mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
                 mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
                 mock.patch(
                     'moments_turn.insert_user_message',
@@ -2063,7 +2063,7 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
             mock.patch.object(gateway, 'DB_PATH', db),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
-            mock.patch.object(gateway, '_gen_release', side_effect=lambda v: gen_release_calls.append(v)),
+            mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
             mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
             mock.patch(
                 'moments_turn.insert_user_message',
@@ -2475,7 +2475,7 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
             moments_mock = mock.Mock()
             scoring_mock = mock.Mock()
 
-            def _track_gen_release(value):
+            def _track_gen_release(value, **_kwargs):
                 gen_release_calls.append(value)
 
             patches = [
