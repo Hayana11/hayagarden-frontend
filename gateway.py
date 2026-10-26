@@ -1445,12 +1445,22 @@ def _find_persisted_assistant_after(user_message_id):
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT id FROM chat_messages "
-            "WHERE id>? AND author IN ('assistant','claude','fyodor') "
-            "ORDER BY id LIMIT 1",
-            (user_id,),
+            """
+            SELECT assistant_ctx.message_id
+            FROM daily_message_contexts AS user_ctx
+            JOIN daily_message_contexts AS assistant_ctx
+              ON assistant_ctx.context_id = user_ctx.context_id
+             AND assistant_ctx.context_epoch = user_ctx.context_epoch
+            WHERE user_ctx.message_id = ?
+              AND user_ctx.role = 'user'
+              AND assistant_ctx.role = 'assistant'
+              AND assistant_ctx.message_id > ?
+            ORDER BY assistant_ctx.message_id
+            LIMIT 1
+            """,
+            (user_id, user_id),
         ).fetchone()
-        return int(row['id']) if row is not None else None
+        return int(row['message_id']) if row is not None else None
     except Exception:
         return None
     finally:
