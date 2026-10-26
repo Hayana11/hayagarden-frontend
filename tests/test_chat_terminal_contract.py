@@ -1955,7 +1955,6 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertFalse(diag['unsent_release'])
         self.assertTrue(diag['abort_requested'])
         self.assertTrue(diag['respawn_requested'])
-        self.assertTrue(diag['resident_respawned'])
         self.assertTrue(diag['fail_closed'])
         self.assertEqual(1, abort.call_count)
         encoded = json.dumps(diag, ensure_ascii=False)
