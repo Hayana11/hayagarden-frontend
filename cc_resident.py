@@ -1681,6 +1681,14 @@ class ResidentSession:
         self._turn_stdin_flushed = False
         self._last_turn_stdin_write_started = False
         self._last_turn_stdin_flushed = False
+        self._turn_provider_event_seen = False
+        self._turn_provider_request_id_seen = False
+        self._turn_first_text_or_thinking_seen = False
+        self._turn_claude_init_event_seen = False
+        self._last_turn_provider_event_seen = False
+        self._last_turn_provider_request_id_seen = False
+        self._last_turn_first_text_or_thinking_seen = False
+        self._last_turn_claude_init_event_seen = False
         self._runtime_identity = None
         self._runtime_rollback_pending = None
         self._next_spawn_reason = None
@@ -2882,6 +2890,10 @@ class ResidentSession:
                 self._turn_active = True
                 self._turn_write_started = False
                 self._turn_stdin_flushed = False
+                self._turn_provider_event_seen = False
+                self._turn_provider_request_id_seen = False
+                self._turn_first_text_or_thinking_seen = False
+                self._turn_claude_init_event_seen = False
             try:
                 yield from self._send_turn_impl(*args, **kwargs)
             except BaseException as exc:
@@ -2944,6 +2956,18 @@ class ResidentSession:
                 with self._turn_state_lock:
                     self._last_turn_stdin_write_started = bool(self._turn_write_started)
                     self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
+                    self._last_turn_provider_event_seen = bool(
+                        self._turn_provider_event_seen
+                    )
+                    self._last_turn_provider_request_id_seen = bool(
+                        self._turn_provider_request_id_seen
+                    )
+                    self._last_turn_first_text_or_thinking_seen = bool(
+                        self._turn_first_text_or_thinking_seen
+                    )
+                    self._last_turn_claude_init_event_seen = bool(
+                        self._turn_claude_init_event_seen
+                    )
                     self._turn_active = False
                 self._active_terminal_authority = None
 
@@ -3656,6 +3680,47 @@ class ResidentSession:
                         except Exception:
                             pass
                     t = d.get('type')
+                    ev = d.get('event') or {}
+                    is_claude_init = (
+                        t == 'system' and d.get('subtype') == 'init'
+                    )
+                    is_provider_event = (
+                        t in ('assistant', 'result')
+                        or (
+                            t == 'stream_event'
+                            and ev.get('type') in (
+                                'message_start',
+                                'message_delta',
+                                'content_block_delta',
+                            )
+                        )
+                        or (
+                            t == 'system'
+                            and d.get('subtype') == 'model_refusal_no_fallback'
+                        )
+                    )
+                    if is_claude_init:
+                        self._turn_claude_init_event_seen = True
+                    if is_provider_event:
+                        self._turn_provider_event_seen = True
+                        if _diagnostic_request_id(d, ev):
+                            self._turn_provider_request_id_seen = True
+                    if (
+                        t == 'stream_event'
+                        and ev.get('type') == 'content_block_delta'
+                    ):
+                        delta = ev.get('delta') or {}
+                        if (
+                            (
+                                delta.get('type') == 'text_delta'
+                                and delta.get('text')
+                            )
+                            or (
+                                delta.get('type') == 'thinking_delta'
+                                and delta.get('thinking')
+                            )
+                        ):
+                            self._turn_first_text_or_thinking_seen = True
                     _record_live_request_id(_diagnostic_request_id(d))
                     if t == 'system' and d.get('subtype') == 'init':
                         _cold_start_mark(
