@@ -5364,9 +5364,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
     def _fake_hot_reconcile_plan(self, *, receipt_members=None, receipt_model='model-1'):
         from chat.context_receipt import ContextReceipt
 
-        context_plan = self._fake_hot_context_plan(
-            member=tail_probe['source_member'],
-        )
+        context_plan = self._fake_hot_context_plan()
         plan = types.SimpleNamespace(
             context_id=7,
             context_epoch=3,
@@ -7694,7 +7692,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 registry=registry,
             )
         self.assertEqual(tail_probe['status'], 'pass', tail_probe)
-        context_plan = self._fake_hot_context_plan()
+        context_plan = self._fake_hot_context_plan(
+            member=tail_probe['source_member'],
+        )
         plan.chat_id = 'default'
         plan.resident_key = 'default:e3:g1'
         plan.worker_id = dr.WORKER_ID
