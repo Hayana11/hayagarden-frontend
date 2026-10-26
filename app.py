@@ -2772,7 +2772,7 @@ def _gw_unlock_gen_lock(rounds=4):
             last.get('released') is True
             or last.get('owner_changed') is True
         ):
-            break
+            pass
     lock = _gw_gen_lock_status()
     return {'cancel': last, 'lock': lock, 'ok': not lock.get('busy')}
 
