@@ -1586,7 +1586,7 @@ def _stream_same_turn_reconnect_wait(
                 active_user_message_id = active['user_message_id']
             except (KeyError, TypeError, IndexError):
                 active_user_message_id = None
-        if active_user_message_id is None:
+        if active_user_message_id is None or str(active_user_message_id) != str(user_message_id):
             # The original turn is terminal or another turn now owns the lane.
             # Never wait through a different user's turn.
             yield _sse_json({
