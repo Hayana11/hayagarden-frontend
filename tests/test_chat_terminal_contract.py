@@ -2217,6 +2217,40 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         ))
         self.assertEqual(0, partial_persist.call_count)
 
+    def test_repair_unlock_stops_when_initial_target_is_absent(self):
+        pil_module = types.ModuleType('PIL')
+        pil_image_module = types.ModuleType('PIL.Image')
+        pil_module.Image = mock.MagicMock()
+        with mock.patch.dict(
+            sys.modules,
+            {'PIL': pil_module, 'PIL.Image': pil_image_module},
+        ):
+            import app
+
+        requests = []
+
+        def fake_request(method, path, payload=None):
+            if path == '/chat/cancel':
+                requests.append((method, path, payload))
+                if len(requests) > 1:
+                    raise AssertionError('repair followed a later owner')
+                return {
+                    'ok': True,
+                    'released': False,
+                    'skipped': True,
+                    'owner_changed': False,
+                }
+            if path == '/chat/lock':
+                return {'busy': True, 'age_sec': 1}
+            raise AssertionError((method, path, payload))
+
+        with mock.patch.object(app, '_gw_json_request', side_effect=fake_request):
+            result = app._gw_unlock_gen_lock(rounds=4)
+
+        self.assertEqual(1, len(requests))
+        self.assertTrue(result['cancel']['skipped'])
+        self.assertFalse(result['ok'])
+
     def test_repair_unlock_stops_after_target_owner_is_released(self):
         pil_module = types.ModuleType('PIL')
         pil_image_module = types.ModuleType('PIL.Image')
