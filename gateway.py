@@ -8676,12 +8676,45 @@ def chat_stream():
                     }}) + SSE_END
                 yield _sse_json(_chat_stream_failure_event(e))
             finally:
-                release_turn(
-                    conversation_id=_conv,
-                    memories_db_path=DB_PATH,
-                    turn_key=_turn_data.get('turn_key'),
-                    persisted=_persisted[0],
-                )
+                try:
+                    if _owns_logical_turn:
+                        release_turn(
+                            conversation_id=_conv,
+                            memories_db_path=DB_PATH,
+                            turn_key=_turn_data.get('turn_key'),
+                            persisted=_persisted[0],
+                        )
+                        if assistant_id is not None:
+                            _flight_recorder.record(
+                                'assistant_persisted',
+                                assistant_message_id=assistant_id,
+                                assistant_persisted=True,
+                                dedupe=True,
+                            )
+                            _flight_recorder.record(
+                                'terminal_mapping_committed',
+                                assistant_message_id=assistant_id,
+                                mapping_committed=True,
+                                dedupe=True,
+                            )
+                        _flight_recorder.terminal(
+                            terminal_status=(
+                                'success'
+                                if assistant_id is not None or _persisted[0]
+                                else 'failed'
+                            ),
+                            assistant_message_id=assistant_id,
+                            assistant_persisted=bool(
+                                assistant_id is not None or _persisted[0]
+                            ),
+                            mapping_committed=bool(assistant_id is not None),
+                            turn_terminal=True,
+                        )
+                finally:
+                    try:
+                        del _tool_ctx.user_message_id
+                    except AttributeError:
+                        pass
         return Response(stream_with_context(cc_history_rewrite.guard_cc_generation(gen_cc())), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     def generate():
@@ -9212,40 +9245,12 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
             try:
-                # A reconnect observes the existing logical turn and owns no lease.
-                if _owns_logical_turn:
-                    release_turn(
-                        conversation_id=_conv,
-                        memories_db_path=DB_PATH,
-                        turn_key=_turn_data.get('turn_key'),
-                        persisted=_persisted[0],
-                    )
-                    if assistant_id is not None:
-                        _flight_recorder.record(
-                            'assistant_persisted',
-                            assistant_message_id=assistant_id,
-                            assistant_persisted=True,
-                            dedupe=True,
-                        )
-                        _flight_recorder.record(
-                            'terminal_mapping_committed',
-                            assistant_message_id=assistant_id,
-                            mapping_committed=True,
-                            dedupe=True,
-                        )
-                    _flight_recorder.terminal(
-                        terminal_status=(
-                            'success'
-                            if assistant_id is not None or _persisted[0]
-                            else 'failed'
-                        ),
-                        assistant_message_id=assistant_id,
-                        assistant_persisted=bool(
-                            assistant_id is not None or _persisted[0]
-                        ),
-                        mapping_committed=bool(assistant_id is not None),
-                        turn_terminal=True,
-                    )
+                release_turn(
+                    conversation_id=_conv,
+                    memories_db_path=DB_PATH,
+                    turn_key=_turn_data.get('turn_key'),
+                    persisted=_persisted[0],
+                )
             finally:
                 try:
                     del _tool_ctx.user_message_id
