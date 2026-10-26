@@ -2999,6 +2999,7 @@ class ResidentSession:
         turn_runtime=None,
         jsonl_finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
         on_stdin_begin=None,
+        on_lifecycle_event=None,
         diagnostic_wake_run_id=None,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
@@ -3016,6 +3017,16 @@ class ResidentSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
+        def _emit_lifecycle(stage, **fields):
+            callback = on_lifecycle_event
+            if not callable(callback):
+                return
+            try:
+                callback(stage, **fields)
+            except Exception:
+                # Observation must never alter provider behavior.
+                pass
 
         # Bind one authority before any turn-side effect. The outer
         # send_turn exception path uses this same object for bounded cleanup.
@@ -3719,10 +3730,17 @@ class ResidentSession:
                     )
                     if is_claude_init:
                         self._turn_claude_init_event_seen = True
+                        _emit_lifecycle('claude_init_seen')
                     if is_provider_event:
+                        if not self._turn_provider_event_seen:
+                            _emit_lifecycle('provider_started')
                         self._turn_provider_event_seen = True
                         if _diagnostic_request_id(d, ev):
+                            if not self._turn_provider_request_id_seen:
+                                _emit_lifecycle('provider_request_id_seen')
                             self._turn_provider_request_id_seen = True
+                        if t == 'result':
+                            _emit_lifecycle('provider_terminal')
                     if (
                         t == 'stream_event'
                         and ev.get('type') == 'content_block_delta'
@@ -3738,6 +3756,8 @@ class ResidentSession:
                                 and delta.get('thinking')
                             )
                         ):
+                            if not self._turn_first_text_or_thinking_seen:
+                                _emit_lifecycle('first_output')
                             self._turn_first_text_or_thinking_seen = True
                     _record_live_request_id(_diagnostic_request_id(d))
                     if t == 'system' and d.get('subtype') == 'init':
