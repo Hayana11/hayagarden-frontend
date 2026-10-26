@@ -178,6 +178,24 @@ export function buildChatPresentationEntries(args: {
   return entries;
 }
 
+/**
+ * A same-turn reconnect can finish without an assistant id. Find the assistant
+ * persisted for this handoff's own user message, never past the next user turn.
+ */
+export function findReconnectedAssistantForHandoff(
+  messages: ChatMsg[] | null | undefined,
+  handoff: Pick<ChatStreamHandoff, 'userMessageId'>,
+): number | null {
+  if (!messages || handoff.userMessageId == null) return null;
+  const userIndex = messages.findIndex((message) => message.id === handoff.userMessageId);
+  if (userIndex < 0) return null;
+  for (const message of messages.slice(userIndex + 1)) {
+    if (message.role === 'user') return null;
+    if (message.role === 'assistant') return message.id;
+  }
+  return null;
+}
+
 export function findPersistedAssistantForHandoff(
   messages: ChatMsg[],
   handoff: ChatStreamHandoff,

@@ -149,6 +149,7 @@ import {
   thinkingStateKey,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
+  findReconnectedAssistantForHandoff,
   isLiveSegmentFresh,
   markChatHandoffFinalized,
   type ChatHandoffKind,
@@ -1805,17 +1806,17 @@ export function ChatScreen() {
       );
       if (reconnectWithoutAssistant) {
         const reconciled = await refetchLatest();
-        const finalMessageId = findPersistedAssistantForHandoff(
+        const finalMessageId = findReconnectedAssistantForHandoff(
           reconciled,
           handoff,
         );
         if (finalMessageId !== null) {
+          markChatHandoffFinalized(handoff);
           commitChatPresentationBinding(
             handoff,
             finalMessageId,
             presentationByMessageRef.current,
           );
-          markChatHandoffFinalized(handoff);
           return 'success';
         }
         clearLivePresentation();

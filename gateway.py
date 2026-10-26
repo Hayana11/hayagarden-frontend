@@ -435,6 +435,7 @@ def _emit_terminal_contract_diag_once(turn_data):
     turn_data['_terminal_contract_emitted'] = True
     payload = dict(diagnostic)
     recorder = turn_data.get('_turn_flight_recorder')
+    snapshot = {}
     if isinstance(recorder, TurnFlightRecorder):
         snapshot = recorder.terminal(
             terminal_status='cancelled',
@@ -1381,14 +1382,18 @@ _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
 _gen_last_result_identity = None
 _gen_pending_delivery = None
-# Kept for bounded lock-age observation only. Age never proves a zombie.
+# Compatibility constant, observation only: no control flow reads it. Lock age
+# never proves a zombie and never releases the generation lock. Normal Chat
+# stale locks need an explicit force unlock; a shared Wake pending delivery is
+# released only by its own SharedWakeDeliveryFence; a process restart clears
+# the in-memory lock. (History: aligned with the 300s relay timeout; the old
+# 90s TTL kicked slow generations mid-flight and ran two in parallel.)
 _GEN_ZOMBIE_TTL = 320
-_gen_active_recorder = None   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
+_gen_active_recorder = None
 _gen_active_identity = None
 _gen_owner_epoch = 0
 _gen_owner_token = None
 _gen_owner_fence_required = False
-                        # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
 def _gen_logical_identity(value):
     """Normalize the minimum identity needed to reuse one logical turn result."""
