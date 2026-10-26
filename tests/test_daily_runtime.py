@@ -7547,6 +7547,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
             ))
             stack.enter_context(mock.patch.object(gateway, '_gen_release'))
             stack.enter_context(mock.patch.object(
+                gateway, '_cc_resident_stream_gen',
+                side_effect=main_stream,
+            ))
+            stack.enter_context(mock.patch.object(
                 gateway, '_wake_run_id_seen', return_value=False,
             ))
             stack.enter_context(mock.patch.object(gateway, '_wake_run_id_mark'))
