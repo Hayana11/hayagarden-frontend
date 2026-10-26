@@ -7675,12 +7675,23 @@ class ContextPlanConsumerTests(unittest.TestCase):
 
         from chat.context_receipt import ContextReceipt
 
-        tail_probe = dr._hot_native_tail_proof(
-            plan,
-            frozen=installed_frozen,
-            registry=registry,
-        )
-        self.assertEqual(tail_probe['status'], 'pass')
+        with mock.patch.object(
+            dr,
+            'get_same_context_last_good',
+            return_value={
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 1,
+                'claude_session_id': 'sid-1',
+                'transcript_end_offset': 400,
+            },
+        ):
+            tail_probe = dr._hot_native_tail_proof(
+                plan,
+                frozen=installed_frozen,
+                registry=registry,
+            )
+        self.assertEqual(tail_probe['status'], 'pass', tail_probe)
         context_plan = self._fake_hot_context_plan(
             member=tail_probe['source_member'],
         )
