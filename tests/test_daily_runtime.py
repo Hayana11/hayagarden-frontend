@@ -7692,9 +7692,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 registry=registry,
             )
         self.assertEqual(tail_probe['status'], 'pass', tail_probe)
-        context_plan = self._fake_hot_context_plan(
-            member=tail_probe['source_member'],
-        )
+        context_plan = self._fake_hot_context_plan()
         plan.chat_id = 'default'
         plan.resident_key = 'default:e3:g1'
         plan.worker_id = dr.WORKER_ID
