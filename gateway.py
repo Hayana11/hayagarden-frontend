@@ -162,6 +162,140 @@ def _chat_sse_terminal_kind(chunk):
     return None
 
 
+def _daily_observation_hash(value):
+    """Hash one identity for cancellation diagnostics; never log the raw value."""
+    import hashlib
+    text = str(value or '').strip()
+    return hashlib.sha256(text.encode('utf-8')).hexdigest() if text else None
+
+
+def _daily_stream_cancellation_state(plan, resident, turn_data=None):
+    """Snapshot provider-side lifecycle evidence before gateway cleanup."""
+    data = turn_data if isinstance(turn_data, dict) else {}
+    resident_stream_entered = bool(
+        getattr(plan, '_resident_stream_entered', False)
+    ) if plan is not None else False
+    plan_stdin_flushed = bool(
+        getattr(plan, '_current_user_stdin_flushed', False)
+    ) if plan is not None else False
+    stdin_write_started = bool(
+        getattr(resident, '_last_turn_stdin_write_started', False)
+        or getattr(resident, '_turn_write_started', False)
+    )
+    stdin_flushed = bool(
+        getattr(resident, '_last_turn_stdin_flushed', False)
+        or getattr(resident, '_turn_stdin_flushed', False)
+        or plan_stdin_flushed
+    )
+    provider_event_seen = bool(
+        getattr(resident, '_last_turn_provider_event_seen', False)
+        or getattr(resident, '_turn_provider_event_seen', False)
+    )
+    provider_request_id_seen = bool(
+        getattr(resident, '_last_turn_provider_request_id_seen', False)
+        or getattr(resident, '_turn_provider_request_id_seen', False)
+    )
+    first_text_or_thinking_seen = bool(
+        getattr(resident, '_last_turn_first_text_or_thinking_seen', False)
+        or getattr(resident, '_turn_first_text_or_thinking_seen', False)
+    )
+    claude_init_event_seen = bool(
+        getattr(resident, '_last_turn_claude_init_event_seen', False)
+        or getattr(resident, '_turn_claude_init_event_seen', False)
+    )
+    if not stdin_flushed:
+        stream_stage = (
+            'resident_stream_before_stdin_flush'
+            if resident_stream_entered
+            else 'prepare_before_resident_stream'
+        )
+    elif not provider_event_seen:
+        stream_stage = 'after_stdin_before_provider_event'
+    elif not first_text_or_thinking_seen:
+        stream_stage = 'after_provider_event_before_text_or_thinking'
+    else:
+        stream_stage = 'after_provider_text_or_thinking'
+    if not resident_stream_entered:
+        terminal_reason = 'client_stream_cancelled_unsent'
+    elif not stdin_flushed:
+        terminal_reason = 'client_stream_cancelled_before_stdin_flush'
+    elif not provider_event_seen:
+        terminal_reason = 'client_stream_cancelled_after_stdin'
+    else:
+        terminal_reason = 'client_stream_cancelled_after_provider_start'
+    session_id = (
+        getattr(resident, 'session_id', None)
+        or getattr(resident, '_session_id', None)
+    ) if resident is not None else None
+    return {
+        'user_message_id': (
+            getattr(plan, 'user_message_id', None)
+            if plan is not None else data.get('user_message_id')
+        ),
+        'request_id': (
+            getattr(plan, 'request_id', None)
+            if plan is not None else data.get('request_id')
+        ),
+        'context_id': getattr(plan, 'context_id', None) if plan is not None else None,
+        'context_epoch': getattr(plan, 'context_epoch', None) if plan is not None else None,
+        'resident_generation': (
+            getattr(plan, 'resident_generation', None)
+            if plan is not None else None
+        ),
+        'process_generation': (
+            getattr(resident, 'generation', None)
+            if resident is not None else None
+        ),
+        'resident_key_hash': _daily_observation_hash(
+            getattr(plan, 'resident_key', None) if plan is not None else None
+        ),
+        'claude_session_id_hash': _daily_observation_hash(session_id),
+        'stream_stage': stream_stage,
+        'resident_stream_entered': resident_stream_entered,
+        'stdin_write_started': stdin_write_started,
+        'stdin_flushed': stdin_flushed,
+        'claude_init_event_seen': claude_init_event_seen,
+        'provider_event_seen': provider_event_seen,
+        'provider_request_id_seen': provider_request_id_seen,
+        'first_text_or_thinking_seen': first_text_or_thinking_seen,
+        'terminal_reason': terminal_reason,
+    }
+
+
+def _record_daily_stream_cancellation(
+    turn_data,
+    state,
+    *,
+    cleanup_action,
+    partial_rescue_performed=False,
+    unsent_release=False,
+    abort_requested=False,
+    respawn_requested=False,
+):
+    """Write one safe cancellation observation into the existing terminal sink."""
+    diagnostic = {
+        'event': 'daily_stream_cancelled',
+        **dict(state or {}),
+        'partial_rescue_performed': bool(partial_rescue_performed),
+        'unsent_release': bool(unsent_release),
+        'abort_requested': bool(abort_requested),
+        'respawn_requested': bool(respawn_requested),
+        # This names the existing abort(respawn=True) decision; it does not
+        # add or change any resident lifecycle action.
+        'resident_respawned': bool(respawn_requested),
+        'fail_closed': bool(
+            abort_requested
+            and state.get('stdin_flushed')
+            and not state.get('provider_event_seen')
+        ),
+        'cancellation_kind': 'client_generator_cancelled',
+        'cleanup_action': str(cleanup_action or ''),
+    }
+    if isinstance(turn_data, dict):
+        turn_data['_terminal_contract_diag'] = diagnostic
+    return diagnostic
+
+
 def _resident_display_thinking_mode(configured_mode):
     from chat.display_thinking import resolve_effective_display_thinking_mode
     return resolve_effective_display_thinking_mode(
@@ -7673,6 +7807,9 @@ def _stream_cc_daily_soft_window(
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
+            cancellation_state = _daily_stream_cancellation_state(
+                _daily_plan, _CC_RESIDENT, _turn_data,
+            )
             released = None
             try:
                 # Provider never saw this turn: free the lease only, so the
@@ -7686,8 +7823,34 @@ def _stream_cc_daily_soft_window(
                 )
             if released is not None:
                 turn_terminal = True
+                _record_daily_stream_cancellation(
+                    _turn_data,
+                    cancellation_state,
+                    cleanup_action='unsent_release',
+                    unsent_release=True,
+                )
             else:
-                _rescue_and_abort('client_stream_cancelled', respawn=True)
+                cleanup = _rescue_and_abort(
+                    'client_stream_cancelled', respawn=True,
+                )
+                _record_daily_stream_cancellation(
+                    _turn_data,
+                    cancellation_state,
+                    cleanup_action='abort_daily_turn',
+                    partial_rescue_performed=bool(
+                        cleanup.get('partial_rescue_performed')
+                    ),
+                    abort_requested=True,
+                    respawn_requested=True,
+                )
+        elif _daily_plan is None and not turn_terminal:
+            _record_daily_stream_cancellation(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    None, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='prepare_incomplete',
+            )
 
 
 @app.route('/chat/stream', methods=['POST'])
