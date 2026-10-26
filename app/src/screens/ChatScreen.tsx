@@ -179,6 +179,8 @@ installObjectHasOwnCompat();
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
 const INPUT_FONT_SIZE = FONT_SIZES[0];
 
+type ChatStreamRunResult = 'success' | 'failed' | 'reconnect_no_result';
+
 function isChatScrollProbeEnabled(): boolean {
   if (typeof window === 'undefined') return false;
   const explicit = (window as Window & { __chatScrollProbe?: boolean }).__chatScrollProbe === true;
@@ -1738,7 +1740,7 @@ export function ChatScreen() {
         sourceAssistantId?: number | null;
         handoffUserMessageId?: number | null;
       } = {},
-    ): Promise<boolean> => {
+    ): Promise<ChatStreamRunResult> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
       // so live replies never render under an old browsing window.
       pinTranscriptToLatest();
@@ -1796,6 +1798,30 @@ export function ChatScreen() {
           realityContext: opts.realityContext,
         },
       );
+      const reconnectWithoutAssistant = (
+        res.ok
+        && res.sameTurnReconnect === true
+        && res.assistantMessageId == null
+      );
+      if (reconnectWithoutAssistant) {
+        const reconciled = await refetchLatest();
+        const finalMessageId = findPersistedAssistantForHandoff(
+          reconciled,
+          handoff,
+        );
+        if (finalMessageId !== null) {
+          commitChatPresentationBinding(
+            handoff,
+            finalMessageId,
+            presentationByMessageRef.current,
+          );
+          markChatHandoffFinalized(handoff);
+          return 'success';
+        }
+        clearLivePresentation();
+        showToast('原回合已结束，正在同步消息');
+        return 'reconnect_no_result';
+      }
       if (res.ok && !res.deferredTool && !opts.rewriteId) {
         markChatHandoffFinalized(handoff);
         commitChatPresentationBinding(handoff, res.assistantMessageId, presentationByMessageRef.current);
@@ -1824,9 +1850,9 @@ export function ChatScreen() {
           scrollBottom(true);
         }
       }
-      return res.ok;
+      return res.ok ? 'success' : 'failed';
     },
-    [clearLivePresentation, scrollBottom, showToast, updateLive, pinTranscriptToLatest],
+    [clearLivePresentation, refetchLatest, scrollBottom, showToast, updateLive, pinTranscriptToLatest],
   );
 
   const confirmDeferred = useCallback(async (decision: 'approve' | 'reject') => {
@@ -1840,7 +1866,7 @@ export function ChatScreen() {
     const realityContext = decision === 'approve'
       ? realityPromptProjection.getSnapshot().text
       : undefined;
-    const ok = await runStream(null, {
+    const streamResult = await runStream(null, {
       confirmation: { approvalId, pendingActionId, decision },
       operationKind: 'confirmation',
       operationIdentity: approvalId,
@@ -1849,7 +1875,7 @@ export function ChatScreen() {
     if (decision === 'reject') {
       clearLivePresentation();
       setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });
-    } else if (ok) {
+    } else if (streamResult === 'success') {
       await refetchLatest();
       clearLivePresentation();
       setPendingConfirmation(null);
@@ -1911,10 +1937,10 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    const ok = await runStream(messageId, { realityContext });
+    const streamResult = await runStream(messageId, { realityContext });
     const latest = await refetchLatest();
-    if (ok) bindFinalMessage(latest);
-    clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
+    if (streamResult === 'success') bindFinalMessage(latest);
+    clearLivePresentation(Boolean(streamResult === 'success' && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
     taRef.current?.focus();
   }, [bindFinalMessage, clearLivePresentation, input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
@@ -1944,12 +1970,12 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    const ok = await runStream(messageId, { operationKind: 'choice', realityContext });
+    const streamResult = await runStream(messageId, { operationKind: 'choice', realityContext });
     const latest = await refetchLatest();
-    if (ok) bindFinalMessage(latest);
-    clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
+    if (streamResult === 'success') bindFinalMessage(latest);
+    clearLivePresentation(Boolean(streamResult === 'success' && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
-    return true;
+    return streamResult === 'success';
   }, [bindFinalMessage, clearLivePresentation, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
@@ -1978,13 +2004,13 @@ export function ChatScreen() {
       }
       // Keep old assistant visible until candidate activates.
       // runStream pins latest before live mounts (mutation invariant).
-      const ok = await runStream(prep.userMessageId, {
+      const streamResult = await runStream(prep.userMessageId, {
         rewriteId: prep.rewriteId,
         operationKind: 'regen',
         sourceAssistantId: prep.sourceAssistantId,
       });
       let committed = false;
-      if (ok) {
+      if (streamResult === 'success') {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await regenFinalize(prep.rewriteId);
         committed = Boolean(fin);
@@ -2020,14 +2046,14 @@ export function ChatScreen() {
       // Active transcript stays intact until finalize succeeds.
       // runStream pins latest before live mounts (mutation invariant).
       const sourceAssistantId = findAssistantAfter(msgs, edit.sourceMessageId);
-      const ok = await runStream(null, {
+      const streamResult = await runStream(null, {
         rewriteId: edit.rewriteId,
         operationKind: 'edit',
         sourceAssistantId,
         handoffUserMessageId: edit.sourceMessageId,
       });
       let committed = false;
-      if (ok) {
+      if (streamResult === 'success') {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await editFinalize(edit.rewriteId);
         committed = fin.ok;
