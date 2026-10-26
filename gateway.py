@@ -384,6 +384,19 @@ def _record_daily_stream_cancellation(
     }
     if isinstance(turn_data, dict):
         turn_data['_terminal_contract_diag'] = diagnostic
+        recorder = turn_data.get('_turn_flight_recorder')
+        if isinstance(recorder, TurnFlightRecorder):
+            recorder.record(
+                'turn_cancelled',
+                terminal_reason=diagnostic.get('terminal_reason'),
+                cleanup_action=diagnostic.get('cleanup_action'),
+                provider_event_seen=diagnostic.get('provider_event_seen'),
+                provider_request_id_seen=diagnostic.get('provider_request_id_seen'),
+                stdin_write_started=diagnostic.get('stdin_write_started'),
+                stdin_flushed=diagnostic.get('stdin_flushed'),
+                assistant_persisted=False,
+                mapping_committed=False,
+            )
     return diagnostic
 
 
@@ -398,6 +411,29 @@ def _emit_terminal_contract_diag_once(turn_data):
         return False
     turn_data['_terminal_contract_emitted'] = True
     payload = dict(diagnostic)
+    recorder = turn_data.get('_turn_flight_recorder')
+    if isinstance(recorder, TurnFlightRecorder):
+        snapshot = recorder.terminal(
+            terminal_status='cancelled',
+            terminal_reason=diagnostic.get('terminal_reason'),
+            cleanup_action=diagnostic.get('cleanup_action'),
+            provider_event_seen=diagnostic.get('provider_event_seen'),
+            provider_request_id_seen=diagnostic.get('provider_request_id_seen'),
+            stdin_write_started=diagnostic.get('stdin_write_started'),
+            stdin_flushed=diagnostic.get('stdin_flushed'),
+            assistant_persisted=False,
+            mapping_committed=False,
+        )
+        payload.update({
+            'turn_observation_id': snapshot.get('turn_observation_id'),
+            'terminal_status': snapshot.get('terminal_status'),
+            'stream_count': snapshot.get('stream_count'),
+            'same_turn_collisions': snapshot.get('same_turn_collisions'),
+            'different_turn_collisions': snapshot.get('different_turn_collisions'),
+            'provider_request_count': snapshot.get('provider_request_count'),
+            'last_completed_stage': snapshot.get('last_completed_stage'),
+            'flight_snapshot': snapshot,
+        })
     payload['lock_released'] = True
     logging.getLogger('gateway').warning(
         'chat_terminal_contract %s',
