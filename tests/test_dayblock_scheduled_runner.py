@@ -325,6 +325,18 @@ class ScheduledDayBlockRunnerTests(unittest.TestCase):
         self.assertEqual(replay['error_code'], 'cc_background_exit_1')
         self.assertEqual(replay['error_detail'], receipt['error_detail'])
 
+    def test_failure_persistence_error_reports_its_own_detail(self):
+        from chat.background_generation import BackgroundGenerationError
+
+        def exit_one(*_):
+            raise BackgroundGenerationError('cc_background_exit_1:REAL STDERR')
+        with patch.object(runner, '_finish', side_effect=RuntimeError('disk full')):
+            result = self.run_once(generate=exit_one)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_code'], 'preview_failure_persistence_error')
+        self.assertEqual(result['error_detail'], 'disk full')
+        self.assertNotIn('REAL STDERR', result['error_detail'])
+
     def test_error_detail_is_bounded(self):
         def noisy(*_):
             raise RuntimeError('cc_background_exit_1:' + 'x' * 5000)

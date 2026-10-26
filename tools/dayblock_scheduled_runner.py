@@ -636,8 +636,10 @@ def run_scheduled_dayblock(
                         status='failed', finished_at=dt.datetime.now(UTC),
                         error_code=code, error_detail=detail, actual_executor=observed_executor,
                         usage=observed_usage)
-            except Exception:
+            except Exception as persist_exc:
+                # Report the persistence failure itself, not the provider detail.
                 code = 'preview_failure_persistence_error'
+                detail = str(persist_exc)[:ERROR_DETAIL_MAX_CHARS] or None
             return _result('failed', run_id=run_id, started_at=start, source_day=source_day,
                            model_call_count=provider_call_count, error_code=code, error_detail=detail,
                            job_id=str(job['job_id']), generation_id=generation_id,
