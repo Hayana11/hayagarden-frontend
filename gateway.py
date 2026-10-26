@@ -234,7 +234,13 @@ def _daily_stream_cancellation_state(plan, resident, turn_data=None):
         ),
         'request_id': (
             getattr(plan, 'request_id', None)
+            or data.get('request_id')
             if plan is not None else data.get('request_id')
+        ),
+        'turn_key': (
+            getattr(plan, 'turn_key', None)
+            or data.get('turn_key')
+            if plan is not None else data.get('turn_key')
         ),
         'context_id': getattr(plan, 'context_id', None) if plan is not None else None,
         'context_epoch': getattr(plan, 'context_epoch', None) if plan is not None else None,
