@@ -264,10 +264,7 @@ class TurnFlightRecorder:
             'provider_request_observed',
             dedupe=False,
             fields={
-                'provider_request_count': len(self._provider_request_hashes) or int(any(
-                item.get('stage') == 'provider_started'
-                for item in self._events
-            )),
+                'provider_request_count': len(self._provider_request_hashes),
             },
         )
 
@@ -337,7 +334,10 @@ class TurnFlightRecorder:
             'stream_count': len(streams),
             'same_turn_collisions': same_turn,
             'different_turn_collisions': different_turn,
-            'provider_request_count': len(self._provider_request_hashes),
+            'provider_request_count': len(self._provider_request_hashes) or int(any(
+                item.get('stage') == 'provider_started'
+                for item in self._events
+            )),
             'last_completed_stage': last_completed_stage,
             'next_missing_stage': _NEXT_MISSING_STAGE.get(last_completed_stage),
             'events': copy.deepcopy(self._events),
