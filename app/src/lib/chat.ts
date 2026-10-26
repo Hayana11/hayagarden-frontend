@@ -478,6 +478,7 @@ export interface StreamResult {
   deferredTool?: ChatToolCall;
   assistantMessageId?: number;
   canonicalSha256?: string;
+  sameTurnReconnect?: boolean;
 }
 
 interface SseEvent {
@@ -508,6 +509,7 @@ interface SseEvent {
   selected_model?: string | null;
   assistant_message_id?: number;
   canonical_sha256?: string;
+  same_turn_reconnect?: boolean;
 }
 
 /**
@@ -632,7 +634,11 @@ export async function streamChatReply(
             });
             break;
           case 'notice':
-            handlers.onNotice?.(String(ev.d ?? ''));
+            handlers.onNotice?.(
+              ev.code === 'same_turn_reconnect_wait'
+                ? '已接回原回合，正在等待结果'
+                : String(ev.d ?? ''),
+            );
             break;
           case 'turn_final': {
             const detail = ev.d && typeof ev.d === 'object'
@@ -668,7 +674,13 @@ export async function streamChatReply(
                 runtimeVersion: ev.runtime_version ? String(ev.runtime_version) : null,
                 selectedModel: ev.selected_model ? String(ev.selected_model) : null,
               }
-              : { ok: true, deferredTool, assistantMessageId, canonicalSha256 };
+              : {
+                ok: true,
+                deferredTool,
+                assistantMessageId,
+                canonicalSha256,
+                sameTurnReconnect: ev.same_turn_reconnect === true,
+              };
             break;
           }
           case 'err':
@@ -813,6 +825,7 @@ export async function forceUnlockChatGenLock(): Promise<{ ok: boolean; busy: boo
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'react_chat_force_unlock' }),
     });
     if (!resp.ok) return { ok: false, busy: null };
     const data = (await resp.json()) as { ok?: boolean; lock?: { busy?: boolean | null } };
