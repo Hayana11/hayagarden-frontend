@@ -10,6 +10,10 @@ from unittest import mock
 
 import cc_resident
 import gateway
+from tests.test_turn_flight_recorder import (
+    SameTurnReconnectRouteTests,
+    TurnFlightRecorderTests,
+)
 
 
 class ChatTerminalContractTests(unittest.TestCase):
