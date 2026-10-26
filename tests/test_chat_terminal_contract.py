@@ -2063,6 +2063,7 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             'turn_key': 'turn-outer-cancel',
             'rewrite_id': '',
         }
+        turn_mapping = dict(turn_data)
         stream_calls = []
 
         def fake_events(*_args, **_kwargs):
@@ -2083,8 +2084,14 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 gateway, '_gen_acquire_or_wait', return_value=('own', None),
             ))
+            def record_generation_release(*_args, **_kwargs):
+                recorder = turn_mapping.get('_turn_flight_recorder')
+                if recorder is not None:
+                    recorder.record('generation_lock_released', dedupe=True)
+
             gen_release = stack.enter_context(mock.patch.object(
                 gateway, '_gen_release',
+                side_effect=record_generation_release,
             ))
             stack.enter_context(mock.patch.object(
                 gateway.cc_history_rewrite,
@@ -2092,13 +2099,13 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
                 side_effect=lambda events: events,
             ))
             stack.enter_context(mock.patch.object(
-                moments_turn, 'prepare_turn', return_value=dict(turn_data),
+                moments_turn, 'prepare_turn', return_value=turn_mapping,
             ))
             stack.enter_context(mock.patch.object(
-                moments_turn, 'insert_user_message', return_value=dict(turn_data),
+                moments_turn, 'insert_user_message', return_value=turn_mapping,
             ))
             stack.enter_context(mock.patch.object(
-                moments_turn, 'activate_turn', return_value=dict(turn_data),
+                moments_turn, 'activate_turn', return_value=turn_mapping,
             ))
             stack.enter_context(mock.patch.object(
                 moments_turn, 'release_turn',
@@ -2181,6 +2188,20 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertTrue(abort.call_args.kwargs['respawn'])
         self.assertEqual(1, gen_release.call_count)
         self.assertEqual((None,), gen_release.call_args.args)
+        flight_lines = [
+            line for line in captured.output
+            if 'turn_flight_terminal ' in line
+        ]
+        self.assertEqual(1, len(flight_lines), captured.output)
+        flight_payload = json.loads(
+            flight_lines[0].split('turn_flight_terminal ', 1)[1],
+        )
+        self.assertEqual('stdin_flushed', flight_payload['last_completed_stage'])
+        self.assertEqual('provider_started', flight_payload['next_missing_stage'])
+        self.assertTrue(any(
+            event['event'] == 'generation_lock_released'
+            for event in flight_payload['events']
+        ))
         self.assertEqual(0, partial_persist.call_count)
 
     def test_cancel_after_provider_text_started_reports_partial_rescue(self):
