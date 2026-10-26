@@ -8210,6 +8210,9 @@ def chat_stream():
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
                 )
+                # Keep the observation recorder attached even when a test seam or
+                # adapter returns a fresh turn_data mapping.
+                _turn_data['_turn_flight_recorder'] = _flight_recorder
                 _flight_recorder.bind(
                     user_message_id=_turn_data.get('user_message_id'),
                 )
