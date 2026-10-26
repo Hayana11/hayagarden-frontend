@@ -400,6 +400,29 @@ def _record_daily_stream_cancellation(
     return diagnostic
 
 
+def _emit_turn_flight_terminal_once(recorder):
+    """Write one canonical bounded terminal snapshot to the durable logger."""
+    if not isinstance(recorder, TurnFlightRecorder):
+        return False
+    snapshot = recorder.terminal_snapshot
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    if not recorder.claim_terminal_emission():
+        return False
+    status = str(snapshot.get('terminal_status') or 'unknown')
+    level = (
+        logging.WARNING
+        if status in ('cancelled', 'failed', 'unknown')
+        else logging.INFO
+    )
+    logging.getLogger('gateway').log(
+        level,
+        'turn_flight_terminal %s',
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+    )
+    return True
+
+
 def _emit_terminal_contract_diag_once(turn_data):
     """Emit the existing terminal sink once, including outer-generator unwind."""
     if not isinstance(turn_data, dict):
@@ -434,6 +457,7 @@ def _emit_terminal_contract_diag_once(turn_data):
             'last_completed_stage': snapshot.get('last_completed_stage'),
             'flight_snapshot': snapshot,
         })
+        _emit_turn_flight_terminal_once(recorder)
     payload['lock_released'] = True
     logging.getLogger('gateway').warning(
         'chat_terminal_contract %s',
@@ -1348,16 +1372,47 @@ _gen_cond = threading.Condition()
 _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
+_gen_last_result_identity = None
 _gen_pending_delivery = None
 # Kept for bounded lock-age observation only. Age never proves a zombie.
 _GEN_ZOMBIE_TTL = 320
 _gen_active_recorder = None   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
+_gen_active_identity = None
                         # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
-def _gen_acquire_or_wait(wait_timeout=15, *, flight_recorder=None):
-    """Acquire the existing lock or wait; observation never changes ownership."""
+def _gen_logical_identity(value):
+    """Normalize the minimum identity needed to reuse one logical turn result."""
+    if not isinstance(value, dict):
+        return None
+    user_message_id = value.get('user_message_id')
+    if user_message_id not in (None, ''):
+        return ('user_message_id', str(user_message_id))
+    turn_key = value.get('turn_key')
+    if turn_key not in (None, ''):
+        return ('turn_key', str(turn_key))
+    return None
+
+
+def _gen_recorder_identity(recorder):
+    if recorder is None or not hasattr(recorder, 'logical_identity'):
+        return None
+    try:
+        return _gen_logical_identity(recorder.logical_identity())
+    except Exception:
+        return None
+
+
+def _gen_acquire_or_wait(
+    wait_timeout=15,
+    *,
+    flight_recorder=None,
+    logical_identity=None,
+):
+    """Acquire or reuse only when the owner proves the same logical turn."""
     global _gen_busy, _gen_busy_since, _gen_last_result
-    global _gen_pending_delivery, _gen_active_recorder
+    global _gen_last_result_identity, _gen_pending_delivery
+    global _gen_active_recorder, _gen_active_identity
+    identity = _gen_logical_identity(logical_identity)
     deadline = time.time() + wait_timeout
     wait_recorded = False
     with _gen_cond:
@@ -1366,7 +1421,9 @@ def _gen_acquire_or_wait(wait_timeout=15, *, flight_recorder=None):
                 _gen_busy = True
                 _gen_busy_since = time.time()
                 _gen_last_result = None
+                _gen_last_result_identity = None
                 _gen_active_recorder = flight_recorder
+                _gen_active_identity = identity
                 if flight_recorder is not None:
                     flight_recorder.record(
                         'generation_lock_acquired',
@@ -1386,7 +1443,11 @@ def _gen_acquire_or_wait(wait_timeout=15, *, flight_recorder=None):
             if remaining <= 0:
                 raise RuntimeError('上一轮回复仍在生成中，请稍候再试')
             _gen_cond.wait(timeout=min(remaining, 5))
-            if _gen_last_result is not None:
+            if (
+                _gen_last_result is not None
+                and identity is not None
+                and identity == _gen_last_result_identity
+            ):
                 if flight_recorder is not None:
                     flight_recorder.record(
                         'generation_lock_reused',
@@ -1396,8 +1457,8 @@ def _gen_acquire_or_wait(wait_timeout=15, *, flight_recorder=None):
 
 
 def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
-    global _gen_busy, _gen_last_result, _gen_pending_delivery
-    global _gen_active_recorder
+    global _gen_busy, _gen_last_result, _gen_last_result_identity
+    global _gen_pending_delivery, _gen_active_recorder, _gen_active_identity
     recorder = flight_recorder
     with _gen_cond:
         if (
@@ -1410,9 +1471,11 @@ def _gen_release(result, *, expected_pending_token=None, flight_recorder=None):
         if recorder is None:
             recorder = _gen_active_recorder
         _gen_last_result = result
+        _gen_last_result_identity = _gen_active_identity
         _gen_busy = False
         _gen_pending_delivery = None
         _gen_active_recorder = None
+        _gen_active_identity = None
         _gen_cond.notify_all()
     if recorder is not None:
         recorder.record(
@@ -1455,6 +1518,15 @@ def _find_persisted_assistant_after(user_message_id):
               AND user_ctx.role = 'user'
               AND assistant_ctx.role = 'assistant'
               AND assistant_ctx.message_id > ?
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM daily_message_contexts AS next_user_ctx
+                    WHERE next_user_ctx.context_id = user_ctx.context_id
+                      AND next_user_ctx.context_epoch = user_ctx.context_epoch
+                      AND next_user_ctx.role = 'user'
+                      AND next_user_ctx.message_id > user_ctx.message_id
+                      AND next_user_ctx.message_id < assistant_ctx.message_id
+              )
             ORDER BY assistant_ctx.message_id
             LIMIT 1
             """,
@@ -1506,10 +1578,17 @@ def _stream_same_turn_reconnect_wait(
             )
         except Exception:
             active = None
-        if active is None:
-            # The original turn is terminal but did not produce an assistant.
-            # Keep this a non-error reconnect result; the caller refetches the
-            # authoritative message list and does not resend the user message.
+        active_user_message_id = None
+        if isinstance(active, dict):
+            active_user_message_id = active.get('user_message_id')
+        elif active is not None:
+            try:
+                active_user_message_id = active['user_message_id']
+            except (KeyError, TypeError, IndexError):
+                active_user_message_id = None
+        if active_user_message_id is None or str(active_user_message_id) != str(user_message_id):
+            # The original turn is terminal or another turn now owns the lane.
+            # Never wait through a different user's turn.
             yield _sse_json({
                 't': 'notice',
                 'd': 'same_turn_reconnect_wait',
@@ -1563,9 +1642,6 @@ def chat_cancel():
                 'force_unlock_requested',
                 source=source,
                 lock_age_sec=max(0, int(age)),
-                owner_alive=True,
-                resident_active=True,
-                turn_terminal=False,
                 reason='explicit_force' if force else 'non_force_observation',
             )
         if busy and not force:
