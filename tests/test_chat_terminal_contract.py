@@ -221,7 +221,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         end = source.index('                    return\n                text, thinking = None, None', start)
         wrapper = source[start:end]
         terminal = wrapper.index('if _chat_sse_terminal_kind(_chunk):')
-        release = wrapper.index('_gen_release(None)', terminal)
+        release = wrapper.index('_gen_release(None,', terminal)
         emit = wrapper.index('yield _chunk', terminal)
         self.assertLess(release, emit)
         self.assertIn('break', wrapper[emit:])
