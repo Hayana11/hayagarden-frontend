@@ -1435,8 +1435,8 @@ def _chat_is_generating() -> bool:
     """True while the main chat generation lock is held."""
     with _gen_cond:
         return bool(_gen_busy)
- 
- 
+
+
 def _find_persisted_assistant_after(user_message_id):
     try:
         user_id = int(user_message_id)
