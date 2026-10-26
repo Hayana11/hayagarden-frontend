@@ -3834,6 +3834,24 @@ class ResidentSession:
                                     think_acc.append(chunk)
                                     yield from _downstream_yield(('think', chunk))
                     elif t == 'assistant':
+                        assistant_blocks = (
+                            (d.get('message') or {}).get('content') or []
+                        )
+                        if any(
+                            isinstance(block, dict)
+                            and (
+                                (
+                                    block.get('type') == 'text'
+                                    and block.get('text')
+                                )
+                                or (
+                                    block.get('type') == 'thinking'
+                                    and block.get('thinking')
+                                )
+                            )
+                            for block in assistant_blocks
+                        ):
+                            self._turn_first_text_or_thinking_seen = True
                         if d.get('isApiErrorMessage') is True:
                             provider_error = claimed_terminal['provider_error']
                             break
