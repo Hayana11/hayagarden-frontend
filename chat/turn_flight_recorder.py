@@ -96,6 +96,42 @@ _INT_FIELDS = frozenset({
 })
 
 
+_PROGRESS_STAGES = frozenset({
+    'turn_created',
+    'user_message_persisted',
+    'generation_lock_acquired',
+    'resident_selected',
+    'resident_turn_started',
+    'stdin_begin',
+    'stdin_flushed',
+    'claude_init_seen',
+    'provider_started',
+    'provider_request_observed',
+    'first_output',
+    'provider_terminal',
+    'assistant_persisted',
+    'terminal_mapping_committed',
+    'turn_reconciled',
+    'generation_lock_released',
+})
+
+_NEXT_MISSING_STAGE = {
+    'turn_created': 'user_message_persisted',
+    'user_message_persisted': 'generation_lock_acquired',
+    'generation_lock_acquired': 'resident_selected',
+    'resident_selected': 'resident_turn_started',
+    'resident_turn_started': 'stdin_begin',
+    'stdin_begin': 'stdin_flushed',
+    'stdin_flushed': 'provider_started',
+    'claude_init_seen': 'provider_started',
+    'provider_started': 'first_output',
+    'provider_request_observed': 'first_output',
+    'first_output': 'provider_terminal',
+    'provider_terminal': 'assistant_persisted',
+    'assistant_persisted': 'terminal_mapping_committed',
+}
+
+
 def hash_identity(value: Any) -> str | None:
     """Return a stable hash for a resident/session identity, never the raw value."""
     text = str(value or '').strip()
@@ -279,9 +315,12 @@ class TurnFlightRecorder:
             1 for item in self._events
             if item.get('event') == 'different_turn_lock_collision'
         )
-        provider_started = sum(
-            1 for item in self._events
-            if item.get('event') == 'provider_started'
+        progress_events = [
+            item for item in self._events
+            if item.get('stage') in _PROGRESS_STAGES
+        ]
+        last_completed_stage = (
+            progress_events[-1].get('stage') if progress_events else None
         )
         snapshot: dict[str, Any] = {
             **self._identity,
@@ -295,14 +334,9 @@ class TurnFlightRecorder:
             'stream_count': len(streams),
             'same_turn_collisions': same_turn,
             'different_turn_collisions': different_turn,
-            'provider_request_count': (
-                len(self._provider_request_hashes)
-                if self._provider_request_hashes
-                else provider_started
-            ),
-            'last_completed_stage': (
-                self._events[-1].get('stage') if self._events else None
-            ),
+            'provider_request_count': len(self._provider_request_hashes),
+            'last_completed_stage': last_completed_stage,
+            'next_missing_stage': _NEXT_MISSING_STAGE.get(last_completed_stage),
             'events': copy.deepcopy(self._events),
         }
         for key, value in fields.items():
