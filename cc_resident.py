@@ -1677,6 +1677,11 @@ class ResidentSession:
         self._lock = threading.Lock()
         self._turn_state_lock = threading.Lock()
         self._turn_active = False
+        # Monotonic per-resident turn identity used only to bind lifecycle
+        # diagnostics to the Daily plan that actually started this send.
+        self._turn_sequence = 0
+        self._active_turn_sequence = None
+        self._last_turn_sequence = None
         self._turn_write_started = False
         self._turn_stdin_flushed = False
         self._last_turn_stdin_write_started = False
@@ -2883,10 +2888,15 @@ class ResidentSession:
 
     def send_turn(self, *args, **kwargs):
         """Hold the lifecycle lock for a turn so no spawn can kill it mid-stream."""
+        on_turn_started = kwargs.pop('on_turn_started', None)
+        turn_sequence = None
         with self._lock:
             with self._turn_state_lock:
                 if self._turn_active:
                     raise ResidentError('resident_turn_in_progress')
+                self._turn_sequence += 1
+                turn_sequence = self._turn_sequence
+                self._active_turn_sequence = turn_sequence
                 self._turn_active = True
                 self._turn_write_started = False
                 self._turn_stdin_flushed = False
@@ -2894,6 +2904,12 @@ class ResidentSession:
                 self._turn_provider_request_id_seen = False
                 self._turn_first_text_or_thinking_seen = False
                 self._turn_claude_init_event_seen = False
+            if callable(on_turn_started):
+                try:
+                    on_turn_started(turn_sequence)
+                except Exception:
+                    # Diagnostic provenance must never change the send contract.
+                    pass
             try:
                 yield from self._send_turn_impl(*args, **kwargs)
             except BaseException as exc:
@@ -2968,6 +2984,8 @@ class ResidentSession:
                     self._last_turn_claude_init_event_seen = bool(
                         self._turn_claude_init_event_seen
                     )
+                    self._last_turn_sequence = turn_sequence
+                    self._active_turn_sequence = None
                     self._turn_active = False
                 self._active_terminal_authority = None
 
