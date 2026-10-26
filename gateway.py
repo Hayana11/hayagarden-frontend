@@ -8347,16 +8347,21 @@ def chat_stream():
                             'user_message_id': _turn_data.get('user_message_id'),
                             'turn_key': _turn_data.get('turn_key'),
                         }
-                        active_identity = (
-                            _gen_active_identity
-                            or _gen_recorder_identity(_gen_active_recorder)
+                        active_owner_identity = _gen_active_identity
+                        active_recorder_identity = _gen_recorder_identity(
+                            _gen_active_recorder,
+                        )
+                        requested_logical_identity = _gen_logical_identity(
+                            requested_identity,
                         )
                         if (
                             _same_active
                             and _gen_active_recorder is not None
-                            and active_identity is not None
-                            and active_identity == _gen_logical_identity(
-                                requested_identity,
+                            and requested_logical_identity is not None
+                            and active_recorder_identity == requested_logical_identity
+                            and (
+                                active_owner_identity is None
+                                or active_owner_identity == requested_logical_identity
                             )
                         ):
                             _flight_recorder = _gen_active_recorder
