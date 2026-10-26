@@ -1488,7 +1488,13 @@ def _gen_release(
             # A shared Wake that outlived the stale-lock observation window
             # must not release a newer Chat owner.
             return False
-        if not force:
+        if force:
+            if (
+                expected_owner_token is not None
+                and expected_owner_token != _gen_owner_token
+            ):
+                return False
+        else:
             if (
                 _gen_owner_fence_required
                 and expected_owner_token != _gen_owner_token
@@ -1670,6 +1676,7 @@ def chat_cancel():
         busy = bool(_gen_busy)
         age = time.time() - _gen_busy_since if busy else 0.0
         recorder = _gen_active_recorder
+        target_owner_token = _gen_owner_token
         if recorder is not None:
             recorder.record(
                 'force_unlock_requested',
@@ -1692,10 +1699,23 @@ def chat_cancel():
                 'skipped': True,
                 'age_sec': round(age, 1),
                 'reason': 'age_is_observation_only',
+                'owner_changed': False,
             })
         if not busy:
-            return jsonify({'ok': True, 'skipped': True, 'age_sec': 0})
-    released = _gen_release(None, force=True)
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'age_sec': 0,
+                'owner_changed': False,
+            })
+    released = _gen_release(
+        None,
+        force=True,
+        expected_owner_token=target_owner_token,
+    )
+    owner_changed = bool(
+        target_owner_token is not None and not released
+    )
     if recorder is not None:
         recorder.record(
             'force_unlock_applied',
@@ -1703,9 +1723,13 @@ def chat_cancel():
             lock_age_sec=max(0, int(age)),
             unlock_applied=bool(released),
             unlock_skipped=not bool(released),
-            reason='explicit_force',
+            reason='owner_changed' if owner_changed else 'explicit_force',
         )
-    return jsonify({'ok': True, 'released': bool(released)})
+    return jsonify({
+        'ok': True,
+        'released': bool(released),
+        'owner_changed': owner_changed,
+    })
 
 
 
