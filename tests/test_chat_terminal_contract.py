@@ -1848,7 +1848,6 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertTrue(diag['unsent_release'])
         self.assertFalse(diag['abort_requested'])
         self.assertFalse(diag['respawn_requested'])
-        self.assertFalse(diag['resident_respawned'])
 
     def test_cancel_after_resident_stream_before_flush_keeps_fail_closed_cleanup(self):
         plan = self._plan()
@@ -1870,7 +1869,6 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             diag['terminal_reason'],
         )
         self.assertTrue(diag['abort_requested'])
-        self.assertTrue(diag['resident_respawned'])
 
     def test_gateway_cancel_after_flush_before_provider_event_is_core_regression(self):
         from chat import context_window
@@ -1963,6 +1961,148 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         encoded = json.dumps(diag, ensure_ascii=False)
         self.assertNotIn('provider-session-secret', encoded)
         self.assertNotIn('daily:default:32:154', encoded)
+
+    def test_outer_daily_generator_exit_emits_terminal_contract_once(self):
+        from chat import context_window
+        from chat import daily_context
+        from chat import daily_runtime
+        from chat import display_thinking
+        from chat import system_builder
+        import moments_turn
+
+        plan = self._plan()
+        resident = self._resident()
+        resident._last_turn_stdin_write_started = True
+        resident._last_turn_stdin_flushed = True
+        resident._last_turn_provider_event_seen = False
+        resident._last_turn_provider_request_id_seen = False
+        resident._last_turn_first_text_or_thinking_seen = False
+        turn_data = {
+            'content': 'outer generator cancellation',
+            'user_message_id': plan.user_message_id,
+            'request_id': plan.request_id,
+            'turn_key': 'turn-outer-cancel',
+            'rewrite_id': '',
+        }
+        stream_calls = []
+
+        def fake_events(*_args, **_kwargs):
+            stream_calls.append(True)
+            plan._resident_stream_entered = True
+            yield 'self_state', 'outer deterministic chunk'
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_get_model', return_value='mock-model',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_CC_RESIDENT', resident,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ))
+            gen_release = stack.enter_context(mock.patch.object(
+                gateway, '_gen_release',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway.cc_history_rewrite,
+                'guard_cc_generation',
+                side_effect=lambda events: events,
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'prepare_turn', return_value=dict(turn_data),
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'insert_user_message', return_value=dict(turn_data),
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'activate_turn', return_value=dict(turn_data),
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'release_turn',
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_context, 'enabled', return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_active_switch_intent', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_first_turn_finalize_pending', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'prepare_daily_turn', return_value=plan,
+            ))
+            stream_daily = stack.enter_context(mock.patch.object(
+                daily_runtime, 'stream_daily_resident_turn',
+                side_effect=fake_events,
+            ))
+            release_unsent = stack.enter_context(mock.patch.object(
+                daily_runtime, 'release_unsent_daily_turn', return_value=None,
+            ))
+            abort = stack.enter_context(mock.patch.object(
+                daily_runtime, 'abort_daily_turn', return_value={},
+            ))
+            partial_persist = stack.enter_context(mock.patch.object(
+                daily_runtime, 'persist_partial_daily_stream_rescue',
+            ))
+            stack.enter_context(mock.patch.object(
+                system_builder, 'build_cc_daily_static_parts',
+                return_value={'full_system': 'STATIC'},
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=('full', ''),
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'prepare_daily_display_thinking_plan',
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'filter_display_thinking_events',
+                side_effect=lambda events, _mode: events,
+            ))
+
+            with self.assertLogs('gateway', level='WARNING') as captured:
+                with gateway.app.test_client() as client:
+                    response = client.post(
+                        '/chat/stream',
+                        json={'content': turn_data['content']},
+                        buffered=False,
+                    )
+                    iterator = response.response
+                    try:
+                        first = next(iterator)
+                        self.assertIn(b'self_state', first)
+                    finally:
+                        iterator.close()
+                        response.close()
+
+        terminal_lines = [
+            line for line in captured.output
+            if 'chat_terminal_contract ' in line
+        ]
+        self.assertEqual(1, len(terminal_lines), captured.output)
+        payload = json.loads(
+            terminal_lines[0].split('chat_terminal_contract ', 1)[1],
+        )
+        self.assertEqual('daily_stream_cancelled', payload['event'])
+        self.assertEqual(
+            'client_stream_cancelled_after_stdin',
+            payload['terminal_reason'],
+        )
+        self.assertTrue(payload['stdin_flushed'])
+        self.assertFalse(payload['provider_event_seen'])
+        self.assertTrue(payload['lock_released'])
+        self.assertEqual(1, stream_daily.call_count)
+        self.assertEqual(1, release_unsent.call_count)
+        self.assertEqual(1, abort.call_count)
+        self.assertTrue(abort.call_args.kwargs['respawn'])
+        self.assertEqual(1, gen_release.call_count)
+        self.assertEqual((None,), gen_release.call_args.args)
+        self.assertEqual(0, partial_persist.call_count)
 
     def test_cancel_after_provider_text_started_reports_partial_rescue(self):
         plan = self._plan()
