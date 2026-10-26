@@ -8354,7 +8354,16 @@ def chat_stream():
                         requested_logical_identity = _gen_logical_identity(
                             requested_identity,
                         )
-                        if _gen_active_recorder is not None:
+                        if (
+                            _same_active
+                            and _gen_active_recorder is not None
+                            and requested_logical_identity is not None
+                            and active_recorder_identity == requested_logical_identity
+                            and (
+                                active_owner_identity is None
+                                or active_owner_identity == requested_logical_identity
+                            )
+                        ):
                             _flight_recorder = _gen_active_recorder
                             _turn_data['_turn_flight_recorder'] = _flight_recorder
                         if not _same_active:
