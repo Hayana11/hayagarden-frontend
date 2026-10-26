@@ -2768,6 +2768,11 @@ def _gw_unlock_gen_lock(rounds=4):
             '/chat/cancel',
             {'force': True, 'source': 'repair_unlock_gen'},
         )
+        if isinstance(last, dict) and (
+            last.get('released') is True
+            or last.get('owner_changed') is True
+        ):
+            break
     lock = _gw_gen_lock_status()
     return {'cancel': last, 'lock': lock, 'ok': not lock.get('busy')}
 
