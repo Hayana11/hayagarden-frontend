@@ -458,7 +458,14 @@ def _emit_terminal_contract_diag_once(turn_data):
             'flight_snapshot': snapshot,
         })
         _emit_turn_flight_terminal_once(recorder)
-    payload['lock_released'] = True
+    if any(
+        isinstance(event, dict)
+        and event.get('event') == 'generation_lock_released'
+        for event in (snapshot.get('events') or [])
+    ):
+        payload['lock_released'] = True
+    else:
+        payload.pop('lock_released', None)
     logging.getLogger('gateway').warning(
         'chat_terminal_contract %s',
         json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -1684,6 +1691,24 @@ def chat_cancel():
                 lock_age_sec=max(0, int(age)),
                 reason='explicit_force' if force else 'non_force_observation',
             )
+        if busy and _gen_pending_delivery is not None:
+            if recorder is not None:
+                recorder.record(
+                    'force_unlock_applied',
+                    source=source,
+                    lock_age_sec=max(0, int(age)),
+                    unlock_applied=False,
+                    unlock_skipped=True,
+                    reason='shared_wake_delivery_active',
+                )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'shared_wake': True,
+                'owner_changed': False,
+                'reason': 'shared_wake_delivery_active',
+                'age_sec': round(age, 1),
+            })
         if busy and not force:
             if recorder is not None:
                 recorder.record(
