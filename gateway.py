@@ -9212,14 +9212,13 @@ def chat_stream():
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
             try:
-                if not _same_turn_reconnect:
+                if _owns_logical_turn:
                     release_turn(
                         conversation_id=_conv,
                         memories_db_path=DB_PATH,
                         turn_key=_turn_data.get('turn_key'),
                         persisted=_persisted[0],
                     )
-                if _owns_logical_turn:
                     if assistant_id is not None:
                         _flight_recorder.record(
                             'assistant_persisted',
