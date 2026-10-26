@@ -7413,7 +7413,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
 
         class Resident:
-            session_id = 'sid-1'
+            session_id = 'session-1'
             generation = 1
             process_generation = 1
             _model_identity = 'model:test'
@@ -7469,14 +7469,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
         main_fence = Fence()
         observation_watermark = uh.SharedTranscriptWatermark(
             context_id=7, context_epoch=3, resident_generation=1,
-            resident_key='chat:7:3:1', claude_session_id='sid-1',
-            transcript_path='/tmp/sid-1.jsonl', expected_offset=400,
+            resident_key='chat:7:3:1', claude_session_id='session-1',
+            transcript_path='/tmp/session-1.jsonl', expected_offset=400,
             process_generation=1,
         )
         main_watermark = uh.SharedTranscriptWatermark(
             context_id=7, context_epoch=3, resident_generation=1,
-            resident_key='chat:7:3:1', claude_session_id='sid-1',
-            transcript_path='/tmp/sid-1.jsonl', expected_offset=520,
+            resident_key='chat:7:3:1', claude_session_id='session-1',
+            transcript_path='/tmp/session-1.jsonl', expected_offset=520,
             process_generation=1,
         )
         observation_skip = {
@@ -7654,7 +7654,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(resident.main_turns, 1, (trace_events, main_exceptions))
         self.assertEqual(resident.ensure_calls, 0)
         self.assertEqual(resident.respawn_calls, 0)
-        self.assertEqual(resident.session_id, 'sid-1')
+        self.assertEqual(resident.session_id, 'session-1')
         self.assertEqual(resident.generation, 1)
         self.assertEqual(resident.process_generation, 1)
         self.assertEqual(main_fence.finished, [True])
@@ -7682,7 +7682,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 'context_id': 7,
                 'context_epoch': 3,
                 'resident_generation': 1,
-                'claude_session_id': 'sid-1',
+                'claude_session_id': 'session-1',
                 'transcript_end_offset': 400,
             },
         ):
@@ -7711,7 +7711,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 resident_key=plan.resident_key,
                 provider='claude_code',
                 model_identity='model-1',
-                session_id='sid-1',
+                session_id='session-1',
                 process_generation=1,
                 plan_id='plan:previous',
                 plan_hash='previous-plan-hash',
@@ -7727,7 +7727,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'expected_receipt_revision': 0,
             'provider': 'claude_code',
             'model_identity': 'model-1',
-            'session_id': 'sid-1',
+            'session_id': 'session-1',
             'process_generation': 1,
             'receipt_read_error': None,
         }
@@ -7736,7 +7736,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'context_epoch': 3,
             'resident_generation': 1,
             'chat_id': 'default',
-            'claude_session_id': 'sid-1',
+            'claude_session_id': 'session-1',
             'process_generation': 1,
             'scan_status': 'READY',
             'last_mapped_message_id': registry['last_mapped_message_id'],
@@ -7753,7 +7753,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 'context_id': 7,
                 'context_epoch': 3,
                 'resident_generation': 1,
-                'claude_session_id': 'sid-1',
+                'claude_session_id': 'session-1',
                 'transcript_end_offset': 400,
             },
         ):
@@ -7766,7 +7766,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(plan.hot_decision_reason, '')
         self.assertEqual(resident.generation, 1)
         self.assertEqual(resident.process_generation, 1)
-        self.assertEqual(resident.session_id, 'sid-1')
+        self.assertEqual(resident.session_id, 'session-1')
         self.assertEqual(resident.ensure_calls, 0)
         self.assertEqual(resident.respawn_calls, 0)
 
