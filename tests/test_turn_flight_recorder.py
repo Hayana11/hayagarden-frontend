@@ -1,4 +1,5 @@
 import pathlib
+import sqlite3
 import time
 import unittest
 from contextlib import ExitStack
@@ -259,6 +260,43 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             active_turn=None,
             persisted_assistant=13168,
         )
+
+    def test_persisted_reconnect_requires_same_daily_context_mapping(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY,
+                author TEXT NOT NULL
+            );
+            CREATE TABLE daily_message_contexts (
+                message_id INTEGER PRIMARY KEY,
+                context_id INTEGER NOT NULL,
+                context_epoch INTEGER NOT NULL,
+                role TEXT NOT NULL
+            );
+            INSERT INTO chat_messages(id, author) VALUES
+                (13166, 'hayana'),
+                (13167, 'fyodor'),
+                (13168, 'fyodor'),
+                (13169, 'fyodor');
+            INSERT INTO daily_message_contexts
+                (message_id, context_id, context_epoch, role)
+            VALUES
+                (13166, 32, 30, 'user'),
+                (13168, 32, 30, 'assistant'),
+                (13169, 33, 31, 'assistant');
+            """
+        )
+        try:
+            with mock.patch.object(gateway, 'get_db', return_value=conn):
+                self.assertEqual(
+                    13168,
+                    gateway._find_persisted_assistant_after(13166),
+                )
+        finally:
+            conn.close()
 
     def test_different_turn_collision_keeps_lock_path_distinct(self):
         recorder = TurnFlightRecorder(
