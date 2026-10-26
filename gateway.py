@@ -8821,7 +8821,10 @@ def chat_stream():
                     if _rewrite_id:
                         _discard_staged_resident('staged_rewrite_end')
                     _released[0] = True
-                    _gen_release((text, thinking) if text and not _rewrite_id else None)
+                    _gen_release(
+                        (text, thinking) if text and not _rewrite_id else None,
+                        expected_owner_token=_gen_owner.get('token'),
+                    )
                 if cc_usage or cc_cache_read or cc_cache_create:
                     _usage_evt = {'t': 'usage', 'cache_read': cc_cache_read, 'cache_creation': cc_cache_create}
                     if cc_usage:
@@ -8919,6 +8922,7 @@ def chat_stream():
 
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
+        _gen_owner = {}
         _turn_data: dict = {}
         assistant_id = None
         _request_data = request.get_json(silent=True) or {}
@@ -8962,6 +8966,7 @@ def chat_stream():
                             'user_message_id': _turn_data.get('user_message_id'),
                             'turn_key': _turn_data.get('turn_key'),
                         },
+                        owner_token_out=_gen_owner,
                     )
                     if mode == 'own':
                         break
@@ -8971,6 +8976,7 @@ def chat_stream():
                         'user_message_id': _turn_data.get('user_message_id'),
                         'turn_key': _turn_data.get('turn_key'),
                     },
+                    owner_token_out=_gen_owner,
                 )
                 if mode == 'reused':
                     text, thinking = reused
@@ -9320,7 +9326,10 @@ def chat_stream():
                 if _rewrite_id:
                     _discard_staged_resident('staged_rewrite_end')
                 _released[0] = True
-                _gen_release((text, thinking) if text and not _rewrite_id else None)
+                _gen_release(
+                    (text, thinking) if text and not _rewrite_id else None,
+                    expected_owner_token=_gen_owner.get('token'),
+                )
             if tool_calls_acc and not thinking:
                 _ts = _summarize_traces_sync(tool_calls_acc)
                 if _ts:
