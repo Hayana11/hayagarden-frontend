@@ -5343,8 +5343,8 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 self.assertEqual(member.source_revision, 'anchor-revision')
                 self.assertEqual(member.content_hash, 'anchor-hash')
 
-    def _fake_hot_context_plan(self):
-        context_plan = self._fake_context_plan()
+    def _fake_hot_context_plan(self, member=None):
+        context_plan = self._fake_context_plan(member=member)
         context_plan.ordered_sections = (
             types.SimpleNamespace(
                 kind='invariant_system',
@@ -5364,7 +5364,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
     def _fake_hot_reconcile_plan(self, *, receipt_members=None, receipt_model='model-1'):
         from chat.context_receipt import ContextReceipt
 
-        context_plan = self._fake_hot_context_plan()
+        context_plan = self._fake_hot_context_plan(
+            member=tail_probe['source_member'],
+        )
         plan = types.SimpleNamespace(
             context_id=7,
             context_epoch=3,
