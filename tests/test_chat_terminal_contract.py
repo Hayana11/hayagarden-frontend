@@ -221,9 +221,10 @@ class ChatTerminalContractTests(unittest.TestCase):
         end = source.index('                    return\n                text, thinking = None, None', start)
         wrapper = source[start:end]
         terminal = wrapper.index('if _chat_sse_terminal_kind(_chunk):')
-        release = wrapper.index('_gen_release(None,', terminal)
+        release = wrapper.index('_gen_release(', terminal)
         emit = wrapper.index('yield _chunk', terminal)
         self.assertLess(release, emit)
+        self.assertIn('None', wrapper[release:emit])
         self.assertIn('break', wrapper[emit:])
 
     def test_t7_frontend_consumes_err_as_terminal(self):
