@@ -9552,10 +9552,6 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 t2_hours=t2_hours,
                 t_hours=t_hours,
                 observation_bundle=observation.get('bundle'),
-                observation_transcript_skip=(
-                    dict(observation_skip)
-                    if isinstance(observation_skip, dict) else None
-                ),
                 mode=mode,
                 last_user_at=last_user_at,
                 activity_desc=activity_desc,
