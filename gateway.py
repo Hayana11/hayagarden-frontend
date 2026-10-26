@@ -4968,6 +4968,34 @@ def _build_normal_wake_main_chat_trigger(
     return text
 
 
+def _retire_shared_resident_after_observation_failure(
+    *,
+    observation,
+    window_identity,
+    reason='wake_read_observation_followup_failed',
+) -> bool:
+    """Retire a resident after committed Observation lacks a delivered Wake."""
+    if not (
+        isinstance(observation, dict)
+        and observation.get('status') == 'ok'
+        and observation.get('started') is True
+    ):
+        return False
+    try:
+        from chat.unified_heartbeat_a1 import (
+            retire_shared_resident_after_failed_internal_turn,
+        )
+        return bool(
+            retire_shared_resident_after_failed_internal_turn(
+                window_identity=window_identity,
+                reason=reason,
+            )
+        )
+    except Exception:
+        return False
+   
+
+
 def _run_unified_normal_main_chat_turn(
     *,
     wake_run_id: str,
@@ -4976,6 +5004,7 @@ def _run_unified_normal_main_chat_turn(
     t2_hours: float,
     t_hours: float,
     observation_bundle=None,
+    observation_transcript_skip=None,
     mode: str = 'normal',
     last_user_at=None,
     activity_desc: str = '',
@@ -5036,6 +5065,10 @@ def _run_unified_normal_main_chat_turn(
         'unified_chat_resident': True,
         'unified_main_chat_proactive': True,
     }
+    if isinstance(observation_transcript_skip, dict):
+        result_cache_info['observation_transcript_skip'] = dict(
+            observation_transcript_skip
+        )
     try:
         display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
         ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
@@ -5335,14 +5368,27 @@ def _run_unified_normal_main_chat_turn(
                 wall_at=wake_cache_refresh_candidate[0],
                 monotonic_at=wake_cache_refresh_candidate[1],
             )
+        observation_skip = result_cache_info.get(
+            'observation_transcript_skip'
+        )
         _wake_live_trace(
             trace_id,
             'WATERMARK_COMMIT',
             watermark_committed=True,
             context_id=transcript_skip.get('context_id'),
+            context_epoch=transcript_skip.get('context_epoch'),
             resident_generation=transcript_skip.get('resident_generation'),
-            start_offset=transcript_skip.get('start_offset'),
-            end_offset=transcript_skip.get('end_offset'),
+            observation_skip_start=(
+                observation_skip.get('start_offset')
+                if isinstance(observation_skip, dict) else None
+            ),
+            observation_skip_end=(
+                observation_skip.get('end_offset')
+                if isinstance(observation_skip, dict) else None
+            ),
+            main_skip_start=transcript_skip.get('start_offset'),
+            main_skip_end=transcript_skip.get('end_offset'),
+            registry_scan_offset=transcript_skip.get('end_offset'),
         )
         return {
             'text': text,
@@ -9470,6 +9516,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         from wake.executor import execute as _wake_exec
         main_turn = None
         main_turn_entered = False
+        observation_committed = False
         try:
             observation = collect_wake_read_observation(
                 wake_run_id=wake_run_id,
@@ -9489,6 +9536,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     'wake_run_id': wake_run_id,
                     'detail': str(observation.get('reason') or ''),
                 })
+            observation_committed = (
+                observation.get('status') == 'ok'
+                and observation.get('started') is True
+            )
+            observation_skip = observation.get('watermark_skip')
             last_user_at = (
                 getattr(guard_clock, 'last_user_at', None)
                 if guard_clock.reliable else None
@@ -9501,6 +9553,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 t2_hours=t2_hours,
                 t_hours=t_hours,
                 observation_bundle=observation.get('bundle'),
+                observation_transcript_skip=(
+                    dict(observation_skip)
+                    if isinstance(observation_skip, dict) else None
+                ),
                 mode=mode,
                 last_user_at=last_user_at,
                 activity_desc=activity_desc,
@@ -9516,6 +9572,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'unified_chat_resident': True,
                 'unified_main_chat_proactive': True,
             })
+            if isinstance(observation_skip, dict):
+                main_cache_info['observation_transcript_skip'] = dict(
+                    observation_skip
+                )
             exec_out = _wake_exec(
                 wake_action,
                 str(main_turn.get('thinking') or ''),
@@ -9538,6 +9598,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 settlement_required=False,
             )
         except UnifiedNormalWakeSharedUnavailable as exc:
+            _retire_shared_resident_after_observation_failure(
+                observation=observation,
+                window_identity=_wake_window_identity,
+                reason='normal_wake_shared_unavailable',
+            )
             return jsonify({
                 'ok': True,
                 'skipped': True,
@@ -9546,6 +9611,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'wake_run_id': wake_run_id,
             })
         except UnifiedProactivePreModelFailed as exc:
+            _retire_shared_resident_after_observation_failure(
+                observation=observation,
+                window_identity=_wake_window_identity,
+                reason='normal_wake_pre_model_failed',
+            )
             _wake_live_trace(
                 wake_run_id,
                 'FAILED',
@@ -9561,6 +9631,15 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'wake_run_id': wake_run_id,
             })
         except Exception as exc:
+            if observation_committed and (
+                not isinstance(main_turn, dict)
+                or main_turn.get('_shared_delivery_fence') is None
+            ):
+                _retire_shared_resident_after_observation_failure(
+                    observation=observation,
+                    window_identity=_wake_window_identity,
+                    reason='normal_wake_main_chat_failed',
+                )
             if not main_turn_entered:
                 # Raised while observing, before the trigger was ever sent.
                 app.logger.exception('[normal_wake_main_chat] failed before model: %s', exc)

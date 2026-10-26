@@ -295,6 +295,24 @@ def collect_wake_read_observation(
             db_path=db_path,
             jsonl_finality=jsonl_finality,
         )
+        if not isinstance(skip, dict):
+            raise RuntimeError('wake_read_observation_watermark_skip_invalid')
+        skip = dict(skip)
+        skip.setdefault('context_id', int(watermark.context_id))
+        skip.setdefault('context_epoch', int(watermark.context_epoch))
+        skip.setdefault('resident_generation', int(watermark.resident_generation))
+        trace = getattr(gateway_module, '_wake_live_trace', None)
+        if callable(trace):
+            trace(
+                wake_run_id,
+                'OBSERVATION_WATERMARK_COMMIT',
+                context_id=skip.get('context_id'),
+                context_epoch=skip.get('context_epoch'),
+                resident_generation=skip.get('resident_generation'),
+                observation_skip_start=skip.get('start_offset'),
+                observation_skip_end=skip.get('end_offset'),
+                registry_scan_offset=skip.get('end_offset'),
+            )
         observations = _parse_observation_json(text)
         if not observations:
             observations = _facts_from_tool_events(tool_calls)

@@ -2700,12 +2700,24 @@ def _hot_wake_skip_chain_end(
     *,
     start_offset: int,
 ) -> tuple[Optional[int], int]:
-    """Follow committed Wake transcript skips contiguously from ``start_offset``.
+    """Follow committed internal Wake transcript skips contiguously.
 
-    Returns ``(end_offset, skip_count)``; ``(None, 0)`` when the chain is
-    unreadable or ambiguous.
+    Observation and the formal Wake are separate provider-only rounds. A
+    durable successful Wake row may therefore carry an observation skip
+    followed by a transcript skip; both must be proven as one ordered chain
+    before the native tail is accepted.
     """
     from continuity.store import open_continuity_read_only
+
+    try:
+        context_id = int(plan.context_id)
+        context_epoch = int(plan.context_epoch)
+        resident_generation = int(plan.resident_generation)
+        cursor_start = int(start_offset)
+    except (TypeError, ValueError):
+        return None, 0
+    if cursor_start < 0:
+        return None, 0
 
     try:
         conn = open_continuity_read_only(_production_continuity_store_path(plan))
@@ -2714,41 +2726,83 @@ def _hot_wake_skip_chain_end(
                 'SELECT cache_info FROM wake_log '
                 'WHERE context_id=? AND context_epoch=? AND resident_generation=? '
                 'ORDER BY id ASC',
-                (
-                    int(plan.context_id), int(plan.context_epoch),
-                    int(plan.resident_generation),
-                ),
+                (context_id, context_epoch, resident_generation),
             ).fetchall()
         finally:
             conn.close()
     except (OSError, ValueError, sqlite3.Error):
         return None, 0
 
-    by_start: dict[int, list[int]] = {}
+    def strict_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    segments: list[tuple[int, int]] = []
     for row in rows:
         try:
             cache = json.loads(str(row[0] or ''))
         except (TypeError, ValueError):
             continue
-        skip = cache.get('transcript_skip') if isinstance(cache, dict) else None
-        if not isinstance(skip, dict) or skip.get('skipped_provider_round') is not True:
+        if not isinstance(cache, dict):
             continue
-        try:
-            if (
-                int(skip.get('context_id')) != int(plan.context_id)
-                or int(skip.get('resident_generation'))
-                    != int(plan.resident_generation)
-            ):
+
+        observation_present = 'observation_transcript_skip' in cache
+        main_present = 'transcript_skip' in cache
+        if observation_present and not main_present:
+            return None, 0
+
+        row_segments: list[tuple[int, int]] = []
+        for field, requires_epoch in (
+            ('observation_transcript_skip', True),
+            ('transcript_skip', False),
+        ):
+            if field not in cache:
                 continue
-            start = int(skip.get('start_offset'))
-            end = int(skip.get('end_offset'))
-        except (TypeError, ValueError):
+            skip = cache.get(field)
+            if not isinstance(skip, dict):
+                return None, 0
+            if skip.get('skipped_provider_round') is not True:
+                return None, 0
+            skip_context_id = strict_int(skip.get('context_id'))
+            skip_epoch = strict_int(skip.get('context_epoch'))
+            skip_generation = strict_int(skip.get('resident_generation'))
+            start = strict_int(skip.get('start_offset'))
+            end = strict_int(skip.get('end_offset'))
+            if (
+                skip_context_id != context_id
+                or skip_generation != resident_generation
+                or (requires_epoch and skip_epoch != context_epoch)
+                or (
+                    not requires_epoch
+                    and skip_epoch is not None
+                    and skip_epoch != context_epoch
+                )
+                or start is None
+                or end is None
+                or start < 0
+                or end <= start
+            ):
+                return None, 0
+            row_segments.append((start, end))
+
+        if len(row_segments) == 2 and row_segments[0][1] != row_segments[1][0]:
+            return None, 0
+        if not row_segments:
             continue
-        if start < int(start_offset) or end <= start:
+        row_start = row_segments[0][0]
+        row_end = row_segments[-1][1]
+        if row_end <= cursor_start:
             continue
+        if row_start < cursor_start:
+            return None, 0
+        segments.extend(row_segments)
+
+    by_start: dict[int, list[int]] = {}
+    for start, end in segments:
         by_start.setdefault(start, []).append(end)
 
-    cursor = int(start_offset)
+    cursor = cursor_start
     count = 0
     while cursor in by_start:
         ends = set(by_start.pop(cursor))
