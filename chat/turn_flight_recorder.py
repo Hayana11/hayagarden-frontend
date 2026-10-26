@@ -131,6 +131,8 @@ class TurnFlightRecorder:
         self._events: list[dict[str, Any]] = []
         self._dedupe_keys: set[tuple[str, str]] = set()
         self._terminal_snapshot: dict[str, Any] | None = None
+        self._provider_request_hashes: set[str] = set()
+        self._terminal_emitted = False
         self._bind_locked(
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
@@ -168,6 +170,19 @@ class TurnFlightRecorder:
         with self._lock:
             self._bind_locked(**fields)
 
+    def logical_identity(self) -> dict[str, Any]:
+        """Return the logical-turn identity without exposing provider details."""
+        with self._lock:
+            return {
+                key: self._identity[key]
+                for key in ('user_message_id', 'turn_key')
+                if self._identity.get(key) not in (None, '')
+            }
+
+    def set_stream_role(self, stream_role: str) -> None:
+        with self._lock:
+            self.stream_role = str(stream_role or self.stream_role)
+
     def _event_envelope_locked(
         self,
         stage: str,
@@ -199,6 +214,24 @@ class TurnFlightRecorder:
                 envelope[key] = normalized
         return envelope
 
+    def _record_provider_request_locked(
+        self,
+        request_identity: Any,
+    ) -> dict[str, Any] | None:
+        """Count one new provider request without retaining its raw ID."""
+        request_hash = hash_identity(request_identity)
+        if not request_hash or request_hash in self._provider_request_hashes:
+            return None
+        self._provider_request_hashes.add(request_hash)
+        return self._event_envelope_locked(
+            'provider_request_observed',
+            'provider_request_observed',
+            dedupe=False,
+            fields={
+                'provider_request_count': len(self._provider_request_hashes),
+            },
+        )
+
     def record(
         self,
         stage: str,
@@ -209,6 +242,13 @@ class TurnFlightRecorder:
     ) -> dict[str, Any] | None:
         """Append a bounded event; never makes a lifecycle decision."""
         with self._lock:
+            if stage == 'provider_request_observed':
+                return_value = self._record_provider_request_locked(
+                    fields.pop('_request_identity', None),
+                )
+                if return_value is not None:
+                    self._events.append(return_value)
+                return copy.deepcopy(return_value)
             envelope = self._event_envelope_locked(
                 stage,
                 str(event or stage),
@@ -255,7 +295,11 @@ class TurnFlightRecorder:
             'stream_count': len(streams),
             'same_turn_collisions': same_turn,
             'different_turn_collisions': different_turn,
-            'provider_request_count': provider_started,
+            'provider_request_count': (
+                len(self._provider_request_hashes)
+                if self._provider_request_hashes
+                else provider_started
+            ),
             'last_completed_stage': (
                 self._events[-1].get('stage') if self._events else None
             ),
@@ -286,6 +330,14 @@ class TurnFlightRecorder:
                 **fields,
             )
             return copy.deepcopy(self._terminal_snapshot)
+
+    def claim_terminal_emission(self) -> bool:
+        """Claim the durable terminal sink exactly once for this turn."""
+        with self._lock:
+            if self._terminal_emitted:
+                return False
+            self._terminal_emitted = True
+            return True
 
     @property
     def terminal_snapshot(self) -> dict[str, Any] | None:
