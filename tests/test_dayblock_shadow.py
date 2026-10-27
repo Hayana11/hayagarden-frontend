@@ -429,8 +429,9 @@ class DayBlockShadowTests(unittest.TestCase):
 
     def test_cli_has_no_independent_provider_or_model_selector_and_calls_no_model(self):
         import importlib.util
+        # Load the CLI from this checkout so the contract runs in CI too.
         spec = importlib.util.spec_from_file_location(
-            "dayblock_cli", "/opt/frontend-preview/tools/dayblock_canary.py")
+            "dayblock_cli", TEST_ROOT / "tools" / "dayblock_canary.py")
         cli = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cli)
         options = {option for action in cli.build_parser()._actions for option in action.option_strings}
