@@ -97,7 +97,8 @@ def scheduled_source_day(now: dt.datetime) -> str:
     return (local.date() - dt.timedelta(days=1)).isoformat()
 
 
-def _is_in_day(value: Any, day: str) -> bool:
+def _day_position(value: Any, day: str) -> int:
+    """-1 before the natural day, 0 inside it, 1 after it."""
     raw = str(value or "").strip()
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
@@ -106,7 +107,47 @@ def _is_in_day(value: Any, day: str) -> bool:
     source_day = dt.date.fromisoformat(day)
     start = dt.datetime.combine(source_day, dt.time.min, tzinfo=TZ)
     end = dt.datetime.combine(source_day + dt.timedelta(days=1), dt.time.min, tzinfo=TZ)
-    return start <= timestamp < end
+    if timestamp < start:
+        return -1
+    return 0 if timestamp < end else 1
+
+
+def _is_in_day(value: Any, day: str) -> bool:
+    return _day_position(value, day) == 0
+
+
+def _turn_start_attributed_ids(
+    scope_rows: list[dict[str, Any]],
+    positions: dict[int, int],
+) -> tuple[set[int], set[int]]:
+    """Attribute each paired turn to the day its user message started.
+
+    Pairing reuses the canonical completed-turn derivation (the same rule
+    continuity seals by) plus DayBlock's partial-rescue visible pairs, over the
+    whole scope. Returns (assistant ids after the day to include, assistant ids
+    inside the day to exclude because their turn started before it). Unpaired
+    rows are left alone, so they still fail closed.
+    """
+    from continuity.sources import derive_completed_turns
+
+    pairs: list[tuple[int, int]] = []
+    covered: set[int] = set()
+    for turn in derive_completed_turns(scope_rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID):
+        parts = str(turn.turn_id).split(":")
+        if len(parts) == 3:
+            pairs.append((int(parts[1]), int(parts[2])))
+            covered.update(pairs[-1])
+    for user_row, assistant_row in _dayblock_visible_turn_pairs(tuple(scope_rows), set(covered)):
+        pairs.append((int(user_row.get("id") or 0), int(assistant_row.get("id") or 0)))
+    include: set[int] = set()
+    exclude: set[int] = set()
+    for user_id, assistant_id in pairs:
+        user_at, assistant_at = positions.get(user_id), positions.get(assistant_id)
+        if user_at == 0 and assistant_at == 1:
+            include.add(assistant_id)
+        elif user_at == -1 and assistant_at == 0:
+            exclude.add(assistant_id)
+    return include, exclude
 
 
 def open_source_read_only(path: str | Path) -> sqlite3.Connection:
@@ -149,21 +190,32 @@ def discover_natural_day_rows(source_db: str | Path, source_day: str) -> tuple[d
 
         rows_by_id: dict[int, dict[str, Any]] = {}
         for context_id, context_epoch in sorted(scopes):
+            scope_rows: list[dict[str, Any]] = []
+            row_positions: list[int] = []
             for source_row in read_canonical_scope_rows(
                 conn, context_id=context_id, context_epoch=context_epoch,
             ):
                 row = dict(source_row)
                 try:
-                    in_day = _is_in_day(row.get("created_at"), day)
+                    row_positions.append(_day_position(row.get("created_at"), day))
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise RuntimeError("source_timestamp_invalid") from exc
-                if not in_day:
-                    continue
-                message_id = int(row.get("id") or 0)
-                if not message_id:
-                    raise RuntimeError("source_row_identity_invalid")
                 row["_dayblock_context_id"] = context_id
                 row["_dayblock_context_epoch"] = context_epoch
+                scope_rows.append(row)
+            # A turn belongs to the day its user message started, even when the
+            # reply lands after midnight; continuity seals by the same rule.
+            include, exclude = _turn_start_attributed_ids(scope_rows, {
+                int(row.get("id") or 0): position
+                for row, position in zip(scope_rows, row_positions)
+                if int(row.get("id") or 0)
+            })
+            for row, position in zip(scope_rows, row_positions):
+                message_id = int(row.get("id") or 0)
+                if message_id in exclude or not (position == 0 or message_id in include):
+                    continue
+                if not message_id:
+                    raise RuntimeError("source_row_identity_invalid")
                 previous = rows_by_id.get(message_id)
                 if previous is not None and _canonical(previous) != _canonical(row):
                     raise RuntimeError("source_scope_row_conflict")

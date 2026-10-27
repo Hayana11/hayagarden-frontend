@@ -833,5 +833,135 @@ class ResentImageEvidenceTests(unittest.TestCase):
         )
 
 
+class CrossMidnightTurnTests(unittest.TestCase):
+    """A turn belongs to the day its user message started (continuity's rule)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="dayblock-midnight-")
+        self.source_db = Path(self.temp.name) / "source.db"
+        make_source_db(self.source_db)
+        conn = sqlite3.connect(self.source_db)
+        conn.execute("DELETE FROM chat_messages")
+        conn.execute("DELETE FROM daily_message_contexts")
+        conn.execute("DELETE FROM wake_log")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def insert(self, *rows):
+        conn = sqlite3.connect(self.source_db)
+        conn.executemany("INSERT INTO chat_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.executemany("INSERT INTO daily_message_contexts VALUES(?,?,?)",
+                         [(int(row[0]), 31, 9) for row in rows])
+        conn.commit()
+        conn.close()
+
+    def day(self, source_day):
+        rows = dbs.discover_natural_day_rows(self.source_db, source_day)
+        _snapshot, turns, _events, members = dbs.derive_source_contract(
+            rows, source_day, "2026-10-21T03:00:00+08:00",
+        )
+        return rows, turns, members
+
+    def base(self):
+        # Mirrors production 12596 (10-19 23:59:33) -> 12597 (10-20 00:01:18).
+        self.insert(
+            _chat_row(1, "hayana", "afternoon", "2026-10-19 10:00:00"),
+            _chat_row(2, "fyodor", "afternoon reply", "2026-10-19 10:01:00"),
+            _chat_row(3, "hayana", "just before midnight", "2026-10-19 23:59:33"),
+            _chat_row(4, "fyodor", "reply after midnight", "2026-10-20 00:01:18"),
+            _chat_row(5, "hayana", "next morning", "2026-10-20 09:00:00"),
+            _chat_row(6, "fyodor", "morning reply", "2026-10-20 09:01:00"),
+        )
+
+    def test_cross_midnight_turn_belongs_to_its_start_day(self):
+        self.base()
+        rows, turns, members = self.day("2026-10-19")
+        self.assertEqual([int(row["id"]) for row in rows], [1, 2, 3, 4])
+        self.assertIn("turn:3:4", [turn.turn_id for turn in turns])
+        self.assertNotIn("incomplete_user:3", [m.source_ref for m in members])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+        materialized = dbs.materialize_raw_evidence(members, rows)
+        self.assertIn("reply after midnight", materialized.body)
+
+    def test_next_day_no_longer_blocks_on_previous_days_reply(self):
+        self.base()
+        rows, turns, members = self.day("2026-10-20")
+        self.assertEqual([int(row["id"]) for row in rows], [5, 6])
+        self.assertEqual([turn.turn_id for turn in turns], ["turn:5:6"])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+
+    def test_dayblock_member_days_match_continuity_sealing(self):
+        from continuity.sealing import _member_day
+        self.base()
+        for source_day in ("2026-10-19", "2026-10-20"):
+            _rows, _turns, members = self.day(source_day)
+            window = [m for m in members if m.source_kind in {"completed_turn", "autonomous_event"}]
+            self.assertTrue(window)
+            self.assertEqual({_member_day(m) for m in window}, {source_day})
+
+    def test_reply_persisted_after_the_run_is_excluded_from_next_day(self):
+        self.insert(
+            _chat_row(3, "hayana", "just before midnight", "2026-10-19 23:59:33"),
+        )
+        rows, _turns, members = self.day("2026-10-19")
+        self.assertIn("incomplete_user:3", [m.source_ref for m in members])
+        # The reply lands after 10-19 was already planned.
+        self.insert(
+            _chat_row(4, "fyodor", "late reply", "2026-10-20 03:30:00"),
+            _chat_row(5, "hayana", "next morning", "2026-10-20 09:00:00"),
+            _chat_row(6, "fyodor", "morning reply", "2026-10-20 09:01:00"),
+        )
+        rows, _turns, members = self.day("2026-10-20")
+        self.assertEqual([int(row["id"]) for row in rows], [5, 6])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+
+    def test_unpaired_head_assistant_still_fails_closed(self):
+        # Two assistants after one user is not a completed turn, so the
+        # post-midnight assistant has no owner and must stay uncovered.
+        self.insert(
+            _chat_row(3, "hayana", "just before midnight", "2026-10-19 23:59:00"),
+            _chat_row(4, "fyodor", "first reply", "2026-10-19 23:59:30"),
+            _chat_row(7, "fyodor", "second reply", "2026-10-20 00:00:10"),
+        )
+        rows, _turns, members = self.day("2026-10-20")
+        self.assertEqual([int(row["id"]) for row in rows], [7])
+        self.assertEqual(
+            [int(row["id"]) for row in dbs.uncovered_formal_source_rows(rows, members)], [7],
+        )
+
+    def test_cross_midnight_partial_rescue_pair_follows_its_user(self):
+        partial = json.dumps(
+            {"partial_rescue": True, "turn_incomplete": True, "stream_interrupted": True},
+            sort_keys=True,
+        )
+        self.insert(
+            _chat_row(3, "hayana", "just before midnight", "2026-10-19 23:59:33"),
+            _chat_row(4, "fyodor", "partial after midnight", "2026-10-20 00:01:18",
+                      cache_info=partial),
+            _chat_row(5, "hayana", "next morning", "2026-10-20 09:00:00"),
+            _chat_row(6, "fyodor", "morning reply", "2026-10-20 09:01:00"),
+        )
+        rows, _turns, members = self.day("2026-10-19")
+        self.assertEqual([int(row["id"]) for row in rows], [3, 4])
+        self.assertIn("dayblock_visible_turn:3:4", [m.source_ref for m in members])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+        rows, _turns, members = self.day("2026-10-20")
+        self.assertEqual([int(row["id"]) for row in rows], [5, 6])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+
+    def test_days_without_cross_midnight_turns_keep_the_same_rows(self):
+        self.insert(
+            _chat_row(1, "hayana", "afternoon", "2026-10-19 10:00:00"),
+            _chat_row(2, "fyodor", "afternoon reply", "2026-10-19 10:01:00"),
+            _chat_row(5, "hayana", "next morning", "2026-10-20 00:30:00"),
+            _chat_row(6, "fyodor", "morning reply", "2026-10-20 00:31:00"),
+        )
+        self.assertEqual([int(r["id"]) for r in self.day("2026-10-19")[0]], [1, 2])
+        self.assertEqual([int(r["id"]) for r in self.day("2026-10-20")[0]], [5, 6])
+
+
 if __name__ == "__main__":
     unittest.main()
