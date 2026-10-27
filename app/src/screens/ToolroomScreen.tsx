@@ -1394,8 +1394,8 @@ export function ToolroomScreen() {
                           <div className="toolroom-mcp-power">
                             <span>
                               {group.lifecycle_state === 'CONNECTED'
-                                ? '已连接：每次唤醒都会一起启动'
-                                : '已断开：不随唤醒启动，需要时再连接'}
+                                ? '已连接：新会话进程启动时加载'
+                                : '已断开：启动时不加载，需要时再连接'}
                             </span>
                             <button
                               type="button"
