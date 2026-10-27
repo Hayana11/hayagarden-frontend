@@ -304,8 +304,13 @@ def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
+    include_external: bool = True,
 ) -> dict[str, Any]:
-    """Strict UH-A0 config with the existing servers and one local external adapter."""
+    """Strict UH-A0 config with the existing servers and one local external adapter.
+
+    The external adapter is a stdio process started on every CLI spawn; callers
+    leave it out when no external tool is visible, since it would expose nothing.
+    """
     root = Path(__file__).resolve().parent.parent
     servers = {
         "home": {
@@ -342,6 +347,8 @@ def build_uh_a0_mcp_config(
             },
         },
     }
+    if not include_external:
+        del servers["external"]
     if legacy_mcp_config_path is not None:
         servers["brain"] = _load_native_brain_server(legacy_mcp_config_path)
     return {"mcpServers": servers}
@@ -351,12 +358,14 @@ def write_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
+    include_external: bool = True,
 ) -> str:
     root = Path(cwd)
     out = root / UH_A0_MCP_CONFIG_FILENAME
     payload = build_uh_a0_mcp_config(
         legacy_mcp_config_path=legacy_mcp_config_path,
         env=env,
+        include_external=include_external,
     )
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(out)
@@ -630,9 +639,11 @@ def build_uh_a0_spawn_plan(
     else:
         home_loading_mode = "preload_fallback"
 
+    include_external = bool(external_tools)
     mcp_config = build_uh_a0_mcp_config(
         legacy_mcp_config_path=legacy_mcp_config_path,
         env=env,
+        include_external=include_external,
     )
     target_cwd = Path(cwd or (Path(legacy_mcp_config_path).parent if legacy_mcp_config_path else Path.cwd()))
     mcp_path = ""
@@ -641,6 +652,7 @@ def build_uh_a0_spawn_plan(
             target_cwd,
             legacy_mcp_config_path=legacy_mcp_config_path,
             env=env,
+            include_external=include_external,
         )
     else:
         existing_mcp = target_cwd / UH_A0_MCP_CONFIG_FILENAME

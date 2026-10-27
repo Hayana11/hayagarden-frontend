@@ -1017,6 +1017,39 @@ export function ToolroomScreen() {
     }
   }, [externalMcpChecking, loadInventory]);
 
+  const disconnectExternalMcp = useCallback(async (groupId: string) => {
+    const serverId = externalMcpServerId(groupId);
+    if (!serverId || externalMcpChecking[serverId]) return;
+    setExternalMcpChecking((current) => ({ ...current, [serverId]: true }));
+    try {
+      const result = await http.post<{
+        ok: boolean;
+        status?: string;
+        reason_code?: string | null;
+      }>(`/api/external-mcp/servers/${encodeURIComponent(serverId)}/disconnect`);
+      if (result.ok && result.status === 'DISCONNECTED') {
+        setExternalMcpCheckErrors((current) => {
+          const next = { ...current };
+          delete next[serverId];
+          return next;
+        });
+      } else {
+        const reasonCode = safeReasonCode(result.reason_code) || 'DISCONNECT_FAILED';
+        setExternalMcpCheckErrors((current) => ({ ...current, [serverId]: reasonCode }));
+      }
+    } catch (error) {
+      const payload = (error as { payload?: unknown }).payload;
+      const payloadRecord = payload && typeof payload === 'object'
+        ? payload as { reason_code?: unknown }
+        : null;
+      const reasonCode = safeReasonCode(payloadRecord?.reason_code) || 'DISCONNECT_FAILED';
+      setExternalMcpCheckErrors((current) => ({ ...current, [serverId]: reasonCode }));
+    } finally {
+      setExternalMcpChecking((current) => ({ ...current, [serverId]: false }));
+      void loadInventory(false);
+    }
+  }, [externalMcpChecking, loadInventory]);
+
   const openPromptEditor = (tool: InventoryTool) => {
     setPromptEditorTool(tool.tool_name);
     setPromptDraft(promptTextForTool(tool, companionHints, promptOverrides));
@@ -1348,7 +1381,7 @@ export function ToolroomScreen() {
                           </button>
                           {checkError ? (
                             <small className="toolroom-mcp-check-error" role="status">
-                              检查失败 · {checkError}
+                              操作失败 · {checkError}
                             </small>
                           ) : null}
                         </div>
@@ -1357,6 +1390,24 @@ export function ToolroomScreen() {
 
                     {open ? (
                       <div className="toolroom-tool-list">
+                        {serverId ? (
+                          <div className="toolroom-mcp-power">
+                            <span>
+                              {group.lifecycle_state === 'CONNECTED'
+                                ? '已连接：每次唤醒都会一起启动'
+                                : '已断开：不随唤醒启动，需要时再连接'}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={checking}
+                              onClick={() => void (group.lifecycle_state === 'CONNECTED'
+                                ? disconnectExternalMcp(group.id)
+                                : checkExternalMcp(group.id))}
+                            >
+                              {checking ? '处理中…' : group.lifecycle_state === 'CONNECTED' ? '断开' : '连接'}
+                            </button>
+                          </div>
+                        ) : null}
                         {group.tools.map((tool) => {
                           const toolOpen = Boolean(openTools[tool.tool_name]);
                           return (

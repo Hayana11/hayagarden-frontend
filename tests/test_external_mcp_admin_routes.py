@@ -399,6 +399,44 @@ class ExternalMcpAdminRouteTests(unittest.TestCase):
                 self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
         self.assertEqual(self.graph.server_registry.list(), ())
 
+    def test_disconnect_parks_server_without_discovery_and_check_reconnects(self):
+        self.graph.runtime.tools = [{"name": "echo"}]
+        self.post(self.payload())
+        before = self.graph.server_registry.get("srv-test")
+        self.assertEqual(before.lifecycle_state, "CONNECTED")
+        calls = list(self.graph.runtime.discover_calls)
+
+        response = self.client.post("/api/external-mcp/servers/srv-test/disconnect")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True, "connected": False, "status": "DISCONNECTED"})
+        self.assertEqual(self.graph.runtime.discover_calls, calls)
+        self.assertEqual(self.graph.server_registry.get("srv-test").lifecycle_state, "DISCONNECTED")
+
+        again = self.client.post("/api/external-mcp/servers/srv-test/disconnect")
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.get_json()["status"], "DISCONNECTED")
+
+        listed = self.client.get("/api/external-mcp/servers").get_json()
+        self.assertEqual(listed["servers"][0]["lifecycle_state"], "DISCONNECTED")
+        self.assertEqual(listed["servers"][0]["present_tool_count"], 1)
+
+        reconnect = self.client.post("/api/external-mcp/servers/srv-test/check")
+        self.assertEqual(reconnect.status_code, 200)
+        self.assertEqual(reconnect.get_json()["status"], "CONNECTED")
+
+    def test_disconnect_unknown_server_is_safe_error(self):
+        response = self.client.post("/api/external-mcp/servers/missing/disconnect")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["reason_code"], "UNKNOWN_SERVER")
+
+    def test_disconnect_is_owner_only(self):
+        self.post(self.payload())
+        routes.require_owner = lambda request: (_ for _ in ()).throw(OwnerAuthError("unauthorized", 401))
+        response = self.client.post("/api/external-mcp/servers/srv-test/disconnect")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+        self.assertEqual(self.graph.server_registry.get("srv-test").lifecycle_state, "CONNECTED")
+
     def test_list_is_metadata_only_and_reports_present_tools(self):
         self.graph.runtime.tools = [{"name": "echo"}]
         self.post(self.payload(scheme="bearer", credential="synthetic-list-secret"))
