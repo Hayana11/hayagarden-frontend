@@ -7791,6 +7791,11 @@ def _stream_cc_daily_soft_window(
                 provider='claude_code',
                 model=_get_model() or '',
             )
+            # The Daily runtime records resident/stdin/provider lifecycle stages
+            # from the plan. Keep the one logical turn recorder attached across
+            # the Gateway -> Daily boundary; in-place reprepare preserves this
+            # dynamic attribute on the original plan object.
+            _prepared['plan']._turn_flight_recorder = _turn_data.get('_turn_flight_recorder')
 
         try:
             yield from _call_with_sse_keepalive(_prepare_static_and_plan)
