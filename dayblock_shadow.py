@@ -1045,9 +1045,15 @@ CREATE TRIGGER IF NOT EXISTS dayblock_job_authority_immutable
  persona_revision,prompt_policy_version,prompt_hash,prompt_contract_json
  ON dayblock_shadow_jobs
  BEGIN SELECT RAISE(ABORT,'immutable DayBlock frozen job provenance'); END;
-CREATE TABLE IF NOT EXISTS dayblock_generation_receipts(
- generation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, generation_job_id TEXT NOT NULL UNIQUE,
- candidate_id TEXT NOT NULL, source_day TEXT NOT NULL UNIQUE, source_hash TEXT NOT NULL,
+"""
+
+# Receipt rows are generation attempts. A job may have several attempts
+# (manual retry/reconciliation), so neither source_day nor generation_job_id is
+# unique; one_live_per_day keeps at most one processing/ready attempt per day.
+RECEIPT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS {table}(
+ generation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, generation_job_id TEXT NOT NULL,
+ candidate_id TEXT NOT NULL, source_day TEXT NOT NULL, source_hash TEXT NOT NULL,
  source_revision TEXT NOT NULL, source_fingerprint TEXT NOT NULL,
  provider TEXT NOT NULL, model_identity TEXT NOT NULL, authority_revision TEXT NOT NULL,
  authority_snapshot_id TEXT NOT NULL, persona_revision TEXT NOT NULL,
@@ -1056,16 +1062,28 @@ CREATE TABLE IF NOT EXISTS dayblock_generation_receipts(
  source_member_count INTEGER NOT NULL, source_coverage REAL NOT NULL,
  raw_token_estimate INTEGER NOT NULL, budget_tokens INTEGER NOT NULL,
  input_token_estimate INTEGER NOT NULL, output_token_estimate INTEGER NOT NULL DEFAULT 0,
- actual_executor TEXT, usage_json TEXT NOT NULL DEFAULT '{}', summary_body TEXT, body_hash TEXT,
+ actual_executor TEXT, usage_json TEXT NOT NULL DEFAULT '{{}}', summary_body TEXT, body_hash TEXT,
  status TEXT NOT NULL CHECK(status IN ('processing','ready','failed','stale')),
  error_code TEXT, error_detail TEXT, created_at TEXT NOT NULL, finished_at TEXT,
- FOREIGN KEY(generation_job_id) REFERENCES dayblock_shadow_jobs(job_id));
+ attempt_no INTEGER NOT NULL DEFAULT 1 CHECK(attempt_no >= 1),
+ attempt_kind TEXT NOT NULL DEFAULT 'scheduled'
+   CHECK(attempt_kind IN ('scheduled','retry','reconciliation')),
+ attempt_reason TEXT,
+ CHECK(attempt_kind = 'scheduled' OR length(trim(coalesce(attempt_reason, ''))) > 0),
+ UNIQUE(generation_job_id, attempt_no),
+ FOREIGN KEY(generation_job_id) REFERENCES dayblock_shadow_jobs(job_id))
+"""
+
+RECEIPT_CONTRACT_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS dayblock_receipt_one_live_per_day
+ ON dayblock_generation_receipts(source_day) WHERE status IN ('processing','ready');
 CREATE TRIGGER IF NOT EXISTS dayblock_receipt_provenance_immutable
  BEFORE UPDATE OF generation_id,run_id,generation_job_id,candidate_id,source_day,source_hash,
  source_revision,source_fingerprint,provider,model_identity,authority_revision,
  authority_snapshot_id,persona_revision,prompt_policy_version,prompt_hash,
  generator_policy_version,input_mode,source_member_count,source_coverage,
- raw_token_estimate,budget_tokens,input_token_estimate,created_at
+ raw_token_estimate,budget_tokens,input_token_estimate,created_at,
+ attempt_no,attempt_kind,attempt_reason
  ON dayblock_generation_receipts
  BEGIN SELECT RAISE(ABORT,'immutable DayBlock generation receipt provenance'); END;
 CREATE TRIGGER IF NOT EXISTS dayblock_ready_receipt_no_update
@@ -1074,7 +1092,6 @@ CREATE TRIGGER IF NOT EXISTS dayblock_ready_receipt_no_update
 CREATE TRIGGER IF NOT EXISTS dayblock_receipt_no_delete
  BEFORE DELETE ON dayblock_generation_receipts
  BEGIN SELECT RAISE(ABORT,'immutable DayBlock generation receipt'); END;
-
 """
 
 
@@ -1120,22 +1137,63 @@ def open_preview_store(path: str | Path = PREVIEW_DB) -> sqlite3.Connection:
         ("persona_captured_at", "TEXT"),
         ("raw_budget_tokens", "INTEGER"),
         ("input_plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("persona_text", "TEXT"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE dayblock_shadow_jobs ADD COLUMN {name} {definition}")
+    conn.execute(RECEIPT_TABLE_SQL.format(table="dayblock_generation_receipts"))
     receipt_columns = {row[1] for row in conn.execute("PRAGMA table_info(dayblock_generation_receipts)")}
     if "error_detail" not in receipt_columns:
         conn.execute("ALTER TABLE dayblock_generation_receipts ADD COLUMN error_detail TEXT")
+    conn.commit()
+    if "attempt_no" not in receipt_columns:
+        _migrate_receipts_to_attempts(conn)
+    conn.executescript(RECEIPT_CONTRACT_SQL)
     conn.execute("DROP TRIGGER IF EXISTS dayblock_job_authority_immutable")
     conn.execute("""CREATE TRIGGER dayblock_job_authority_immutable
         BEFORE UPDATE OF candidate_id,snapshot_id,source_hash,source_revision,policy_version,
           generator_policy_version,provider,model_identity,authority_revision,authority_snapshot_id,
-          captured_at,persona_revision,persona_captured_at,prompt_policy_version,prompt_hash,
-          prompt_contract_json,representation_plan,raw_budget_tokens,input_plan_json
+          captured_at,persona_revision,persona_captured_at,persona_text,prompt_policy_version,
+          prompt_hash,prompt_contract_json,representation_plan,raw_budget_tokens,input_plan_json
         ON dayblock_shadow_jobs
         BEGIN SELECT RAISE(ABORT,'immutable DayBlock frozen job provenance'); END""")
     conn.commit()
     return conn
+
+
+def _migrate_receipts_to_attempts(conn: sqlite3.Connection) -> None:
+    """Rebuild the single-receipt-per-day table into the attempt table, row for row.
+
+    SQLite cannot drop the old source_day / generation_job_id UNIQUE constraints,
+    so the table is copied. Every existing column value is preserved; old rows
+    become attempt 1 of kind 'scheduled'. Triggers are recreated afterwards.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        old_columns = [row[1] for row in conn.execute("PRAGMA table_info(dayblock_generation_receipts)")]
+        if "attempt_no" in old_columns:
+            conn.rollback()
+            return
+        conn.execute("DROP TABLE IF EXISTS dayblock_generation_receipts_r2")
+        conn.execute(RECEIPT_TABLE_SQL.format(table="dayblock_generation_receipts_r2"))
+        new_columns = {row[1] for row in conn.execute("PRAGMA table_info(dayblock_generation_receipts_r2)")}
+        copied = ",".join(name for name in old_columns if name in new_columns)
+        if len(copied.split(",")) != len(old_columns):
+            raise RuntimeError("receipt_migration_column_mismatch")
+        conn.execute(
+            f"INSERT INTO dayblock_generation_receipts_r2({copied}) "
+            f"SELECT {copied} FROM dayblock_generation_receipts ORDER BY rowid"
+        )
+        before = conn.execute("SELECT count(*) FROM dayblock_generation_receipts").fetchone()[0]
+        after = conn.execute("SELECT count(*) FROM dayblock_generation_receipts_r2").fetchone()[0]
+        if before != after:
+            raise RuntimeError("receipt_migration_row_count_mismatch")
+        conn.execute("DROP TABLE dayblock_generation_receipts")
+        conn.execute("ALTER TABLE dayblock_generation_receipts_r2 RENAME TO dayblock_generation_receipts")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def authority_for_retry(frozen: dict[str, str], current: dict[str, str]) -> dict[str, str]:
@@ -1172,6 +1230,7 @@ def persist_shadow_job(
     *,
     persona_revision: str | None = None,
     persona_captured_at: str | None = None,
+    persona_text: str | None = None,
     input_plan: dict[str, Any] | None = None,
     extra_blockers: tuple[str, ...] = (),
     frozen_authority: AuthorityObservation | None = None,
@@ -1279,7 +1338,8 @@ def persist_shadow_job(
                 "authority_revision,authority_snapshot_id,captured_at,persona_revision,"
                 "prompt_policy_version,prompt_hash,prompt_contract_json,representation_plan,status,"
                 "blocking_reasons_json,created_at,uncovered_formal_row_count,persona_captured_at,"
-                "raw_budget_tokens,input_plan_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "raw_budget_tokens,input_plan_json,persona_text) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job, candidate, snapshot.snapshot_id, IDENTITY_ID, CHAT_ID, snapshot.local_day,
                  snapshot.source_hash, source_revision, DAYBLOCK_POLICY_VERSION,
                  GENERATOR_POLICY_VERSION, authority.provider, authority.model_identity,
@@ -1288,7 +1348,9 @@ def persist_shadow_job(
                  PROMPT_CONTRACT_JSON, representation, status,
                  _canonical(list(dict.fromkeys(blockers))), created_at,
                  int(uncovered_formal_row_count), persona_captured_at,
-                 raw_budget_tokens, _canonical(plan)),
+                 raw_budget_tokens, _canonical(plan),
+                 # Frozen with the revision so an exact retry can rebuild the prompt.
+                 persona_text if persona_revision else None),
             )
             replay = False
         conn.commit()
@@ -1446,6 +1508,7 @@ def build_shadow_plan(
             model_budget, len(uncovered),
             persona_revision=persona["revision"] if persona else None,
             persona_captured_at=(persona_captured_at or created_at) if persona else None,
+            persona_text=persona["text"] if persona else None,
             input_plan=input_plan, extra_blockers=tuple(extra_blockers),
             frozen_authority=authority, frozen_authority_captured_at=authority_captured_at,
         )
