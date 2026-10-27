@@ -388,6 +388,81 @@ class DayBlockAttemptTests(unittest.TestCase):
         finally:
             store.close()
 
+    def _claim_view(self, receipt):
+        return {
+            'materialized_source_fingerprint': receipt['source_fingerprint'],
+            'generation_input_mode': receipt['input_mode'],
+            'source_member_count': receipt['source_member_count'],
+            'source_coverage': receipt['source_coverage'],
+            'raw_token_estimate': receipt['raw_token_estimate'],
+            'input_budget_tokens': receipt['budget_tokens'],
+            'generation_input_token_estimate': receipt['input_token_estimate'],
+        }
+
+    def test_claim_treats_only_unique_collisions_as_a_lost_race(self):
+        self.scheduled(self.fail_with('cc_background_spawn_failed'))
+        first = self.receipts()[0]
+        conn = self.db()
+        try:  # another claim already holds the day's live attempt
+            conn.execute(
+                f'INSERT INTO dayblock_generation_receipts({LEGACY_COLUMNS},attempt_no,attempt_kind,attempt_reason) '
+                f"SELECT 'gen-live',run_id,generation_job_id,candidate_id,source_day,source_hash,"
+                f'source_revision,source_fingerprint,provider,model_identity,authority_revision,'
+                f'authority_snapshot_id,persona_revision,prompt_policy_version,prompt_hash,'
+                f'generator_policy_version,input_mode,source_member_count,source_coverage,'
+                f'raw_token_estimate,budget_tokens,input_token_estimate,0,NULL,"{{}}",NULL,NULL,'
+                f"'processing',NULL,NULL,created_at,NULL,2,'retry','winner' "
+                f'FROM dayblock_generation_receipts WHERE generation_id=?', (first['generation_id'],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class MissesLiveCheck:
+            """Hide the pre-insert live check so the insert itself loses the race."""
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                if sql.lstrip().startswith('SELECT 1') and "('processing','ready')" in sql:
+                    return types.SimpleNamespace(fetchone=lambda: None)
+                return self._conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        store = shadow.open_preview_store(self.preview_db)
+        try:
+            job = store.execute('SELECT * FROM dayblock_shadow_jobs').fetchone()
+            self.assertFalse(runner._claim(
+                MissesLiveCheck(store), job['job_id'], DAY, 'gen-loser', 'run',
+                self._claim_view(first), job, dt.datetime.now(dt.timezone.utc),
+                attempt_kind='retry', attempt_reason='loser', expected_job_status='failed',
+            ))
+        finally:
+            store.close()
+        self.assertEqual([row['generation_id'] for row in self.receipts()],
+                         [first['generation_id'], 'gen-live'])
+
+    def test_claim_surfaces_non_unique_integrity_errors(self):
+        self.scheduled(self.fail_with('cc_background_spawn_failed'))
+        first = self.receipts()[0]
+        store = shadow.open_preview_store(self.preview_db)
+        try:
+            job = store.execute('SELECT * FROM dayblock_shadow_jobs').fetchone()
+            # A manual attempt without a reason violates the CHECK constraint:
+            # a bug, not a lost race, so it must not be replayed as one.
+            with self.assertRaisesRegex(sqlite3.IntegrityError, 'CHECK constraint failed'):
+                runner._claim(
+                    store, job['job_id'], DAY, 'gen-check', 'run', self._claim_view(first), job,
+                    dt.datetime.now(dt.timezone.utc), attempt_kind='retry', attempt_reason=None,
+                    expected_job_status='failed',
+                )
+            self.assertFalse(store.in_transaction)
+        finally:
+            store.close()
+        self.assertEqual(len(self.receipts()), 1)
+
     # --- reading -------------------------------------------------------------
 
     def test_page_and_replay_read_ready_else_latest_attempt(self):

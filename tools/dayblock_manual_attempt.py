@@ -8,7 +8,8 @@ reconciliation the day's source projection changed (for example after a bug fix)
                a new job is planned under the day's frozen 03:00 authority.
 
 Ready days are final. A reason is required and is stored on the attempt.
-Without --execute this is a dry run that makes no model call and writes no attempt.
+Without --execute this is a dry run: it creates no job or attempt and makes no
+model call, but opening the store may still apply the receipt schema migration.
 
 Usage:
   python3 tools/dayblock_manual_attempt.py --day 2026-10-20 --reason "..." [--execute]

@@ -176,6 +176,13 @@ def _block_planned_job(conn: sqlite3.Connection, job_id: str, reason: str) -> No
         raise
 
 
+def _is_unique_violation(exc: sqlite3.IntegrityError) -> bool:
+    name = str(getattr(exc, 'sqlite_errorname', '') or '')
+    if name:
+        return name in {'SQLITE_CONSTRAINT_UNIQUE', 'SQLITE_CONSTRAINT_PRIMARYKEY'}
+    return str(exc).startswith('UNIQUE constraint failed')
+
+
 def _claim(conn: sqlite3.Connection, job_id: str, source_day: str, generation_id: str,
            run_id: str, planned: dict[str, Any], job: sqlite3.Row, started_at: dt.datetime, *,
            attempt_kind: str = 'scheduled', attempt_reason: str | None = None,
@@ -223,10 +230,14 @@ def _claim(conn: sqlite3.Connection, job_id: str, source_day: str, generation_id
         )
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
-        # Lost a race on the one-live-attempt-per-day index or the attempt number.
+    except sqlite3.IntegrityError as exc:
         conn.rollback()
-        return False
+        # Only a uniqueness collision (one live attempt per day, attempt number,
+        # generation id) means another claim won; CHECK / NOT NULL / FK errors
+        # are bugs and stay visible.
+        if _is_unique_violation(exc):
+            return False
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -906,7 +917,11 @@ def run_manual_attempt(
     persona_capture: Callable[[], dict[str, Any]] | None = None,
     generate_fn: Callable[[Any, Any], Any] | None = None,
 ) -> dict[str, Any]:
-    """Manually retry or reconcile one non-ready day; a dry run writes no attempt."""
+    """Manually retry or reconcile one non-ready day.
+
+    A dry run creates no job or attempt and makes no model call; opening the
+    store may still apply the receipt schema migration.
+    """
     start = started_at or dt.datetime.now(UTC)
     start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
     run_id = str(uuid.uuid4())
