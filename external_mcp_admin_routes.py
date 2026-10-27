@@ -161,6 +161,23 @@ def create_external_mcp_admin_blueprint(
         except Exception:
             return jsonify({"ok": False, "reason_code": "EXTERNAL_MCP_ADMIN_FAILED"}), 503
 
+    @bp.post("/api/external-mcp/servers/<server_id>/disconnect")
+    def disconnect_server(server_id: str):
+        # Parks a server without discovery; its tools leave the next spawn's
+        # surface, and the check route reconnects it.
+        denied = owner_error()
+        if denied is not None: return denied
+        try:
+            with graph_factory() as graph:
+                current = graph.server_registry.get(server_id)
+                if current.lifecycle_state != DISCONNECTED_STATE:
+                    current = graph.server_registry.mark_disconnected(server_id, expected_revision=current.revision)
+                return jsonify({"ok": True, "connected": False, "status": current.lifecycle_state})
+        except (RegistryError, ValueError) as exc:
+            return _safe_error(_error_code(exc, "INVALID_SERVER"))
+        except Exception:
+            return jsonify({"ok": False, "reason_code": "EXTERNAL_MCP_ADMIN_FAILED"}), 503
+
     return bp
 
 

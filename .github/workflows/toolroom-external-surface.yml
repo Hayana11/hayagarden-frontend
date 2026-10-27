@@ -10,6 +10,8 @@ on:
       - "tools/cc_capability_adapter.py"
       - "tools/execution_fence.py"
       - "tools/tool_inventory.py"
+      - "external_mcp_admin_routes.py"
+      - "tests/test_external_mcp_admin_routes.py"
       - "app/src/screens/ToolroomScreen.tsx"
       - ".github/workflows/toolroom-external-surface.yml"
 
@@ -31,10 +33,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Python focused-test dependency
-        run: python -m pip install cryptography
+      - name: Install Python focused-test dependencies
+        run: python -m pip install cryptography flask
       - name: Run canonical external surface tests
-        run: python -m unittest tests.test_external_mcp_surface tests.test_tool_inventory -v
+        run: python -m unittest tests.test_external_mcp_surface tests.test_tool_inventory tests.test_external_mcp_admin_routes.ExternalMcpAdminRouteTests -v
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

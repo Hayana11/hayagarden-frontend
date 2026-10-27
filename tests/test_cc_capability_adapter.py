@@ -247,6 +247,49 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
 
+    def _external_item(self):
+        return {
+            "surface_tool_name": "ext_game_roll",
+            "control_id": "ext:srv:roll",
+            "fingerprint": "f" * 64,
+            "source_registry_revision": 2,
+        }
+
+    def test_external_adapter_spawns_only_with_visible_external_tools(self):
+        with mock.patch(
+            "tools.cc_capability_adapter._external_surface_catalog",
+            return_value=([], ()),
+        ):
+            hidden = build_uh_a0_spawn_plan(cwd=self._tmp.name, env={})
+        self.assertNotIn("external", hidden["mcp_config"]["mcpServers"])
+        written = json.loads(Path(hidden["mcp_config_path"]).read_text(encoding="utf-8"))
+        self.assertNotIn("external", written["mcpServers"])
+        self.assertEqual(hidden["external_mcp_tools"], ())
+
+        item = self._external_item()
+        with mock.patch(
+            "tools.cc_capability_adapter._external_surface_catalog",
+            return_value=([{"server_id": "srv"}], (item,)),
+        ):
+            shown = build_uh_a0_spawn_plan(cwd=self._tmp.name, env={})
+        self.assertIn("external", shown["mcp_config"]["mcpServers"])
+        written = json.loads(Path(shown["mcp_config_path"]).read_text(encoding="utf-8"))
+        self.assertIn("external", written["mcpServers"])
+        self.assertIn("mcp__external__ext_game_roll", shown["surface_allowlist"])
+        # Connecting a server changes the fingerprint, so a live resident
+        # respawns and picks up the adapter.
+        self.assertNotEqual(
+            hidden["physical_surface_fingerprint"],
+            shown["physical_surface_fingerprint"],
+        )
+
+    def test_build_mcp_config_can_omit_external_only(self):
+        full = build_uh_a0_mcp_config(env={})
+        lean = build_uh_a0_mcp_config(env={}, include_external=False)
+        self.assertEqual(set(full["mcpServers"]) - set(lean["mcpServers"]), {"external"})
+        for name, entry in lean["mcpServers"].items():
+            self.assertEqual(entry, full["mcpServers"][name])
+
     def test_c_capability_proxy_servers_share_resident_lease_path(self):
         lease_path = str(Path(self._tmp.name) / ".uh-a0-current-turn-lease.json")
         cfg = build_uh_a0_mcp_config(env={"UH_A0_TURN_LEASE_PATH": lease_path})
@@ -517,9 +560,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+            # No external server is connected in this fixture, so the stdio
+            # external adapter stays out of the spawn config.
             self.assertEqual(
                 set(cfg["mcpServers"]),
-                {"home", "internal", "capability", "external", "brain"},
+                {"home", "internal", "capability", "brain"},
             )
 
             # tool_profile mismatch is detected by the existing decision helper
