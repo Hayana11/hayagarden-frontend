@@ -2073,7 +2073,12 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             plan._resident_stream_entered = True
             plan._current_user_stdin_write_started = True
             plan._current_user_stdin_flushed = True
-            recorder = turn_mapping.get('_turn_flight_recorder')
+            recorder = getattr(plan, '_turn_flight_recorder', None)
+            self.assertIs(
+                recorder,
+                turn_mapping.get('_turn_flight_recorder'),
+                'Gateway must attach the logical turn recorder to the DailyTurnPlan',
+            )
             for event in (
                 'generation_lock_acquired',
                 'resident_selected',
