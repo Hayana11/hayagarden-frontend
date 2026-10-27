@@ -328,10 +328,17 @@ _DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 def _day_entry(conn: sqlite3.Connection, day: str, *, with_body: bool) -> dict[str, Any] | None:
-    """One page-facing DayBlock state for ``day`` (receipt first, else latest job)."""
+    """One page-facing DayBlock state for ``day``.
+
+    A day may hold several generation attempts. The page shows its single ready
+    attempt; otherwise the latest attempt; with no attempt, the latest job.
+    """
     receipt = conn.execute(
         'SELECT r.*, j.snapshot_id AS job_snapshot_id FROM dayblock_generation_receipts r '
-        'JOIN dayblock_shadow_jobs j ON j.job_id = r.generation_job_id WHERE r.source_day=?',
+        'JOIN dayblock_shadow_jobs j ON j.job_id = r.generation_job_id WHERE r.source_day=? '
+        # rowid follows insertion order and exists before and after the attempt
+        # migration, so a read-only page works against an unmigrated store too.
+        "ORDER BY r.status = 'ready' DESC, r.created_at DESC, r.rowid DESC LIMIT 1",
         (day,),
     ).fetchone()
     job = conn.execute(
