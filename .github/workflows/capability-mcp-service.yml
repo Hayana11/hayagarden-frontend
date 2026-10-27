@@ -1,0 +1,66 @@
+name: Capability MCP service
+
+on:
+  pull_request:
+    paths:
+      - "capability-proxy-mcp-server.js"
+      - "deploy/systemd/capability-mcp.service"
+      - "scripts/activate-capability-mcp.sh"
+      - "scripts/check-capability-mcp-readiness.mjs"
+      - "tools/cc_capability_adapter.py"
+      - "tests/test-capability-mcp-http.mjs"
+      - "tests/test_capability_mcp_service.py"
+      - ".github/workflows/capability-mcp-service.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  capability-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HAYAGARDEN_CONFIG_DB_PATH: /tmp/capability-mcp-runtime.db
+      # Synthetic CI-only token; production reads its own from /opt/frontend/.env.
+      UH_A0_CAPABILITY_MCP_TOKEN: ci-capability-token-0123456789abcdef
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Shell syntax
+        run: bash -n scripts/activate-capability-mcp.sh
+      - name: Service contract and adapter transport
+        run: python -m unittest tests.test_capability_mcp_service tests.test_cc_capability_adapter -v
+      - name: Resident HTTP mode
+        run: node tests/test-capability-mcp-http.mjs
+      - name: Readiness against a live local instance
+        run: |
+          set -euo pipefail
+          CAPABILITY_MCP_PORT=3102 node capability-proxy-mcp-server.js > /tmp/capability-mcp.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid"' EXIT
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if node scripts/check-capability-mcp-readiness.mjs; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/capability-mcp.log
+          exit 1
+      - name: Existing stdio proxy behavior
+        run: |
+          set -euo pipefail
+          node tests/test-gallery-capability.mjs
+          node tests/test-home-light-status-capability.mjs
+          node tests/test-uh-a0-remove-generic-ask.mjs
+          node tests/test-m3-03b-ledger-capability.mjs
+          node tests/test-m3-03c-ledger-budget-capability.mjs
