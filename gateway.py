@@ -7704,6 +7704,8 @@ def _stream_cc_daily_soft_window(
     think_acc: list[str] = []
     assistant_persisted = False
     cc_tool_calls = []
+    _client_detached = False
+    _record_daily_cancel = _record_daily_stream_cancellation
 
     def _rescue_and_abort(error_code, *, respawn=True):
         nonlocal assistant_persisted, turn_terminal
@@ -7836,32 +7838,50 @@ def _stream_cc_daily_soft_window(
         # prompt that carries it has really been sent.
         _recall_pending = dict(getattr(_daily_plan, 'memory_recall', None) or {})
         _recall_shown = None
-        for evt, payload in filter_display_thinking_events(
-            _daily_events,
-            lambda: _resident_display_thinking_mode(_display_thinking_mode),
-        ):
+        _daily_done_seen = False
+
+        def _handle_daily_event(evt, payload):
+            nonlocal _recall_shown
+            nonlocal deferred_payload, cache_refresh_candidate
+            nonlocal cc_usage, text, thinking, unexpected_save
+            nonlocal _daily_done_seen, turn_terminal
             heartbeat_sse = _daily_heartbeat_sse(evt)
             if heartbeat_sse is not None:
                 yield heartbeat_sse
-                continue
+                return
             if _recall_pending.get('items') and _recall_shown is None:
-                _recall_shown = {'count': len(_recall_pending['items']), 'items': _recall_pending['items']}
-                yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': _recall_shown}, ensure_ascii=False) + SSE_END
+                _recall_shown = {
+                    'count': len(_recall_pending['items']),
+                    'items': _recall_pending['items'],
+                }
+                yield 'data: ' + json.dumps({
+                    't': 'memory_recall',
+                    'd': _recall_shown,
+                }, ensure_ascii=False) + SSE_END
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 display_segments.append_text(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'text', 'd': payload,
+                }) + SSE_END
             elif evt == 'think':
                 think_acc.append(str(payload or ''))
                 display_segments.append_thinking(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'think', 'd': payload,
+                }) + SSE_END
             elif evt == 'self_state':
                 display_segments.append_self_state(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'self_state', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'self_state', 'd': payload,
+                }) + SSE_END
             elif evt == 'tool_use':
                 cc_tool_calls.append({
-                    'id': payload.get('id'), 'name': payload.get('name'),
-                    'args': payload.get('args'), 'result': '', 'success': True,
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': payload.get('args'),
+                    'result': '',
+                    'success': True,
                 })
                 display_segments.append_tool(len(cc_tool_calls) - 1)
                 event_data = {
@@ -7872,7 +7892,11 @@ def _stream_cc_daily_soft_window(
                 if payload.get('deferred_tool_use'):
                     deferred_payload = dict(payload)
                     event_data.update({
-                        'tool_input': copy.deepcopy(payload.get('tool_input') or payload.get('args') or {}),
+                        'tool_input': copy.deepcopy(
+                            payload.get('tool_input')
+                            or payload.get('args')
+                            or {}
+                        ),
                         'approval_id': payload.get('approval_id'),
                         'deferred_tool_use': True,
                         'status': payload.get('status'),
@@ -7887,11 +7911,12 @@ def _stream_cc_daily_soft_window(
                     _daily_rt._release_lease(_daily_plan)
                     turn_terminal = True
                     yield _sse_json({'t': 'done', 'ok': True})
-                    return
             elif evt == 'tool_result':
                 _ti = next(
-                    (i for i in range(len(cc_tool_calls) - 1, -1, -1)
-                     if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+                    (
+                        i for i in range(len(cc_tool_calls) - 1, -1, -1)
+                        if cc_tool_calls[i].get('id') == payload.get('tool_use_id')
+                    ),
                     len(cc_tool_calls) - 1,
                 )
                 if _ti >= 0:
@@ -7900,7 +7925,9 @@ def _stream_cc_daily_soft_window(
                     _slim = {
                         **cc_tool_calls[_ti],
                         'args': _slim_args(cc_tool_calls[_ti].get('args')),
-                        'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+                        'result': str(
+                            cc_tool_calls[_ti].get('result') or ''
+                        )[:2000],
                     }
                     yield 'data: ' + json.dumps({
                         't': 'tool_result',
@@ -7908,7 +7935,12 @@ def _stream_cc_daily_soft_window(
                         'idx': _ti,
                     }, ensure_ascii=False) + SSE_END
             elif evt == 'done':
-                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                _daily_done_seen = True
+                if (
+                    isinstance(payload, tuple)
+                    and len(payload) >= 3
+                    and isinstance(payload[2], dict)
+                ):
                     raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
                     cache_refresh_candidate = (
                         getattr(cc_usage, '_candidate_cache_refresh_at', None),
@@ -7921,6 +7953,72 @@ def _stream_cc_daily_soft_window(
                         'cache_creation': cc_cache_create,
                     }
                 text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
+
+        _filtered_daily_events = filter_display_thinking_events(
+            _daily_events,
+            lambda: _resident_display_thinking_mode(_display_thinking_mode),
+        )
+        def _finish_detached_without_terminal():
+            nonlocal turn_terminal
+            state = _daily_stream_cancellation_state(
+                _daily_plan, _CC_RESIDENT, _turn_data,
+            )
+            if not state.get('provider_event_seen'):
+                released = _daily_rt.release_unsent_daily_turn(
+                    _daily_plan,
+                    error_code='client_stream_cancelled_unsent',
+                )
+                if released is not None:
+                    turn_terminal = True
+                    _record_daily_cancel(
+                        _turn_data,
+                        state,
+                        cleanup_action='unsent_release',
+                        unsent_release=True,
+                    )
+                    return
+            cleanup = _rescue_and_abort(
+                'client_stream_cancelled',
+                respawn=True,
+            )
+            _record_daily_cancel(
+                _turn_data,
+                state,
+                cleanup_action='detach_drain_abort',
+                partial_rescue_performed=bool(
+                    cleanup.get('partial_rescue_performed')
+                ),
+                abort_requested=True,
+                respawn_requested=True,
+            )
+
+        try:
+            for evt, payload in _filtered_daily_events:
+                yield from _handle_daily_event(evt, payload)
+                if deferred_payload is not None:
+                    return
+        except GeneratorExit:
+            # A client-side EOF must not abort a Daily turn after provider start.
+            # Continue the same resident iterator without a second stdin write,
+            # generation owner, or logical turn.
+            _client_detached = True
+            try:
+                for evt, payload in _filtered_daily_events:
+                    for _discarded in _handle_daily_event(evt, payload):
+                        pass
+                    if deferred_payload is not None:
+                        break
+            except GeneratorExit:
+                _finish_detached_without_terminal()
+                return
+            except Exception:
+                _finish_detached_without_terminal()
+                return
+            if turn_terminal:
+                return
+            if not _daily_done_seen:
+                _finish_detached_without_terminal()
+                return
 
         if deferred_payload is not None:
             return
@@ -7943,15 +8041,34 @@ def _stream_cc_daily_soft_window(
         cc_usage['transcript_identity'] = canonical.transcript_identity
 
         if not str(text or '').strip():
-            _daily_rt.handle_provider_failure(
-                _daily_plan,
-                error_code='empty_provider_response',
-                resident=_CC_RESIDENT,
-            )
+            if _client_detached:
+                cleanup = _rescue_and_abort(
+                    'empty_provider_response',
+                    respawn=True,
+                )
+                _record_daily_cancel(
+                    _turn_data,
+                    _daily_stream_cancellation_state(
+                        _daily_plan, _CC_RESIDENT, _turn_data,
+                    ),
+                    cleanup_action='abort_daily_turn',
+                    partial_rescue_performed=bool(
+                        cleanup.get('partial_rescue_performed')
+                    ),
+                    abort_requested=True,
+                    respawn_requested=True,
+                )
+            else:
+                _daily_rt.handle_provider_failure(
+                    _daily_plan,
+                    error_code='empty_provider_response',
+                    resident=_CC_RESIDENT,
+                )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': 'empty provider response', 'retryable': False,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': 'empty provider response', 'retryable': False,
+                }) + SSE_END
             return
 
         _cache_info_json = (
@@ -7979,6 +8096,11 @@ def _stream_cc_daily_soft_window(
                 display_segments=canonical.display_segments,
             )
             assistant_persisted = True
+            if _client_detached:
+                _turn_data['_daily_detached_persisted'] = True
+                _turn_data['_daily_detached_assistant_id'] = assistant_id
+                _turn_data['_daily_detached_content'] = canonical.content
+                _turn_data['_daily_detached_thinking'] = canonical.thinking
         except _daily_ctx.ConflictError as exc:
             _daily_rt.abort_daily_turn(
                 _daily_plan,
@@ -7987,9 +8109,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
+                }) + SSE_END
             return
         except Exception as exc:
             _daily_rt.abort_daily_turn(
@@ -7998,9 +8121,10 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
+                }) + SSE_END
             return
 
         if _recall_shown:
@@ -8029,13 +8153,14 @@ def _stream_cc_daily_soft_window(
                 json.dumps(exc.manifest, ensure_ascii=False),
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err',
-                'd': 'cursor CAS conflict after assistant persist',
-                'retryable': False,
-                'code': 'cursor_cas_conflict',
-                'assistant_message_id': exc.assistant_message_id,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err',
+                    'd': 'cursor CAS conflict after assistant persist',
+                    'retryable': False,
+                    'code': 'cursor_cas_conflict',
+                    'assistant_message_id': exc.assistant_message_id,
+                }) + SSE_END
             return
 
         if (
@@ -8080,19 +8205,20 @@ def _stream_cc_daily_soft_window(
                 assistant_id,
                 _daily_plan.request_id,
             )
-            yield 'data: ' + json.dumps({
-                't': 'turn_reconcile',
-                'd': {
-                    'content': canonical.content,
-                    'thinking': canonical.thinking,
-                    'self_state': canonical.self_state,
-                    'display_segments': json.loads(canonical.display_segments),
-                    'tool_calls': [dict(tc) for tc in canonical.tool_calls],
-                    'choices': list(canonical.choices),
-                    'canonical_sha256': canonical.projection_hash,
-                    'assistant_message_id': assistant_id,
-                },
-            }, ensure_ascii=False) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'turn_reconcile',
+                    'd': {
+                        'content': canonical.content,
+                        'thinking': canonical.thinking,
+                        'self_state': canonical.self_state,
+                        'display_segments': json.loads(canonical.display_segments),
+                        'tool_calls': [dict(tc) for tc in canonical.tool_calls],
+                        'choices': list(canonical.choices),
+                        'canonical_sha256': canonical.projection_hash,
+                        'assistant_message_id': assistant_id,
+                    },
+                }, ensure_ascii=False) + SSE_END
         else:
             logging.getLogger(__name__).info(
                 'turn_projection_confirmed canonical_sha256=%s message_id=%s request_id=%s',
@@ -8100,15 +8226,17 @@ def _stream_cc_daily_soft_window(
                 assistant_id,
                 _daily_plan.request_id,
             )
-            yield 'data: ' + json.dumps({
-                't': 'turn_final',
-                'd': {
-                    'status': 'confirmed',
-                    'canonical_sha256': canonical.projection_hash,
-                    'assistant_message_id': assistant_id,
-                },
-            }, ensure_ascii=False) + SSE_END
-        yield ('persisted', canonical.content, canonical.thinking)
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'turn_final',
+                    'd': {
+                        'status': 'confirmed',
+                        'canonical_sha256': canonical.projection_hash,
+                        'assistant_message_id': assistant_id,
+                    },
+                }, ensure_ascii=False) + SSE_END
+        if not _client_detached:
+            yield ('persisted', canonical.content, canonical.thinking)
 
         _write_session_memo(_uc, _cc_text, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
         try:
@@ -8143,13 +8271,15 @@ def _stream_cc_daily_soft_window(
                 ):
                     if _k in cc_usage:
                         _usage_evt[_k] = cc_usage[_k]
-            yield 'data: ' + json.dumps(_usage_evt) + SSE_END
-        yield 'data: ' + json.dumps({
-            't': 'done',
-            'ok': True,
-            'assistant_message_id': assistant_id,
-            'canonical_sha256': canonical.projection_hash,
-        }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps(_usage_evt) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'done',
+                'ok': True,
+                'assistant_message_id': assistant_id,
+                'canonical_sha256': canonical.projection_hash,
+            }) + SSE_END
         return None
     except CanonicalTurnError as exc:
         if _daily_plan:
@@ -8159,43 +8289,48 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'retryable': False,
-            'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
-        }, ensure_ascii=False) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'retryable': False,
+                'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
+            }, ensure_ascii=False) + SSE_END
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
+            }) + SSE_END
         return None
     except _daily_ctx.DeferredError as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
+            }) + SSE_END
         return None
     except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+            }) + SSE_END
         return None
     except _daily_rt.FirstTurnFinalizePendingError as exc:
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'retryable': True,
-            'code': 'FIRST_TURN_FINALIZE_PENDING',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'retryable': True,
+                'code': 'FIRST_TURN_FINALIZE_PENDING',
+            }) + SSE_END
         return None
     except _daily_rt.LeaseHeartbeatTerminalFailure as exc:
         if _daily_plan:
@@ -8206,9 +8341,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
+            }) + SSE_END
         return None
     except _daily_rt.DailyWindowToolFencePending as exc:
         if _daily_plan:
@@ -8218,9 +8354,10 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
+            }) + SSE_END
         return None
     except _daily_rt.EpochMismatchError as exc:
         if _daily_plan:
@@ -8231,9 +8368,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
+            }) + SSE_END
         return None
     except (_cbb.ColdBootstrapOverflow, _cbb.NoBenefitRespawnError) as exc:
         if _daily_plan:
@@ -8246,19 +8384,21 @@ def _stream_cc_daily_soft_window(
         turn_terminal = True
         _usage = getattr(exc, 'usage', None) or {}
         if isinstance(_usage, dict) and _usage.get('cold_budget_overflow') is not None:
-            yield 'data: ' + json.dumps({'t': 'usage', **{
-                k: _usage.get(k) for k in (
-                    'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
-                    'cold_prompt_target', 'cold_history_budget', 'cold_history_trimmed',
-                    'cold_budget_mode',
-                ) if k in _usage
-            }}) + SSE_END
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
-            'retryable': False,
-        }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({'t': 'usage', **{
+                    k: _usage.get(k) for k in (
+                        'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
+                        'cold_prompt_target', 'cold_history_budget', 'cold_history_trimmed',
+                        'cold_budget_mode',
+                    ) if k in _usage
+                }}) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
+                'retryable': False,
+            }) + SSE_END
         return None
     except Exception as exc:
         error_code = str(getattr(exc, 'error_code', None) or type(exc).__name__)
@@ -8275,10 +8415,24 @@ def _stream_cc_daily_soft_window(
         })
         if diagnostics:
             _turn_data['_terminal_contract_diag'] = diagnostics
-        yield _sse_json(_chat_stream_failure_event(
-            exc,
-            partial_rescue=bool(cleanup.get('partial_rescue_performed')),
-        ))
+        if _client_detached:
+            _record_daily_cancel(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    _daily_plan, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='detach_drain_abort',
+                partial_rescue_performed=bool(
+                    cleanup.get('partial_rescue_performed')
+                ),
+                abort_requested=True,
+                respawn_requested=True,
+            )
+        if not _client_detached:
+            yield _sse_json(_chat_stream_failure_event(
+                exc,
+                partial_rescue=bool(cleanup.get('partial_rescue_performed')),
+            ))
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
@@ -8298,7 +8452,7 @@ def _stream_cc_daily_soft_window(
                 )
             if released is not None:
                 turn_terminal = True
-                _record_daily_stream_cancellation(
+                _record_daily_cancel(
                     _turn_data,
                     cancellation_state,
                     cleanup_action='unsent_release',
@@ -8308,7 +8462,7 @@ def _stream_cc_daily_soft_window(
                 cleanup = _rescue_and_abort(
                     'client_stream_cancelled', respawn=True,
                 )
-                _record_daily_stream_cancellation(
+                _record_daily_cancel(
                     _turn_data,
                     cancellation_state,
                     cleanup_action='abort_daily_turn',
@@ -8319,12 +8473,27 @@ def _stream_cc_daily_soft_window(
                     respawn_requested=True,
                 )
         elif _daily_plan is None and not turn_terminal:
-            _record_daily_stream_cancellation(
+            _record_daily_cancel(
                 _turn_data,
                 _daily_stream_cancellation_state(
                     None, _CC_RESIDENT, _turn_data,
                 ),
                 cleanup_action='prepare_incomplete',
+            )
+        if (
+            _daily_plan is not None
+            and _client_detached
+            and not _turn_data.get('_daily_detached_persisted')
+            and not _turn_data.get('_terminal_contract_diag')
+        ):
+            _record_daily_cancel(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    _daily_plan, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='abort_daily_turn',
+                abort_requested=True,
+                respawn_requested=True,
             )
 
 
@@ -8605,7 +8774,25 @@ def chat_stream():
                             close_stream()
                         if not _released[0]:
                             _released[0] = True
-                            if _daily_out:
+                            if _turn_data.get('_daily_detached_persisted'):
+                                assistant_id = _turn_data.get('_daily_detached_assistant_id')
+                                _daily_out = (
+                                    'persisted',
+                                    _turn_data.get('_daily_detached_content') or '',
+                                    _turn_data.get('_daily_detached_thinking') or '',
+                                )
+                                _persisted[0] = True
+                                _flight_recorder.record(
+                                    'assistant_persisted',
+                                    assistant_message_id=assistant_id,
+                                    assistant_persisted=True,
+                                    dedupe=True,
+                                )
+                                _gen_release(
+                                    (_daily_out[1], _daily_out[2]),
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
+                            elif _daily_out:
                                 _persisted[0] = True
                                 _gen_release(
                                     (_daily_out[1], _daily_out[2]),

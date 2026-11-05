@@ -1796,6 +1796,12 @@ export function ChatScreen() {
           pendingActionId: opts.confirmation?.pendingActionId,
           confirmationDecision: opts.confirmation?.decision,
           realityContext: opts.realityContext,
+          reconnectOnUnexpectedEof: (
+            userMessageId != null
+            && !opts.rewriteId
+            && !opts.confirmation
+            && opts.operationKind !== 'choice'
+          ),
         },
       );
       const reconnectWithoutAssistant = (

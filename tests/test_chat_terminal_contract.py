@@ -2042,6 +2042,189 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         self.assertNotIn('provider-session-secret', encoded)
         self.assertNotIn('daily:default:32:154', encoded)
 
+    def test_daily_client_eof_before_first_provider_output_drains_original_turn(self):
+        from chat import context_window
+        from chat import daily_context
+        from chat import daily_runtime
+        from chat import display_thinking
+        from chat import system_builder
+        from chat.canonical_turn import projection_hash
+        import moments_turn
+
+        plan = self._plan()
+        plan.is_cold = True
+        resident = self._resident()
+        first_turn = {
+            'content': 'cold client eof',
+            'user_message_id': plan.user_message_id,
+            'request_id': plan.request_id,
+            'turn_key': 'turn-cold-eof',
+        }
+        reconnect_turn = {
+            'content': '',
+            'user_message_id': plan.user_message_id,
+            'request_id': 'req-reconnect',
+            'turn_key': 'turn-reconnect',
+        }
+        canonical_thinking = 'provider thinking after client EOF'
+        canonical_segments = [
+            {'type': 'thinking', 'text': canonical_thinking},
+            {'type': 'text', 'text': '原回合答案'},
+        ]
+        canonical = types.SimpleNamespace(
+            content='原回合答案',
+            thinking=canonical_thinking,
+            display_segments=json.dumps(
+                canonical_segments, ensure_ascii=False, separators=(',', ':'),
+            ),
+            tool_calls=(),
+            choices=(),
+            provider_rounds=(),
+            transcript_identity={},
+            projection_hash=projection_hash(
+                '原回合答案',
+                canonical_segments,
+                thinking=canonical_thinking,
+                self_state='',
+                tool_calls=(),
+                choices=(),
+            ),
+            self_state='',
+        )
+        stream_calls = []
+
+        def fake_events(*_args, **_kwargs):
+            stream_calls.append(True)
+            plan._resident_stream_entered = True
+            plan._resident_turn_sequence = 1
+            yield 'heartbeat', None
+            yield 'think', 'provider thinking after client EOF'
+            yield 'text', '原回合答案'
+            yield 'done', ('原回合答案', '', {})
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_get_model', return_value='mock-model',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_CC_RESIDENT', resident,
+            ))
+            gen_acquire = stack.enter_context(mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ))
+            gen_release = stack.enter_context(mock.patch.object(
+                gateway, '_gen_release',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway.cc_history_rewrite,
+                'guard_cc_generation',
+                side_effect=lambda events: events,
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'prepare_turn',
+                side_effect=[dict(first_turn), dict(reconnect_turn)],
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'insert_user_message',
+                side_effect=[dict(first_turn), dict(reconnect_turn)],
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'get_active_turn',
+                return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'activate_turn', return_value=dict(first_turn),
+            ))
+            release_turn = stack.enter_context(mock.patch.object(
+                moments_turn, 'release_turn',
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_context, 'enabled', return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_active_switch_intent', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_first_turn_finalize_pending', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'prepare_daily_turn', return_value=plan,
+            ))
+            stream_daily = stack.enter_context(mock.patch.object(
+                daily_runtime, 'stream_daily_resident_turn',
+                side_effect=fake_events,
+            ))
+            persist = stack.enter_context(mock.patch.object(
+                daily_runtime, 'persist_daily_assistant_for_plan',
+                return_value=13137,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'build_canonical_turn_for_plan',
+                return_value=canonical,
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_runtime, 'handle_provider_success', return_value={},
+            ))
+            abort = stack.enter_context(mock.patch.object(
+                daily_runtime, 'abort_daily_turn',
+                side_effect=AssertionError('client EOF aborted the original Daily turn'),
+            ))
+            stack.enter_context(mock.patch.object(
+                system_builder, 'build_cc_daily_static_parts',
+                return_value={'full_system': 'STATIC'},
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=('full', ''),
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'prepare_daily_display_thinking_plan',
+            ))
+            stack.enter_context(mock.patch.object(
+                display_thinking, 'filter_display_thinking_events',
+                side_effect=lambda events, _mode: events,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_write_session_memo',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_find_persisted_assistant_after',
+                return_value=13137,
+            ))
+
+            with gateway.app.test_client() as client:
+                response = client.post(
+                    '/chat/stream',
+                    json={'content': first_turn['content']},
+                    buffered=False,
+                )
+                iterator = response.response
+                first = next(iterator)
+                self.assertIn(b'"t": "ping"', first)
+                iterator.close()
+                response.close()
+
+                reconnect = client.post(
+                    '/chat/stream',
+                    json={'user_message_id': plan.user_message_id},
+                    buffered=False,
+                )
+                reconnect_body = b''.join(reconnect.response).decode('utf-8')
+                reconnect.close()
+
+        self.assertIn('same_turn_reconnect', reconnect_body)
+        self.assertIn('13137', reconnect_body)
+        self.assertEqual(1, len(stream_calls))
+        persist.assert_called_once()
+        abort.assert_not_called()
+        self.assertEqual(1, gen_acquire.call_count)
+        self.assertEqual(1, gen_release.call_count)
+        release_turn.assert_called_once()
+        self.assertEqual(1, stream_daily.call_count)
+
     def test_outer_daily_generator_exit_emits_terminal_contract_once(self):
         from chat import context_window
         from chat import daily_context

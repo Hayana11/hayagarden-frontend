@@ -468,6 +468,7 @@ export interface StreamHandlers {
 export interface StreamResult {
   ok: boolean;
   error?: string;
+  unexpectedEof?: boolean;
   errorCode?: string;
   providerErrorType?: string;
   providerErrorCategory?: string;
@@ -526,12 +527,14 @@ export async function streamChatReply(
     pendingActionId?: string | null;
     confirmationDecision?: 'approve' | 'reject';
     realityContext?: string | null;
+    reconnectOnUnexpectedEof?: boolean;
   } = {},
 ): Promise<StreamResult> {
   const transportTimeoutMs = 150000;
   const providerTimeoutMs = 420000;
   let transportSafety: ReturnType<typeof setTimeout> | undefined;
   let providerSafety: ReturnType<typeof setTimeout> | undefined;
+  let responseStarted = false;
   const armTransport = () => {
     clearTimeout(transportSafety);
     transportSafety = setTimeout(() => ctrl.abort(), transportTimeoutMs);
@@ -559,6 +562,7 @@ export async function streamChatReply(
       signal: ctrl.signal,
     });
     if (!resp.ok || !resp.body) return { ok: false, error: `stream failed: HTTP ${resp.status}` };
+    responseStarted = true;
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -701,10 +705,45 @@ export async function streamChatReply(
       }
       if (result) break;
     }
-    return result ?? { ok: false, error: '流意外中断' };
+    const finalResult = result ?? {
+      ok: false,
+      error: '流意外中断',
+      unexpectedEof: !ctrl.signal.aborted,
+    };
+    if (
+      finalResult.unexpectedEof
+      && extra.reconnectOnUnexpectedEof
+      && userMessageId != null
+      && !ctrl.signal.aborted
+    ) {
+      clearTimeout(transportSafety);
+      clearTimeout(providerSafety);
+      return streamChatReply(userMessageId, handlers, ctrl, {
+        ...extra,
+        reconnectOnUnexpectedEof: false,
+      });
+    }
+    return finalResult;
   } catch (e) {
     if (ctrl.signal.aborted) return { ok: false, error: '连接超时或被中止' };
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const finalResult: StreamResult = {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      unexpectedEof: responseStarted,
+    };
+    if (
+      finalResult.unexpectedEof
+      && extra.reconnectOnUnexpectedEof
+      && userMessageId != null
+    ) {
+      clearTimeout(transportSafety);
+      clearTimeout(providerSafety);
+      return streamChatReply(userMessageId, handlers, ctrl, {
+        ...extra,
+        reconnectOnUnexpectedEof: false,
+      });
+    }
+    return finalResult;
   } finally {
     clearTimeout(transportSafety);
     clearTimeout(providerSafety);
