@@ -6532,12 +6532,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
         def _build(
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
+            allow_invalid_for_cold_bridge=False,
         ):
             captured.update({
                 'plan': plan,
                 'resident': resident,
                 'static_system': static_system,
                 'mode': mode,
+                'allow_invalid_for_cold_bridge': allow_invalid_for_cold_bridge,
             })
             return chunk_plan, {'chunk:one': 'compressed'}
 
@@ -6843,8 +6845,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
         def _build(
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
+            allow_invalid_for_cold_bridge=False,
         ):
             captured['mode'] = mode
+            captured['allow_invalid_for_cold_bridge'] = allow_invalid_for_cold_bridge
             return chunk_plan, {'chunk:one': 'compressed'}
 
         with mock.patch.object(
@@ -7153,6 +7157,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             raise AssertionError('assistant session fixture length mismatch')
         db = self._context_plan_runtime_db()
         conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO daily_contexts "
+            "(id, chat_id, local_day, timezone, boundary_hour, context_epoch, "
+            "boundary_message_id, status, carryover_count, resident_generation, "
+            "version, created_at, updated_at, window_mode, opened_at) "
+            "VALUES (7, 'default', '2026-07-27', 'Asia/Shanghai', 4, 3, "
+            "0, 'PROVISIONAL', 0, 1, 1, '2026-07-27 10:00:00', "
+            "'2026-07-27 10:00:00', 'legacy_daily', '2026-07-27 10:00:00')"
+        )
         conn.execute(
             'DROP INDEX IF EXISTS uq_chat_message_claude_events_user_msg'
         )
@@ -8008,7 +8021,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         }
         executor_result = execute(
             'none', '', '', 'normal',
-            get_db_fn=lambda: sqlite3.connect(db),
+            get_db_fn=lambda: dc._connect(db),
             cache_info=main_turn['cache_info'],
             wake_run_id='integration-wake',
             window_identity=identity,
