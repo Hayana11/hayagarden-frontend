@@ -1566,6 +1566,7 @@ def _build_production_context_plan(
     mode: str = 'hot',
     capacity_budget_static_system: str | None = None,
     canonical_hot_source_scope: tuple[tuple[Any, ...], ...] | None = None,
+    allow_invalid_for_cold_bridge: bool = False,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
@@ -1667,7 +1668,7 @@ def _build_production_context_plan(
             error_code='context_plan_identity_invalid',
             retryable=False,
         )
-    if not result.plan.valid:
+    if not result.plan.valid and not allow_invalid_for_cold_bridge:
         raise DailyRuntimeError(
             'canonical ContextPlan is invalid',
             error_code='context_plan_invalid',
@@ -1786,6 +1787,9 @@ def _conditionally_seal_cold_bridge(
         'context_plan_cold_bridge_first_plan_id': str(
             getattr(first_plan, 'plan_id', '') or ''
         ),
+        'context_plan_cold_bridge_first_plan_valid': bool(
+            getattr(first_plan, 'valid', False)
+        ),
     })
     if detection.status == 'ambiguous':
         raise DailyRuntimeError(
@@ -1800,6 +1804,12 @@ def _conditionally_seal_cold_bridge(
             retryable=False,
         )
     if detection.status != 'required':
+        if not bool(getattr(first_plan, 'valid', False)):
+            raise DailyRuntimeError(
+                'canonical ContextPlan is invalid',
+                error_code='context_plan_invalid',
+                retryable=False,
+            )
         return first_plan, first_chunk_bodies
 
     bridge_members = tuple(detection.source_members)
@@ -5016,6 +5026,7 @@ def _assemble_plan(
             resident=resident,
             static_system=effective_static_system,
             mode='cold',
+            allow_invalid_for_cold_bridge=True,
         )
         context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
             daily_plan,

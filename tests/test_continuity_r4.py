@@ -1507,6 +1507,11 @@ class ColdOversizeReadyTests(unittest.TestCase):
         self.assertEqual(plan.budget_status, 'overflow')
         self.assertEqual(plan.recent_raw_token_estimate, 45_511)
         self.assertTrue(any(e.code == 'budget_overflow' for e in plan.exclusions))
+        bridge = find_cold_bridge(plan)
+        self.assertEqual(bridge.status, 'required')
+        self.assertEqual(bridge.source_members, self.members[1:])
+        self.assertEqual(bridge.estimated_tokens, 45_511)
+        self.assertEqual(bridge.remaining_budget, 22_000)
 
     def test_strict_hot_and_capacity_policy_does_not_replace_raw(self):
         plan = self._plan(cold=False)
@@ -1920,6 +1925,11 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             for item in plan.exclusions
         ))
         self.assertGreater(plan.total_token_estimate, plan.token_budget)
+        bridge = find_cold_bridge(plan)
+        self.assertEqual(bridge.status, 'required')
+        self.assertEqual(bridge.source_members, members[1:])
+        self.assertEqual(bridge.estimated_tokens, 37_151)
+        self.assertEqual(bridge.remaining_budget, 24_000)
 
     def test_recent_raw_overflow_keeps_whole_member_and_fails_closed(self):
         members = (_member(0, logical_size=30),)
