@@ -79,6 +79,8 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "calendar.read",
+    "calendar.write",
     "gallery.save",
     "gallery.recall",
     "gallery.screenshot",

@@ -16,8 +16,10 @@ def _unauthorized():
 
 
 def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db_path,
-                               clock=time.time, incoming_call=None):
-    """``incoming_call()`` returns the id of a call he placed that is ringing now, or None."""
+                               clock=time.time, incoming_call=None, calendar_pending=None):
+    """``incoming_call()`` returns the id of a call he placed that is ringing now, or None.
+    ``calendar_pending(device_id)`` is True when he queued a calendar write this device
+    has not fetched yet."""
     bp = Blueprint('wake_push', __name__)
 
     def device_id_from_request():
@@ -52,16 +54,19 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
         # call delta beside (never instead of) the message: the message lease/ack is
         # unchanged and the call is neither leased nor acked. The poll returns when a
         # message can be leased or the ringing call differs from known_call.
+        # ``calendar: true`` (P2I) tells the phone to run a calendar sync now.
         known_call = wake_push.parse_known_call(request.args.get('known_call'))
 
         def take(conn):
             payload = wake_push.lease_pending_payload(
                 conn, fetch_row, soft_window_enabled(), clock(), device_id,
             )
-            if incoming_call is None:
-                return payload
-            delta = wake_push.call_delta(incoming_call(), known_call)
-            return wake_push.with_call_delta(payload, delta)
+            if incoming_call is not None:
+                delta = wake_push.call_delta(incoming_call(), known_call)
+                payload = wake_push.with_call_delta(payload, delta)
+            if calendar_pending is not None and calendar_pending(device_id):
+                payload = wake_push.with_calendar_flag(payload)
+            return payload
 
         return jsonify(wake_push.poll(get_db, take, wake_push.parse_wait(request.args.get('wait'))))
 

@@ -33,7 +33,7 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_current_groups_derive_from_companion_catalog(self):
         expected_ids = [group_id for group_id, _, _ in tool_companion_hints._EXPECTED_GROUPS]
-        self.assertEqual(expected_ids, ["memory", "home", "plans", "health", "gallery", "ledger", "files", "external_read"])
+        self.assertEqual(expected_ids, ["memory", "home", "plans", "calendar", "health", "gallery", "ledger", "files", "external_read"])
         self.assertEqual([group["id"] for group in self.p["groups"][:len(tool_companion_hints._EXPECTED_GROUPS)]], expected_ids)
         self.assertEqual(self.groups["plans"]["label"], "计划")
         self.assertEqual(

@@ -186,6 +186,28 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["amount"],
     },
+    "mcp__capability__calendar_read": {
+        "type": "object",
+        "properties": {
+            "start_date": {"type": "string"},
+            "days": {"type": "integer", "minimum": 1, "maximum": 30},
+        },
+    },
+    "mcp__capability__calendar_write": {
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["create", "update", "delete"]},
+            "event_id": {"type": "string"},
+            "title": {"type": "string"},
+            "start": {"type": "string"},
+            "end": {"type": "string"},
+            "all_day": {"type": "boolean"},
+            "location": {"type": "string"},
+            "notes": {"type": "string"},
+            "reminder_minutes": {"type": "integer"},
+        },
+        "required": ["op"],
+    },
     "mcp__capability__gallery_save": {
         "type": "object",
         "properties": {
