@@ -473,10 +473,19 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
     creates a candidate, calls a provider, or changes selection semantics.
     """
 
-    if not bool(getattr(plan, 'valid', False)):
-        return ColdBridgeDetection('none')
     policy = getattr(plan, 'budget_policy', None)
-    if policy is None or str(getattr(plan, 'budget_status', '')) != 'fit':
+    if policy is None:
+        return ColdBridgeDetection('none')
+    valid = bool(getattr(plan, 'valid', False))
+    budget_status = str(getattr(plan, 'budget_status', '') or '')
+    atomic_recent_overflow = bool(
+        not valid
+        and budget_status == 'overflow'
+        and getattr(policy, 'allow_recent_raw_history_limit_overflow', False)
+    )
+    if not valid and not atomic_recent_overflow:
+        return ColdBridgeDetection('none')
+    if valid and budget_status != 'fit':
         return ColdBridgeDetection('none')
     try:
         expected = tuple(sorted(
@@ -536,6 +545,48 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
     ):
         return ColdBridgeDetection('none')
 
+    recent_representations = tuple(
+        representation
+        for representation in tuple(getattr(plan, 'representations', ()) or ())
+        if representation.kind == 'raw'
+        and set(representation.source_seqs).issubset(recent_seqs)
+    )
+    recent_cost = sum(
+        int(representation.estimated_tokens)
+        for representation in recent_representations
+    )
+    fixed_cost = int(getattr(plan, 'fixed_section_token_estimate', 0) or 0)
+    anchor_cost = int(getattr(plan, 'window_anchor_token_estimate', 0) or 0)
+    prompt_history_budget = max(
+        0,
+        int(policy.usable_budget) - fixed_cost - anchor_cost,
+    )
+    history_limit = getattr(policy, 'history_budget_limit', None)
+    effective_history_budget = (
+        min(prompt_history_budget, int(history_limit))
+        if history_limit is not None
+        else prompt_history_budget
+    )
+    if atomic_recent_overflow:
+        # Cold/Respawn may admit one atomic recent suffix above the history
+        # sub-budget only while the complete prompt still fits.  When that
+        # suffix alone exceeds the remaining prompt budget, it is the exact
+        # source range that must be sealed before resident selection.  The
+        # previous valid-only bridge gate made this recovery unreachable.
+        if recent_cost <= prompt_history_budget:
+            return ColdBridgeDetection('none')
+        bridge = tuple(expected[recent_start:])
+        if not bridge:
+            return ColdBridgeDetection('none')
+        bridge_representation = _raw_representation(bridge)
+        return ColdBridgeDetection(
+            'required',
+            source_members=bridge,
+            estimated_tokens=int(bridge_representation.estimated_tokens),
+            remaining_budget=effective_history_budget,
+            representation_id=bridge_representation.representation_id,
+        )
+
     covered: set[tuple[Any, ...]] = set()
     for exclusion in tuple(getattr(plan, 'exclusions', ()) or ()):
         if str(getattr(exclusion, 'code', '') or '') != 'covered_by_chunk':
@@ -590,19 +641,6 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
     ):
         return ColdBridgeDetection('none')
 
-    recent_cost = sum(
-        int(representation.estimated_tokens)
-        for representation in tuple(getattr(plan, 'representations', ()) or ())
-        if representation.kind == 'raw'
-        and set(representation.source_seqs).issubset(recent_seqs)
-    )
-    fixed_cost = int(getattr(plan, 'fixed_section_token_estimate', 0) or 0)
-    history_limit = getattr(policy, 'history_budget_limit', None)
-    effective_history_budget = (
-        min(int(policy.usable_budget) - fixed_cost, int(history_limit))
-        if history_limit is not None
-        else int(policy.usable_budget) - fixed_cost
-    )
     remaining = effective_history_budget - recent_cost
     if (
         bool(getattr(policy, 'allow_recent_raw_history_limit_overflow', False))
