@@ -10768,6 +10768,132 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             'plan:new',
         )
 
+    def test_invalid_first_plan_required_bridge_rebuilds_and_selects_exact_chunk(self):
+        runtime_plan = self._runtime_plan()
+        source_member = self._member()
+        first = types.SimpleNamespace(
+            valid=False,
+            plan_id='plan:first-invalid',
+            plan_hash='hash:first-invalid',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='overflow',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(source_member,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(source_member,),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        rebuilt = self._plan('rebuilt')
+        result = types.SimpleNamespace(
+            status='ready',
+            model_call_count=1,
+            generated_chunk_id='rebuilt',
+        )
+
+        def build(_plan, *, resident, static_system, mode='hot'):
+            self.assertEqual(mode, 'cold')
+            return rebuilt, {'rebuilt': 'body'}
+
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ) as rebuild:
+            selected, bodies = dr._conditionally_seal_cold_bridge(
+                runtime_plan,
+                first_plan=first,
+                first_chunk_bodies={},
+                resident=None,
+                static_system='STATIC',
+            )
+
+        self.assertIs(selected, rebuilt)
+        self.assertTrue(selected.valid)
+        self.assertEqual(bodies, {'rebuilt': 'body'})
+        self.assertEqual(selected.representations[0].chunk_id, 'rebuilt')
+        self.assertEqual(
+            selected.representations[0].source_members[0].source_ref,
+            source_member.source_ref,
+        )
+        seal.assert_called_once()
+        rebuild.assert_called_once()
+
+    def test_ready_bridge_with_nonmatching_rebuilt_membership_fails_closed(self):
+        runtime_plan = self._runtime_plan()
+        source_member = self._member()
+        first = types.SimpleNamespace(
+            valid=False,
+            plan_id='plan:first-invalid',
+            plan_hash='hash:first-invalid',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='overflow',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(source_member,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(source_member,),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        rebuilt = self._plan('targeted')
+        wrong_member = self._member()
+        wrong_member.source_revision = 'revision-not-targeted'
+        rebuilt.representations[0].source_members = (wrong_member,)
+        result = types.SimpleNamespace(
+            status='ready',
+            model_call_count=1,
+            generated_chunk_id='targeted',
+        )
+
+        def build(_plan, *, resident, static_system, mode='hot'):
+            self.assertEqual(mode, 'cold')
+            return rebuilt, {'targeted': 'body'}
+
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ) as rebuild:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={},
+                    resident=None,
+                    static_system='STATIC',
+                )
+
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_cold_bridge_not_selected',
+        )
+        seal.assert_called_once()
+        rebuild.assert_called_once()
+
     def test_generation_failure_blocks_rebuild_and_fallback(self):
         runtime_plan = self._runtime_plan()
         first = types.SimpleNamespace(
