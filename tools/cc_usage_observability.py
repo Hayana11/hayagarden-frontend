@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import statistics
 import uuid
@@ -44,27 +45,19 @@ def gateway_instance_id() -> str:
     return _GATEWAY_INSTANCE_ID
 
 
+_CJK_TOKEN_CHAR_RE = re.compile(
+    r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u2e80-\u2eff'
+    r'\u3000-\u303f\uff00-\uffef\u3040-\u30ff\uac00-\ud7af]'
+)
+
+
 def estimate_tokens_heuristic_cjk1_ascii4_v1(text: Optional[str]) -> int:
     """确定性本地估算：CJK 字符约 1 token，其他文本约 4 字符/token，向上取整。"""
     if not text:
         return 0
-    cjk = 0
-    other = 0
-    for ch in str(text):
-        o = ord(ch)
-        if (
-            0x4E00 <= o <= 0x9FFF
-            or 0x3400 <= o <= 0x4DBF
-            or 0xF900 <= o <= 0xFAFF
-            or 0x2E80 <= o <= 0x2EFF
-            or 0x3000 <= o <= 0x303F
-            or 0xFF00 <= o <= 0xFFEF
-            or 0x3040 <= o <= 0x30FF
-            or 0xAC00 <= o <= 0xD7AF
-        ):
-            cjk += 1
-        else:
-            other += 1
+    value = str(text)
+    cjk = len(_CJK_TOKEN_CHAR_RE.findall(value))
+    other = len(value) - cjk
     return int(cjk + math.ceil(other / 4) if other else cjk)
 
 
