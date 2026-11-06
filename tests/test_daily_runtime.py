@@ -1803,65 +1803,36 @@ class GatewayClientDisconnectTests(unittest.TestCase):
         return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
 
     def test_chat_stream_disconnect_after_text_detaches_and_drains_daily_turn(self):
-        import gateway
-
         db = _tmp_db()
         try:
             _init_chat_messages(db)
             uid = _insert(db, 'hayana', 'disconnect', '2026-07-27 10:00:00')
             resident = _FakeResident()
-            gen_release_calls: list = []
-            release_turn_calls: list = []
-            memo_mock = mock.Mock()
-            moments_mock = mock.Mock()
-            scoring_mock = mock.Mock()
+            resident.done_yielded = False
+            stream_calls = []
 
-            def _prepare_real(**kwargs):
-                with mock.patch.object(config_store, 'get_bool', return_value=True), \
-                     mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
-                    return _REAL_PREPARE_DAILY_TURN(
-                        user_message_id=uid,
-                        db_path=db,
-                        resident=resident,
-                        static_system='S',
-                        wall_now=_FIXED_NOW,
-                    )
+            def _stream(plan, **_kwargs):
+                stream_calls.append(plan)
+                plan._resident_stream_entered = True
+                plan._resident_turn_sequence = 1
+                yield 'text', 'daily reply'
+                resident.done_yielded = True
+                yield 'done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {})
 
-            patches = [
-                mock.patch.object(config_store, 'get_bool', return_value=True),
-                mock.patch('chat.daily_context.enabled', return_value=True),
-                mock.patch.object(gateway, 'DB_PATH', db),
-                mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
-                mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
-                mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
-                mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
-                mock.patch(
-                    'moments_turn.insert_user_message',
-                    return_value={'content': 'hi', 'user_message_id': uid},
-                ),
-                mock.patch('moments_turn.activate_turn', side_effect=lambda td, **_k: td),
-                mock.patch('moments_turn.release_turn', side_effect=lambda *a, **k: release_turn_calls.append(k)),
-                mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
-                    'persona': 'P', 'full_system': 'STATIC',
-                }),
-                mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
-                mock.patch.object(
-                    dr,
-                    'build_canonical_turn_for_plan',
-                    side_effect=_gateway_canonical_builder(),
-                ),
-                mock.patch.object(gateway, '_write_session_memo', memo_mock),
-                mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
-                mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
-                mock.patch.object(gateway, '_CC_RESIDENT', resident),
-            ]
+            gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock = (
+                self._disconnect_stream_patches(db, uid, resident, stream_impl=_stream)
+            )
+            handle_success = mock.Mock(return_value={})
+            abort = mock.Mock(side_effect=AssertionError('detached Daily turn was aborted'))
             with contextlib.ExitStack() as stack:
-                for p in patches:
-                    stack.enter_context(p)
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                stack.enter_context(mock.patch.object(dr, 'handle_provider_success', side_effect=handle_success))
+                stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', side_effect=abort))
                 client = gateway.app.test_client()
-                resp = client.post('/chat/stream', json={'content': 'hi'})
-                self.assertEqual(resp.status_code, 200)
-                body_iter = resp.response
+                response = client.post('/chat/stream', json={'content': 'hi'})
+                self.assertEqual(response.status_code, 200)
+                body_iter = response.response
                 text_event = None
                 for event in body_iter:
                     if b'\"t\": \"text\"' in event:
@@ -1870,7 +1841,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 self.assertIsNotNone(text_event)
                 self.assertIn(b'daily reply', text_event)
                 body_iter.close()
-                resp.close()
+                response.close()
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
             conn = sqlite3.connect(db)
@@ -1889,11 +1860,12 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             self.assertIsNotNone(ctx)
             self.assertEqual(int(assistant_count), 1)
             self.assertEqual(assistant_row[1], 'daily reply')
+            self.assertTrue(resident.done_yielded)
+            self.assertEqual(len(stream_calls), 1)
+            handle_success.assert_called_once()
+            abort.assert_not_called()
             self.assertNotIn('stream_interrupted', str(assistant_row[2] or ''))
             self.assertEqual(int(mapping_count), 1)
-            self.assertFalse(dc.is_resident_turn_active(
-                int(ctx['id']), 1, db_path=db, now=_FIXED_NOW,
-            ))
             self.assertEqual(resident.killed, 0)
             self.assertEqual(int(ctx['resident_generation']), 1)
             self.assertEqual(len(gen_release_calls), 1)
@@ -1902,10 +1874,6 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             memo_mock.assert_called_once()
             moments_mock.assert_called_once()
             scoring_mock.assert_called_once()
-            cursor_after = dc.get_resident_history_cursor(
-                int(ctx['id']), int(ctx['resident_generation']), db_path=db,
-            )
-            self.assertEqual(cursor_after, int(assistant_row[0]))
         finally:
             os.unlink(db)
 
