@@ -1802,14 +1802,14 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             patches.append(mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=stream_impl))
         return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
 
-    def test_chat_stream_disconnect_after_text_aborts_daily_turn(self):
+    def test_chat_stream_disconnect_after_text_detaches_and_drains_daily_turn(self):
         import gateway
 
         db = _tmp_db()
         try:
             _init_chat_messages(db)
             uid = _insert(db, 'hayana', 'disconnect', '2026-07-27 10:00:00')
-            resident = _BlockingAfterTextResident()
+            resident = _FakeResident()
             gen_release_calls: list = []
             release_turn_calls: list = []
             memo_mock = mock.Mock()
@@ -1845,6 +1845,11 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
                 mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+                mock.patch.object(
+                    dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(),
+                ),
                 mock.patch.object(gateway, '_write_session_memo', memo_mock),
                 mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
                 mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
@@ -1857,8 +1862,15 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 resp = client.post('/chat/stream', json={'content': 'hi'})
                 self.assertEqual(resp.status_code, 200)
                 body_iter = resp.response
-                _ = next(body_iter)
+                text_event = None
+                for event in body_iter:
+                    if b'\"t\": \"text\"' in event:
+                        text_event = event
+                        break
+                self.assertIsNotNone(text_event)
+                self.assertIn(b'daily reply', text_event)
                 body_iter.close()
+                resp.close()
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
             conn = sqlite3.connect(db)
@@ -1876,24 +1888,24 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             conn.close()
             self.assertIsNotNone(ctx)
             self.assertEqual(int(assistant_count), 1)
-            self.assertEqual(assistant_row[1], 'partial')
-            self.assertIn('stream_interrupted', str(assistant_row[2] or ''))
+            self.assertEqual(assistant_row[1], 'daily reply')
+            self.assertNotIn('stream_interrupted', str(assistant_row[2] or ''))
             self.assertEqual(int(mapping_count), 1)
             self.assertFalse(dc.is_resident_turn_active(
                 int(ctx['id']), 1, db_path=db, now=_FIXED_NOW,
             ))
-            self.assertGreaterEqual(resident.killed, 1)
-            self.assertGreater(int(ctx['resident_generation']), 1)
-            self.assertEqual(gen_release_calls, [None])
+            self.assertEqual(resident.killed, 0)
+            self.assertEqual(int(ctx['resident_generation']), 1)
+            self.assertEqual(len(gen_release_calls), 1)
             self.assertTrue(release_turn_calls)
             self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
-            memo_mock.assert_not_called()
-            moments_mock.assert_not_called()
-            scoring_mock.assert_not_called()
+            memo_mock.assert_called_once()
+            moments_mock.assert_called_once()
+            scoring_mock.assert_called_once()
             cursor_after = dc.get_resident_history_cursor(
                 int(ctx['id']), int(ctx['resident_generation']), db_path=db,
             )
-            self.assertIsNone(cursor_after)
+            self.assertEqual(cursor_after, int(assistant_row[0]))
         finally:
             os.unlink(db)
 
