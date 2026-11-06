@@ -1831,9 +1831,7 @@ export function ChatScreen() {
             && opts.operationKind !== 'choice'
           ),
         },
-      ).finally(() => {
-        setBirthNow(null);
-      });
+      );
       const reconnectWithoutAssistant = (
         res.ok
         && res.sameTurnReconnect === true
