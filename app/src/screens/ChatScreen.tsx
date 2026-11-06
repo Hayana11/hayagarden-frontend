@@ -920,7 +920,9 @@ export function ChatScreen() {
     const startedAt = birthStartedAtRef.current;
     if (!hasLive || startedAt === null || !birthTickActive) return;
     const intervalId = window.setInterval(() => {
-      if (birthStartedAtRef.current !== null) setBirthNow(performance.now());
+      if (birthStartedAtRef.current !== null) {
+        setBirthNow((current) => current === null ? null : performance.now());
+      }
     }, 100);
     return () => window.clearInterval(intervalId);
   }, [birthTickActive, hasLive, hasLiveSegments]);
