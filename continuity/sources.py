@@ -232,12 +232,34 @@ def canonical_tool_outcome(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _turn_revision(user_row: Any, assistant_row: Any) -> str:
+def _turn_revision(
+    user_row: Any,
+    assistant_row: Any,
+    *,
+    user_ref: EvidenceRef | None = None,
+    assistant_ref: EvidenceRef | None = None,
+    branch_id: str | None = None,
+    tool_refs: tuple[EvidenceRef, ...] | None = None,
+) -> str:
+    user_revision = (
+        user_ref.source_revision if user_ref is not None else row_revision(user_row)
+    )
+    assistant_revision = (
+        assistant_ref.source_revision
+        if assistant_ref is not None
+        else row_revision(assistant_row)
+    )
+    resolved_branch_id = (
+        branch_id if branch_id is not None else _active_branch_identity(assistant_row)
+    )
+    resolved_tool_refs = (
+        tool_refs if tool_refs is not None else _tool_outcome_refs(assistant_row)
+    )
     return _sha256_text(_canonical_json({
-        'user': row_revision(user_row),
-        'assistant': row_revision(assistant_row),
-        'branch': _active_branch_identity(assistant_row),
-        'tools': [ref.source_revision for ref in _tool_outcome_refs(assistant_row)],
+        'user': user_revision,
+        'assistant': assistant_revision,
+        'branch': resolved_branch_id,
+        'tools': [ref.source_revision for ref in resolved_tool_refs],
     }))
 
 
@@ -263,18 +285,29 @@ def derive_completed_turns(
             assistant = assistants[0]
             uid = int(_value(current_user, 'id', 0) or 0)
             aid = int(_value(assistant, 'id', 0) or 0)
+            branch_id = _active_branch_identity(assistant)
+            user_ref = evidence_ref(current_user)
+            assistant_ref = evidence_ref(assistant)
+            tool_refs = _tool_outcome_refs(assistant)
             completed.append(CanonicalTurn(
                 turn_id=f'turn:{uid}:{aid}',
                 identity_id=identity_id,
                 chat_id=chat_id,
-                branch_id=_active_branch_identity(assistant),
-                user_input_ref=evidence_ref(current_user),
-                assistant_committed_output_refs=(evidence_ref(assistant),),
-                tool_outcome_refs=_tool_outcome_refs(assistant),
+                branch_id=branch_id,
+                user_input_ref=user_ref,
+                assistant_committed_output_refs=(assistant_ref,),
+                tool_outcome_refs=tool_refs,
                 started_at=str(_value(current_user, 'created_at', '') or ''),
                 committed_at=str(_value(assistant, 'created_at', '') or ''),
                 finality_status='completed',
-                source_revision=_turn_revision(current_user, assistant),
+                source_revision=_turn_revision(
+                    current_user,
+                    assistant,
+                    user_ref=user_ref,
+                    assistant_ref=assistant_ref,
+                    branch_id=branch_id,
+                    tool_refs=tool_refs,
+                ),
             ))
         current_user = None
         assistants = []
