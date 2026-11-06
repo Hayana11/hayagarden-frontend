@@ -1640,6 +1640,28 @@ def _stream_same_turn_reconnect_wait(
         if active_user_message_id is None or str(active_user_message_id) != str(user_message_id):
             # The original turn is terminal or another turn now owns the lane.
             # Never wait through a different user's turn.
+            final_assistant_id = _find_persisted_assistant_after(user_message_id)
+            if final_assistant_id is not None:
+                recorder.record(
+                    'turn_reconciled',
+                    assistant_message_id=final_assistant_id,
+                    reconcile_applied=True,
+                    stream_instance_id=stream_instance_id,
+                    stream_role='reconnect',
+                    dedupe=True,
+                )
+                yield _sse_json({
+                    't': 'notice',
+                    'd': 'same_turn_reconnect_wait',
+                    'code': 'same_turn_reconnect_wait',
+                })
+                yield _sse_json({
+                    't': 'done',
+                    'ok': True,
+                    'same_turn_reconnect': True,
+                    'assistant_message_id': final_assistant_id,
+                })
+                return
             yield _sse_json({
                 't': 'notice',
                 'd': 'same_turn_reconnect_wait',
