@@ -514,7 +514,7 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
             stream_instance_id='reconnect-active-change',
         )
         with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(
+            find = stack.enter_context(mock.patch.object(
                 gateway, '_find_persisted_assistant_after', return_value=None,
             ))
             active_lookup = stack.enter_context(mock.patch.object(
@@ -541,8 +541,63 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
         self.assertTrue(chunks)
         self.assertIn('same_turn_reconnect', ''.join(chunks))
         self.assertEqual(2, active_lookup.call_count)
+        self.assertEqual(3, find.call_count)
         sleep.assert_called_once_with(0.5)
         self.assertNotIn('13167', ''.join(chunks))
+        self.assertNotIn('assistant_message_id', ''.join(chunks))
+
+
+    def test_reconnect_wait_final_lookup_recovers_late_persisted_assistant(self):
+        import moments_turn
+
+        recorder = TurnFlightRecorder(
+            user_message_id=13166,
+            turn_key='turn-13166',
+            stream_instance_id='reconnect-final-lookup',
+        )
+        with ExitStack() as stack:
+            find = stack.enter_context(mock.patch.object(
+                gateway,
+                '_find_persisted_assistant_after',
+                side_effect=[None, None, 13168],
+            ))
+            active_lookup = stack.enter_context(mock.patch.object(
+                moments_turn,
+                'get_active_turn',
+                side_effect=[
+                    {
+                        'user_message_id': 13166,
+                        'turn_key': 'turn-13166',
+                    },
+                    None,
+                ],
+            ))
+            sleep = stack.enter_context(mock.patch.object(gateway.time, 'sleep'))
+            chunks = list(gateway._stream_same_turn_reconnect_wait(
+                user_message_id=13166,
+                recorder=recorder,
+                stream_instance_id='reconnect-final-lookup',
+                timeout_sec=30,
+            ))
+
+        events = [
+            json.loads(line[len('data:'):].strip())
+            for chunk in chunks
+            for line in chunk.splitlines()
+            if line.startswith('data:')
+        ]
+        done_events = [event for event in events if event.get('t') == 'done']
+        self.assertEqual(1, len(done_events))
+        self.assertEqual(13168, done_events[0].get('assistant_message_id'))
+        self.assertTrue(done_events[0].get('same_turn_reconnect'))
+        self.assertEqual(3, find.call_count)
+        self.assertEqual(2, active_lookup.call_count)
+        sleep.assert_called_once_with(0.5)
+        self.assertTrue(any(
+            event.get('event') == 'turn_reconciled'
+            and event.get('assistant_message_id') == 13168
+            for event in recorder.events()
+        ))
 
 
     def test_persisted_reconnect_does_not_adopt_newer_active_recorder(self):
