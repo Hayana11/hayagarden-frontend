@@ -898,11 +898,32 @@ export function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
+  const birthStartedAtRef = useRef<number | null>(null);
+  const [birthNow, setBirthNow] = useState<number | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatToolCall | null>(null);
   const [pendingFiles, setPendingFiles] = useState<Array<{ fileUrl: string; fileName: string }>>([]);
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [uploadingFileCount, setUploadingFileCount] = useState(0);
   const [compressingImageCount, setCompressingImageCount] = useState(0);
+
+  const hasLive = live !== null;
+  const hasLiveSegments = Boolean(live?.segments.length);
+  const birthTickActive = birthNow !== null;
+  useEffect(() => {
+    if (hasLiveSegments) {
+      if (birthStartedAtRef.current !== null) {
+        birthStartedAtRef.current = null;
+        setBirthNow(null);
+      }
+      return;
+    }
+    const startedAt = birthStartedAtRef.current;
+    if (!hasLive || startedAt === null || !birthTickActive) return;
+    const intervalId = window.setInterval(() => {
+      if (birthStartedAtRef.current !== null) setBirthNow(performance.now());
+    }, 100);
+    return () => window.clearInterval(intervalId);
+  }, [birthTickActive, hasLive, hasLiveSegments]);
 
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
@@ -1715,6 +1736,8 @@ export function ChatScreen() {
   }, []);
 
   const clearLivePresentation = useCallback((preserveHandoff = false) => {
+    birthStartedAtRef.current = null;
+    setBirthNow(null);
     liveRef.current = null;
     setLive(null);
     if (!preserveHandoff) chatHandoffRef.current = null;
@@ -1739,6 +1762,7 @@ export function ChatScreen() {
         operationIdentity?: string | null;
         sourceAssistantId?: number | null;
         handoffUserMessageId?: number | null;
+        birthStartedAt?: number;
       } = {},
     ): Promise<ChatStreamRunResult> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
@@ -1753,6 +1777,8 @@ export function ChatScreen() {
         sourceAssistantId: opts.sourceAssistantId,
       });
       chatHandoffRef.current = handoff;
+      birthStartedAtRef.current = opts.birthStartedAt ?? null;
+      setBirthNow(opts.birthStartedAt == null ? null : performance.now());
       liveRef.current = createLiveState();
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -1803,7 +1829,9 @@ export function ChatScreen() {
             && opts.operationKind !== 'choice'
           ),
         },
-      );
+      ).finally(() => {
+        setBirthNow(null);
+      });
       const reconnectWithoutAssistant = (
         res.ok
         && res.sameTurnReconnect === true
@@ -1895,6 +1923,7 @@ export function ChatScreen() {
       || sending
       || uploadingFileCount > 0
       || compressingImageCount > 0) return;
+    const sendStartedAt = performance.now();
     const realityContext = realityPromptProjection.getSnapshot().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
@@ -1934,7 +1963,7 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    const streamResult = await runStream(messageId, { realityContext });
+    const streamResult = await runStream(messageId, { realityContext, birthStartedAt: sendStartedAt });
     const latest = await refetchLatest();
     if (streamResult === 'success') bindFinalMessage(latest);
     clearLivePresentation(Boolean(streamResult === 'success' && chatHandoffRef.current?.finalMessageId !== null));
@@ -2845,10 +2874,18 @@ export function ChatScreen() {
                 return <Fragment key={segmentKey}>{renderToolItems(segmentKey, [segment.tool])}</Fragment>;
               })}
               {!l.segments.length ? (
-                <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
-                  <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
-                  正在连接回复…
-                </div>
+                birthStartedAtRef.current !== null ? (
+                  birthNow !== null ? (
+                    <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 12.5, letterSpacing: 1 }}>
+                      出生 {Math.max(0, (birthNow - birthStartedAtRef.current) / 1000).toFixed(1)}s
+                    </div>
+                  ) : null
+                ) : (
+                  <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
+                    <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
+                    正在连接回复…
+                  </div>
+                )
               ) : null}
             </div>
           </div>
