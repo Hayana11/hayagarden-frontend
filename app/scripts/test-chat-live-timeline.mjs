@@ -125,7 +125,14 @@ const runStreamEnd = chatScreen.indexOf('const confirmDeferred = useCallback', r
 const runStreamBody = chatScreen.slice(runStreamStart, runStreamEnd);
 assert.match(runStreamBody, /birthStartedAt\?: number/);
 assert.match(runStreamBody, /birthStartedAtRef\.current = opts\.birthStartedAt \?\? null/);
-assert.match(runStreamBody, /\.finally\(\(\) => \{\s*setBirthNow\(null\);\s*\}\)/);
+const streamSettleStart = runStreamBody.indexOf('const res = await streamChatReply(');
+const streamSettleEnd = runStreamBody.indexOf('const reconnectWithoutAssistant', streamSettleStart);
+assert.ok(streamSettleStart >= 0 && streamSettleEnd > streamSettleStart);
+assert.doesNotMatch(
+  runStreamBody.slice(streamSettleStart, streamSettleEnd),
+  /setBirthNow\(\s*null\s*\)/,
+  'stream settlement leaves birth timer cleanup to live presentation handling',
+);
 assert.match(chatScreen, /window\.setInterval\([\s\S]*?, 100\)/);
 assert.match(chatScreen, /setBirthNow\(\(current\) => current === null \? null : performance\.now\(\)\)/, 'a late interval tick cannot revive a cleared no-segment timer');
 assert.match(chatScreen, /return \(\) => window\.clearInterval\(intervalId\)/);
