@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   appendTextDelta,
   appendSelfStateDelta,
@@ -106,3 +107,44 @@ try {
   if (typeof originalAt === 'function') Array.prototype.at = originalAt;
 }
 assert.equal(isTextCaretActive(createLiveState()), false);
+
+
+const chatScreen = readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
+const sendStart = chatScreen.indexOf('const send = useCallback(async () => {');
+const sendEnd = chatScreen.indexOf('const sendChoice = useCallback', sendStart);
+assert.ok(sendStart >= 0 && sendEnd > sendStart, 'ordinary send callback is present');
+const sendBody = chatScreen.slice(sendStart, sendEnd);
+const sendGuard = sendBody.indexOf('|| compressingImageCount > 0) return;');
+const sendStartedAt = sendBody.indexOf('const sendStartedAt = performance.now();');
+const sendPost = sendBody.indexOf('messageId = await sendChatMessage');
+assert.ok(sendGuard >= 0 && sendStartedAt > sendGuard && sendStartedAt < sendPost);
+assert.match(sendBody, /runStream\(messageId, \{ realityContext, birthStartedAt: sendStartedAt \}\)/);
+
+const runStreamStart = chatScreen.indexOf('const runStream = useCallback');
+const runStreamEnd = chatScreen.indexOf('const confirmDeferred = useCallback', runStreamStart);
+const runStreamBody = chatScreen.slice(runStreamStart, runStreamEnd);
+assert.match(runStreamBody, /birthStartedAt\?: number/);
+assert.match(runStreamBody, /birthStartedAtRef\.current = opts\.birthStartedAt \?\? null/);
+assert.match(runStreamBody, /\.finally\(\(\) => \{\s*setBirthNow\(null\);\s*\}\)/);
+assert.match(chatScreen, /window\.setInterval\([\s\S]*?, 100\)/);
+assert.match(chatScreen, /return \(\) => window\.clearInterval\(intervalId\)/);
+assert.match(chatScreen, /if \(hasLiveSegments\)[\s\S]*?birthStartedAtRef\.current = null/);
+
+const renderLiveStart = chatScreen.indexOf('function renderLive(');
+const renderLiveEnd = chatScreen.indexOf('// Modern: all loaded msgs.', renderLiveStart);
+const renderLiveBody = chatScreen.slice(renderLiveStart, renderLiveEnd);
+assert.match(renderLiveBody, /出生 \{Math\.max\(0, \(birthNow - birthStartedAtRef\.current\) \/ 1000\)\.toFixed\(1\)\}s/);
+assert.ok(renderLiveBody.indexOf('renderMemoryRecall(l.memoryRecall') < renderLiveBody.indexOf('出生 {'));
+assert.match(renderLiveBody, /birthStartedAtRef\.current !== null \?[\s\S]*?正在连接回复…/);
+
+const sendChoiceStart = chatScreen.indexOf('const sendChoice = useCallback');
+const sendChoiceEnd = chatScreen.indexOf('const chooseOption = useCallback', sendChoiceStart);
+assert.doesNotMatch(chatScreen.slice(sendChoiceStart, sendChoiceEnd), /birthStartedAt/);
+const confirmationStart = chatScreen.indexOf('const confirmDeferred = useCallback');
+const confirmationEnd = chatScreen.indexOf('const send = useCallback', confirmationStart);
+assert.doesNotMatch(chatScreen.slice(confirmationStart, confirmationEnd), /birthStartedAt/);
+const redoStart = chatScreen.indexOf('const redo = useCallback');
+const redoEnd = chatScreen.indexOf('const saveEdit = useCallback', redoStart);
+assert.doesNotMatch(chatScreen.slice(redoStart, redoEnd), /birthStartedAt/);
+
+console.log('chat birth timer wiring checks: PASS');
