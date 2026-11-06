@@ -127,6 +127,7 @@ assert.match(runStreamBody, /birthStartedAt\?: number/);
 assert.match(runStreamBody, /birthStartedAtRef\.current = opts\.birthStartedAt \?\? null/);
 assert.match(runStreamBody, /\.finally\(\(\) => \{\s*setBirthNow\(null\);\s*\}\)/);
 assert.match(chatScreen, /window\.setInterval\([\s\S]*?, 100\)/);
+assert.match(chatScreen, /setBirthNow\(\(current\) => current === null \? null : performance\.now\(\)\)/, 'a late interval tick cannot revive a cleared no-segment timer');
 assert.match(chatScreen, /return \(\) => window\.clearInterval\(intervalId\)/);
 assert.match(chatScreen, /if \(hasLiveSegments\)[\s\S]*?birthStartedAtRef\.current = null/);
 
