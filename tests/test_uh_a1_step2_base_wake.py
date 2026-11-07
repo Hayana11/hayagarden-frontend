@@ -305,11 +305,11 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         )
         binding_start = section.index("        if silent:")
         cache_refresh_start = section.index(
-            "        if (\\n            wake_cache_refresh_candidate",
+            "        if (\n            wake_cache_refresh_candidate",
             binding_start,
         )
         transcript_binding = section[binding_start:cache_refresh_start]
-        silent_branch, native_branch = transcript_binding.split("        else:\\n", 1)
+        silent_branch, native_branch = transcript_binding.split("        else:\n", 1)
         self.assertIn("commit_shared_transcript_watermark(", silent_branch)
         self.assertIn("prepare_shared_transcript_native_binding(", native_branch)
         self.assertIn(
