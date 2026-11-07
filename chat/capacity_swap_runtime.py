@@ -8,6 +8,7 @@ Does not rewrite Step 8-A selection, Manual Forge, or cold fallback semantics.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -52,11 +53,7 @@ from chat.cold_bootstrap_budget import (
 from chat.context_window_forge import atomic_write_jsonl_fsync
 from chat.claude_event_mapping import (
     ERROR_MAPPING_LAG,
-    MappingRejected,
-    _assert_planned_event_sessions,
-    _plan_one_round_from_graph,
     attempt_mapping_catchup_through,
-    mapping_role_for_event,
     latest_complete_assistant_watermark,
     registry_mapping_lags_watermark,
 )
@@ -467,267 +464,183 @@ def _load_mapping_rows_for_messages(
     return tuple(_mapping_rows_for_messages_conn(conn, list(message_ids)))
 
 
-def _validate_context_plan_round_mapping(
+_NATIVE_MESSAGE_ROLES = frozenset({'user', 'provider_input', 'assistant'})
+
+
+def _transport_error(code: str, message: str) -> CapacitySwapRuntimeError:
+    return CapacitySwapRuntimeError(message, error_code=code)
+
+
+def _context_plan_raw_representations(
+    context_plan: Any,
+) -> list[tuple[Any, tuple[tuple[Any, tuple[int, ...]], ...]]]:
+    """Raw representations in plan order, each member with its message ids.
+
+    ContextPlan already decided which members are legal; this only resolves
+    the durable message ids the transport has to carry.
+    """
+    from chat.daily_runtime import _context_source_message_ids
+
+    out: list[tuple[Any, tuple[tuple[Any, tuple[int, ...]], ...]]] = []
+    seen_refs: set[str] = set()
+    for representation in tuple(getattr(context_plan, 'representations', ()) or ()):
+        if str(getattr(representation, 'kind', '') or '') != 'raw':
+            continue
+        members = []
+        for member in tuple(getattr(representation, 'source_members', ()) or ()):
+            ref = str(getattr(member, 'source_ref', '') or '')
+            ids = _context_source_message_ids(ref)
+            if not ids:
+                raise _transport_error(
+                    'context_plan_capacity_raw_source_unresolved',
+                    'ContextPlan raw source reference cannot be resolved',
+                )
+            if ref in seen_refs:
+                raise _transport_error(
+                    'context_plan_capacity_raw_source_duplicated',
+                    'Capacity ContextPlan raw source is duplicated',
+                )
+            seen_refs.add(ref)
+            members.append((member, tuple(int(value) for value in ids)))
+        out.append((representation, tuple(members)))
+    if not out:
+        raise _transport_error(
+            'context_plan_capacity_resume_seed_missing',
+            'Capacity ContextPlan has no raw resume seed',
+        )
+    return out
+
+
+def _native_rows_by_message(
+    mapping_rows: Sequence[Mapping[str, Any]],
     *,
     graph: Any,
-    round_item: Any,
-    user_id: int,
-    assistant_id: int,
     claude_session_id: str,
     context_id: int,
     context_epoch: int,
     resident_generation: int,
     scan_offset: int,
-    mapping_rows: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], ...]:
-    """Bind the shared mapping planner to persisted rows and ContextPlan ids.
+    exact_ids: set[int],
+) -> dict[int, list[dict[str, Any]]]:
+    """Mapping rows that bind messages to this source transcript generation.
 
-    The shared planner remains the authority for candidate/role/session/terminal
-    semantics. This adapter only proves persisted DB rows, source offsets, and
-    ContextPlan message identities are the same events.
+    Rows of other generations belong to another transcript and are not native
+    here. A raw member's row that claims this generation must be exact, or it
+    fails closed.
     """
-    try:
-        planned = tuple(_plan_one_round_from_graph(
-            graph,
-            round_item,
-            user_message_id=int(user_id),
-            assistant_message_id=int(assistant_id),
-            claude_session_id=str(claude_session_id),
-            context_id=int(context_id),
-            context_epoch=int(context_epoch),
-            resident_generation=int(resident_generation),
-        ))
-    except MappingRejected as exc:
-        # Existing Capacity raw rounds may end with a tool result after a
-        # provider tool_use event. Reuse the shared role/session authority for
-        # that shape; all other planner rejections remain fail-closed.
-        if str(getattr(exc, 'error_code', '')) != 'incomplete_round_not_terminal_assistant':
-            raise CapacitySwapRuntimeError(
-                'ContextPlan raw assistant mapping is not exact',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            ) from exc
-        persisted_message_ids: dict[str, int] = {}
-        for raw_mapping in mapping_rows:
-            raw_uuid = str(raw_mapping.get('event_uuid') or '').strip()
-            try:
-                persisted_message_ids[raw_uuid] = int(raw_mapping['message_id'])
-            except (KeyError, TypeError, ValueError):
-                continue
-        planned_events = []
-        planned_rows = []
-        for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ()):
-            event = graph.by_uuid.get(str(event_uuid))
-            if event is None:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw mapping event is missing',
-                    error_code='context_plan_capacity_raw_mapping_missing',
-                ) from exc
-            role = mapping_role_for_event(
-                event,
-                is_canonical_user=str(event_uuid) == str(
-                    getattr(round_item, 'candidate_user_event_uuid', ''),
-                ),
-            )
-            if role is None:
-                continue
-            planned_events.append(event)
-            planned_rows.append({
-                'event_uuid': str(event_uuid),
-                'message_id': (
-                    int(user_id)
-                    if role == 'user'
-                    else (
-                        int(assistant_id)
-                        if event.event_role is EventRole.ASSISTANT
-                        else int(persisted_message_ids.get(
-                            str(event_uuid),
-                            int(assistant_id),
-                        ))
-                    )
-                ),
-                'role': role,
-                'claude_session_id': str(event.session_id or ''),
-                'context_id': int(context_id),
-                'context_epoch': int(context_epoch),
-                'resident_generation': int(resident_generation),
-                'jsonl_byte_offset': event.byte_offset,
-            })
-        try:
-            _assert_planned_event_sessions(
-                planned_events,
-                registry_session_id=str(claude_session_id),
-            )
-        except MappingRejected as session_exc:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan raw assistant mapping is not exact',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            ) from session_exc
-        planned = tuple(planned_rows)
-
-    if sum(str(row.get('role') or '') == 'user' for row in planned) != 1:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw user mapping is not exact',
-            error_code='context_plan_capacity_raw_mapping_invalid',
-        )
-    if not any(
-        graph.by_uuid[str(row['event_uuid'])].event_role is EventRole.ASSISTANT
-        for row in planned
-    ):
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw assistant mapping is incomplete',
-            error_code='context_plan_capacity_raw_mapping_missing',
-        )
-
-    rows_by_uuid: dict[str, dict[str, Any]] = {}
-    user_rows_by_message: dict[int, list[str]] = {}
-    assistant_rows_for_message: set[str] = set()
+    out: dict[int, list[dict[str, Any]]] = {}
+    seen: set[str] = set()
     for raw in mapping_rows:
-        uid = str(raw.get('event_uuid') or '').strip()
-        if not uid:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan mapping event UUID is missing',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            )
-        if uid in rows_by_uuid:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan mapping event UUID is duplicated',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            )
-        rows_by_uuid[uid] = dict(raw)
         try:
+            if int(raw.get('resident_generation')) != int(resident_generation):
+                continue
+            uid = str(raw.get('event_uuid') or '').strip()
             mid = int(raw.get('message_id'))
-        except (TypeError, ValueError) as exc:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan mapping message id is invalid',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            ) from exc
-        role = str(raw.get('role') or '')
-        if role == 'user':
-            user_rows_by_message.setdefault(mid, []).append(uid)
-        if role in {'assistant', 'tool_use'} and mid == int(assistant_id):
-            assistant_rows_for_message.add(uid)
-
-    user_rows = user_rows_by_message.get(int(user_id), [])
-    if len(user_rows) == 0:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw user mapping is missing',
-            error_code='context_plan_capacity_raw_mapping_missing',
-        )
-    if len(user_rows) != 1:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw user mapping is ambiguous',
-            error_code='context_plan_capacity_raw_mapping_invalid',
-        )
-
-    expected_assistant_uuids = {
-        str(row['event_uuid'])
-        for row in planned
-        if graph.by_uuid[str(row['event_uuid'])].event_role is EventRole.ASSISTANT
-    }
-    if assistant_rows_for_message != expected_assistant_uuids:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw assistant mapping set is not exact',
-            error_code='context_plan_capacity_raw_mapping_invalid',
-        )
-
-    offsets: list[int] = []
-    for expected in planned:
-        uid = str(expected['event_uuid'])
-        actual = rows_by_uuid.get(uid)
-        event = graph.by_uuid.get(uid)
-        if actual is None or event is None:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan raw mapping event is missing',
-                error_code='context_plan_capacity_raw_mapping_missing',
-            )
-        try:
-            actual_mid = int(actual['message_id'])
-            actual_offset = actual['jsonl_byte_offset']
-            event_offset = getattr(event, 'byte_offset', None)
-            if (
-                isinstance(actual_offset, bool)
-                or not isinstance(actual_offset, int)
-                or isinstance(event_offset, bool)
-                or not isinstance(event_offset, int)
+            offset = raw.get('jsonl_byte_offset')
+            event = graph.by_uuid.get(uid)
+            if not uid or uid in seen or mid <= 0:
+                raise ValueError(uid)
+            if mid in exact_ids and (
+                event is None
+                or str(raw.get('claude_session_id') or '') != str(claude_session_id)
+                or str(getattr(event, 'session_id', '') or '') != str(claude_session_id)
+                or int(raw.get('context_id')) != int(context_id)
+                or int(raw.get('context_epoch')) != int(context_epoch)
+                or isinstance(offset, bool)
+                or not isinstance(offset, int)
+                or offset != getattr(event, 'byte_offset', None)
+                or not 0 <= offset < int(scan_offset)
             ):
-                raise ValueError('mapping offset is not an integer')
-            if int(actual_offset) != int(event_offset):
-                raise ValueError('mapping offset differs from transcript')
-            if actual_offset < 0 or actual_offset >= int(scan_offset):
-                raise ValueError('mapping offset outside source prefix')
-            offsets.append(int(actual_offset))
+                raise ValueError(uid)
         except (KeyError, TypeError, ValueError) as exc:
-            raise CapacitySwapRuntimeError(
-                'ContextPlan raw mapping offset is invalid',
-                error_code='context_plan_capacity_raw_mapping_invalid',
+            raise _transport_error(
+                'context_plan_capacity_raw_mapping_invalid',
+                'ContextPlan raw native mapping is not exact',
             ) from exc
-        if (
-            actual_mid != int(expected['message_id'])
-            or str(actual.get('role') or '') != str(expected['role'] or '')
-            or str(actual.get('claude_session_id') or '') != str(claude_session_id)
-            or int(actual.get('context_id') or 0) != int(context_id)
-            or int(actual.get('context_epoch') or 0) != int(context_epoch)
-            or int(actual.get('resident_generation') or 0) != int(resident_generation)
-        ):
-            raise CapacitySwapRuntimeError(
-                'ContextPlan raw mapping identity differs from transcript',
-                error_code='context_plan_capacity_raw_mapping_invalid',
-            )
-
-    if len(set(offsets)) != len(offsets) or tuple(sorted(offsets)) != tuple(offsets):
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw mapping offsets are not strictly ordered',
-            error_code='context_plan_capacity_raw_mapping_invalid',
-        )
-    return planned
+        seen.add(uid)
+        out.setdefault(mid, []).append(dict(raw))
+    return out
 
 
-def _context_plan_raw_members(context_plan: Any) -> list[tuple[Any, int, int]]:
-    """Return exact completed-turn members selected by one ContextPlan."""
-    raw_members: list[tuple[Any, int, int]] = []
-    for representation in tuple(getattr(context_plan, 'representations', ()) or ()):
-        if str(getattr(representation, 'kind', '') or '') != 'raw':
+def _context_plan_raw_transport(
+    raw_representations: Sequence[tuple[Any, Sequence[tuple[Any, tuple[int, ...]]]]],
+    rows_by_mid: Mapping[int, Sequence[Mapping[str, Any]]],
+    *,
+    graph: Any,
+) -> tuple[list[Any], list[str]]:
+    """Choose the transport per raw representation; never split one.
+
+    Every member natively mapped: carry the representation's source rounds.
+    Any member with no native mapping at all: the whole representation goes
+    readable through the continuity materializer. Partial mapping fails.
+    """
+    owner_by_uuid = {
+        str(row['event_uuid']): (int(mid), str(row.get('role') or ''))
+        for mid, rows in rows_by_mid.items()
+        for row in rows
+    }
+    round_by_uuid = {
+        str(event_uuid): round_item
+        for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ())
+        for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ())
+    }
+    native_rounds: list[Any] = []
+    claimed_by: dict[str, int] = {}
+    readable_ids: list[str] = []
+    for index, (representation, members) in enumerate(raw_representations):
+        absent = False
+        for _member, ids in members:
+            mapped = [mid for mid in ids if rows_by_mid.get(int(mid))]
+            if not mapped:
+                absent = True
+            elif len(mapped) != len(ids):
+                raise _transport_error(
+                    'context_plan_capacity_raw_mapping_invalid',
+                    'ContextPlan raw source is only partly mapped',
+                )
+        if absent:
+            readable_ids.append(str(getattr(representation, 'representation_id', '') or ''))
             continue
-        for member in tuple(getattr(representation, 'source_members', ()) or ()):
-            source_kind = str(getattr(member, 'source_kind', '') or '')
-            source_ref = str(getattr(member, 'source_ref', '') or '')
-            parts = source_ref.split(':')
-            if source_kind != 'completed_turn' or len(parts) != 3 or parts[0] != 'turn':
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw source is not a completed turn',
-                    error_code='context_plan_capacity_raw_source_invalid',
-                )
-            try:
-                user_id = int(parts[1])
-                assistant_id = int(parts[2])
-            except (TypeError, ValueError) as exc:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw source reference is invalid',
-                    error_code='context_plan_capacity_raw_source_invalid',
-                ) from exc
-            if user_id <= 0 or assistant_id <= 0:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw source reference is invalid',
-                    error_code='context_plan_capacity_raw_source_invalid',
-                )
-            raw_members.append((
-                member,
-                user_id,
-                assistant_id,
-            ))
-    raw_members.sort(key=lambda item: int(getattr(item[0], 'seq', 0) or 0))
-    if not raw_members:
-        raise CapacitySwapRuntimeError(
-            'Capacity ContextPlan has no raw resume seed',
-            error_code='context_plan_capacity_resume_seed_missing',
-        )
-    refs = [str(getattr(item[0], 'source_ref', '') or '') for item in raw_members]
-    if len(refs) != len(set(refs)):
-        raise CapacitySwapRuntimeError(
-            'Capacity ContextPlan raw source is duplicated',
-            error_code='context_plan_capacity_raw_source_duplicated',
-        )
-    return raw_members
+        id_set = {int(mid) for _member, ids in members for mid in ids}
+        for _member, ids in members:
+            for mid in ids:
+                for row in rows_by_mid[int(mid)]:
+                    round_item = round_by_uuid.get(str(row['event_uuid']))
+                    if round_item is None:
+                        raise _transport_error(
+                            'context_plan_capacity_raw_round_missing',
+                            'ContextPlan raw native event is outside every source round',
+                        )
+                    key = str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
+                    if key in claimed_by:
+                        if claimed_by[key] != index:
+                            raise _transport_error(
+                                'context_plan_capacity_raw_source_duplicated',
+                                'ContextPlan raw round is duplicated',
+                            )
+                        continue
+                    if bool(getattr(round_item, 'has_sidechain_impact', False)):
+                        raise _transport_error(
+                            'context_plan_capacity_raw_sidechain_invalid',
+                            'ContextPlan raw round has sidechain impact',
+                        )
+                    for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ()):
+                        owner = owner_by_uuid.get(str(event_uuid))
+                        if (
+                            owner is not None
+                            and owner[1] in _NATIVE_MESSAGE_ROLES
+                            and owner[0] not in id_set
+                        ):
+                            raise _transport_error(
+                                'context_plan_capacity_raw_round_foreign',
+                                'ContextPlan raw round carries an unselected message',
+                            )
+                    claimed_by[key] = index
+                    native_rounds.append(round_item)
+    native_rounds.sort(key=lambda round_item: int(getattr(
+        graph.by_uuid[str(round_item.candidate_user_event_uuid)], 'byte_offset', 0,
+    ) or 0))
+    return native_rounds, readable_ids
 
 
 def _capacity_context_candidate_session_id(
@@ -751,52 +664,6 @@ def _capacity_context_candidate_session_id(
             f'{str(trigger_reason)}'
         ),
     ))
-
-
-def _capacity_context_source_member_from_db(
-    *,
-    conn: Any,
-    context_id: int,
-    context_epoch: int,
-    user_id: int,
-    assistant_id: int,
-) -> Any:
-    from continuity.sources import build_source_members, derive_completed_turns
-
-    rows = conn.execute(
-        'SELECT DISTINCT m.* FROM chat_messages m '
-        'JOIN daily_message_contexts dmc ON dmc.message_id=m.id '
-        'WHERE dmc.context_id=? AND dmc.context_epoch=? '
-        'AND m.id IN (?,?) ORDER BY m.id ASC',
-        (int(context_id), int(context_epoch), int(user_id), int(assistant_id)),
-    ).fetchall()
-    turns = tuple(derive_completed_turns(rows))
-    expected_ref = 'turn:%d:%d' % (int(user_id), int(assistant_id))
-    matched = tuple(turn for turn in turns if turn.turn_id == expected_ref)
-    if len(matched) != 1:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw source cannot be revalidated',
-            error_code='context_plan_capacity_raw_identity_mismatch',
-        )
-    members = tuple(build_source_members(matched, ()))
-    if len(members) != 1:
-        raise CapacitySwapRuntimeError(
-            'ContextPlan raw source identity is ambiguous',
-            error_code='context_plan_capacity_raw_identity_mismatch',
-        )
-    return members[0]
-
-
-def _capacity_context_source_identity(member: Any) -> tuple[Any, ...]:
-    return (
-        str(getattr(member, 'source_ref', '') or ''),
-        str(getattr(member, 'source_revision', '') or ''),
-        str(getattr(member, 'source_kind', '') or ''),
-        str(getattr(member, 'content_hash', '') or ''),
-        getattr(member, 'span_start', None),
-        getattr(member, 'span_end', None),
-        str(getattr(member, 'branch_id', '') or ''),
-    )
 
 
 def _capacity_context_emitted_event_uuids(
@@ -889,11 +756,12 @@ def prepare_capacity_swap_for_context_plan(
     static_system: str,
     claude_home: Optional[str] = None,
 ) -> CapacitySwapRuntimeResult:
-    """Build an exact raw-only candidate from the consumed ContextPlan.
+    """Transport the consumed ContextPlan into a Capacity candidate.
 
-    This is the gate-on WHAT adapter. It deliberately does not call the
-    legacy anchor/tail selector. The transport/publish/staged-resume path stays
-    in run_capacity_swap_handoff().
+    ContextPlan owns WHAT; this decides only HOW each raw representation
+    travels (native source rounds, or readable first-stdin materialization)
+    and hands off. It does not re-judge source kinds or call the legacy
+    anchor/tail selector.
     """
     reason = str(trigger_reason or '').strip()
     source_gen = int(plan.resident_generation)
@@ -914,7 +782,7 @@ def prepare_capacity_swap_for_context_plan(
         return _failure('trigger_not_capacity', [f'rejected_reason:{reason}'])
 
     try:
-        raw_members = _context_plan_raw_members(context_plan)
+        raw_representations = _context_plan_raw_representations(context_plan)
         anchor_section, anchor_status, anchor_message_id = (
             _context_plan_window_anchor(context_plan)
         )
@@ -980,6 +848,19 @@ def prepare_capacity_swap_for_context_plan(
         logger.info('capacity ContextPlan source read failed: %s', type(exc).__name__)
         return _failure('source_transcript_unreadable', [type(exc).__name__])
 
+    raw_ids = {
+        int(mid)
+        for _representation, members in raw_representations
+        for _member, ids in members
+        for mid in ids
+    }
+    if int(plan.user_message_id) in raw_ids or (
+        int(anchor_message_id) == int(plan.user_message_id)
+        and anchor_section is not None
+        and anchor_status != AnchorStatus.ANCHOR_UNAVAILABLE
+    ):
+        return _failure('context_plan_capacity_current_user_in_candidate')
+
     conn = dc._connect(plan.db_path)
     try:
         formal = _load_formal_messages_excluding_current(
@@ -990,233 +871,68 @@ def prepare_capacity_swap_for_context_plan(
             cursor_before=plan.cursor_before,
         )
         mids = [int(m['id']) for m in formal]
-        canonical, mid_to_event, event_to_mid = _load_mapping_for_messages(conn, mids)
-        mapping_rows = _load_mapping_rows_for_messages(conn, mids)
-
-        anchor_event_uuid = (
-            str(mid_to_event.get(int(anchor_message_id)) or '').strip()
-            if int(anchor_message_id) > 0
-            else ''
+        canonical, mid_to_event, _event_to_mid = _load_mapping_for_messages(conn, mids)
+        rows_by_mid = _native_rows_by_message(
+            _load_mapping_rows_for_messages(conn, sorted(set(mids) | raw_ids)),
+            graph=graph,
+            claude_session_id=sid,
+            context_id=source_ctx,
+            context_epoch=source_epoch,
+            resident_generation=source_gen,
+            scan_offset=scan_offset,
+            exact_ids=raw_ids,
         )
-        anchor_canonical = (
-            canonical.get(anchor_event_uuid)
-            if anchor_event_uuid
-            else None
-        )
-        if (
-            anchor_section is not None
-            and anchor_status != AnchorStatus.ANCHOR_UNAVAILABLE
-        ):
-            if int(anchor_message_id) == int(plan.user_message_id):
-                raise CapacitySwapRuntimeError(
-                    'current user is the ContextPlan window anchor',
-                    error_code='context_plan_capacity_current_user_in_candidate',
-                )
-            anchor_row = next(
-                (
-                    row for row in formal
-                    if int(row.get('id') or 0) == int(anchor_message_id)
-                ),
-                None,
-            )
-            if anchor_row is None:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan window anchor source row is unavailable',
-                    error_code='context_plan_capacity_anchor_identity_mismatch',
-                )
-            from chat.attachment_contract import provider_current_turn_attachments
-            from chat.capacity_swap import _estimate_canonical_token_count
-            from chat.context_window_preview import _canonical_user_payload_from_db
-            from continuity.sources import evidence_ref
-            actual_anchor = evidence_ref(anchor_row, prefix='message')
-            expected_anchor = (
-                str(getattr(anchor_section, 'source_ref', '') or ''),
-                str(getattr(anchor_section, 'source_revision', '') or ''),
-                str(getattr(anchor_section, 'content_hash', '') or ''),
-                int(getattr(anchor_section, 'estimated_tokens', 0) or 0),
-            )
-            if anchor_status == AnchorStatus.ANCHOR_TOO_LARGE:
-                db_anchor_canonical = _canonical_user_payload_from_db(
-                    content=str(anchor_row.get('content') or ''),
-                    image_url=str(anchor_row.get('image_url') or ''),
-                    file_url=str(anchor_row.get('file_url') or ''),
-                    file_name=str(anchor_row.get('file_name') or ''),
-                    attachments=anchor_row.get('attachments'),
-                )
-                actual_anchor_identity = (
-                    str(actual_anchor.source_ref),
-                    str(actual_anchor.source_revision),
-                    str(actual_anchor.content_hash),
-                    int(_estimate_canonical_token_count(db_anchor_canonical)),
-                )
-                if actual_anchor_identity != expected_anchor:
-                    raise CapacitySwapRuntimeError(
-                        'ContextPlan window anchor source identity or cost changed',
-                        error_code='context_plan_capacity_anchor_identity_mismatch',
-                    )
-            else:
-                if not anchor_event_uuid or anchor_canonical is None:
-                    raise CapacitySwapRuntimeError(
-                        'ContextPlan window anchor mapping is unavailable',
-                        error_code='context_plan_capacity_anchor_mapping_missing',
-                    )
-                actual_anchor_identity = (
-                    str(actual_anchor.source_ref),
-                    str(actual_anchor.source_revision),
-                    str(actual_anchor.content_hash),
-                    int(_estimate_canonical_token_count(anchor_canonical)),
-                )
-                if actual_anchor_identity != expected_anchor:
-                    raise CapacitySwapRuntimeError(
-                        'ContextPlan window anchor source identity or cost changed',
-                        error_code='context_plan_capacity_anchor_identity_mismatch',
-                    )
-                if anchor_status in {
-                    AnchorStatus.ANCHOR_RETAINED,
-                    AnchorStatus.ANCHOR_IMAGE_DEGRADED,
-                }:
-                    normalized_attachments = provider_current_turn_attachments(
-                        anchor_row.get('attachments') or [],
-                        legacy_image_url=anchor_row.get('image_url') or '',
-                        legacy_file_url=anchor_row.get('file_url') or '',
-                        legacy_file_name=anchor_row.get('file_name') or '',
-                    )
-                    has_image_attachment = any(
-                        item.get('type') == 'image'
-                        for item in normalized_attachments
-                    )
-                    expected_status = (
-                        AnchorStatus.ANCHOR_IMAGE_DEGRADED
-                        if has_image_attachment and isinstance(anchor_canonical, str)
-                        else AnchorStatus.ANCHOR_RETAINED
-                    )
-                    if anchor_status != expected_status:
-                        raise CapacitySwapRuntimeError(
-                            'ContextPlan window anchor status changed',
-                            error_code='context_plan_capacity_anchor_identity_mismatch',
-                        )
-                    anchor_event = graph.by_uuid.get(anchor_event_uuid)
-                    if (
-                        anchor_event is None
-                        or anchor_event.event_role != EventRole.CANDIDATE_USER
-                    ):
-                        raise CapacitySwapRuntimeError(
-                            'ContextPlan window anchor is not a candidate user event',
-                            error_code='context_plan_capacity_anchor_mapping_invalid',
-                        )
-
-        round_by_user: dict[str, Any] = {}
-        for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ()):
-            candidate_uuid = str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
-            if not candidate_uuid or candidate_uuid in round_by_user:
-                raise CapacitySwapRuntimeError(
-                    'Capacity source candidate round identity is ambiguous',
-                    error_code='context_plan_capacity_raw_identity_mismatch',
-                )
-            round_by_user[candidate_uuid] = round_item
-
-        selected_rounds: list[Any] = []
-        selected_round_users: set[str] = set()
-        for member, user_id, assistant_id in raw_members:
-            if int(user_id) == int(plan.user_message_id):
-                raise CapacitySwapRuntimeError(
-                    'current user is present in the raw ContextPlan carrier',
-                    error_code='context_plan_capacity_current_user_in_candidate',
-                )
-            user_event_uuid = str(mid_to_event.get(int(user_id)) or '').strip()
-            if not user_event_uuid:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw user mapping is missing',
-                    error_code='context_plan_capacity_raw_mapping_missing',
-                )
-            user_event = graph.by_uuid.get(user_event_uuid)
-            if user_event is None or user_event.event_role != EventRole.CANDIDATE_USER:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw user mapping is not a candidate event',
-                    error_code='context_plan_capacity_raw_mapping_invalid',
-                )
-            round_item = round_by_user.get(user_event_uuid)
-            if round_item is None:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw completed turn is absent from source graph',
-                    error_code='context_plan_capacity_raw_round_missing',
-                )
-            if bool(getattr(round_item, 'has_sidechain_impact', False)):
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw completed turn has sidechain impact',
-                    error_code='context_plan_capacity_raw_sidechain_invalid',
-                )
-            if user_event_uuid in selected_round_users:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw round is duplicated',
-                    error_code='context_plan_capacity_raw_source_duplicated',
-                )
-            _validate_context_plan_round_mapping(
-                graph=graph,
-                round_item=round_item,
-                user_id=int(user_id),
-                assistant_id=int(assistant_id),
-                claude_session_id=str(registry['claude_session_id']),
-                context_id=source_ctx,
-                context_epoch=source_epoch,
-                resident_generation=source_gen,
-                scan_offset=int(registry['scan_offset']),
-                mapping_rows=mapping_rows,
-            )
-            source_member = _capacity_context_source_member_from_db(
-                conn=conn,
-                context_id=source_ctx,
-                context_epoch=source_epoch,
-                user_id=user_id,
-                assistant_id=assistant_id,
-            )
-            if (
-                _capacity_context_source_identity(source_member)
-                != _capacity_context_source_identity(member)
-            ):
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw source identity changed',
-                    error_code='context_plan_capacity_raw_identity_mismatch',
-                )
-            selected_rounds.append(round_item)
-            selected_round_users.add(user_event_uuid)
-
-        anchor_raw_satisfied = bool(
-            int(anchor_message_id) > 0
-            and any(
-                int(user_id) == int(anchor_message_id)
-                for _member, user_id, _assistant_id in raw_members
-            )
-        )
-        planned_anchor_raw_satisfied = getattr(
-            context_plan,
-            'window_anchor_raw_satisfied',
-            None,
-        )
-        if (
-            isinstance(planned_anchor_raw_satisfied, bool)
-            and planned_anchor_raw_satisfied != anchor_raw_satisfied
-        ):
-            return _failure(
-                'context_plan_capacity_anchor_raw_parity_failed',
-                ['plan and carrier disagree on raw anchor satisfaction'],
-            )
-        selected_uuids = {
-            str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
-            for round_item in selected_rounds
-        }
-        all_round_uuids = [
-            str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
-            for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ())
-        ]
-        excluded_rounds = frozenset(
-            uuid_value for uuid_value in all_round_uuids
-            if uuid_value not in selected_uuids
+        selected_rounds, readable_ids = _context_plan_raw_transport(
+            raw_representations, rows_by_mid, graph=graph,
         )
     except CapacitySwapRuntimeError as exc:
         return _failure(exc.error_code, [str(exc)])
     finally:
         conn.close()
+
+    owner_by_uuid = {
+        str(row['event_uuid']): (int(mid), str(row.get('role') or ''))
+        for mid, rows in rows_by_mid.items()
+        for row in rows
+    }
+    canonical = dict(canonical)
+    for round_item in selected_rounds:
+        user_uuid = str(round_item.candidate_user_event_uuid)
+        if user_uuid in canonical:
+            continue
+        # A mapped Wake opens with its own provider input: carry it verbatim.
+        if owner_by_uuid.get(user_uuid, (0, ''))[1] != 'provider_input':
+            return _failure(
+                'context_plan_capacity_raw_mapping_missing',
+                ['round user payload unavailable:%s' % user_uuid],
+            )
+        content = (graph.by_uuid[user_uuid].raw.get('message') or {}).get('content')
+        canonical[user_uuid] = copy.deepcopy(content)
+
+    anchor_raw_satisfied = int(anchor_message_id) > 0 and int(anchor_message_id) in raw_ids
+    planned_anchor_raw_satisfied = getattr(
+        context_plan, 'window_anchor_raw_satisfied', None,
+    )
+    if (
+        isinstance(planned_anchor_raw_satisfied, bool)
+        and planned_anchor_raw_satisfied != anchor_raw_satisfied
+    ):
+        return _failure(
+            'context_plan_capacity_anchor_raw_parity_failed',
+            ['plan and carrier disagree on raw anchor satisfaction'],
+        )
+    anchor_standalone = bool(
+        anchor_status in {
+            AnchorStatus.ANCHOR_RETAINED,
+            AnchorStatus.ANCHOR_IMAGE_DEGRADED,
+        }
+        and not anchor_raw_satisfied
+    )
+    anchor_event_uuid = (
+        str(mid_to_event.get(int(anchor_message_id)) or '').strip()
+        if int(anchor_message_id) > 0
+        else ''
+    )
 
     cid = _capacity_context_candidate_session_id(
         plan_hash=str(getattr(context_plan, 'plan_hash', '') or ''),
@@ -1239,66 +955,59 @@ def prepare_capacity_swap_for_context_plan(
         summary_policy=SummaryPolicy.DROP,
         unknown_event_policy=UnknownEventPolicy.DROP,
         selection_policy=SelectionPolicy.FIXED_ROUND_COUNT,
-        exclude_round_candidate_uuids=excluded_rounds,
+        exclude_round_candidate_uuids=frozenset(
+            str(round_item.candidate_user_event_uuid)
+            for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ())
+            if round_item not in selected_rounds
+        ),
     )
-    try:
-        transformed = transform_transcript(graph, request)
-    except TransformError as exc:
-        return _failure(
-            'context_plan_capacity_raw_transform_failed',
-            [str(exc)],
-        )
-
-    if transformed.selected_round_count != len(selected_rounds):
-        return _failure(
-            'context_plan_capacity_raw_selection_changed',
-            ['selected=%s expected=%s' % (
-                transformed.selected_round_count, len(selected_rounds),
-            )],
-        )
-    selected_user_uuids = {
-        str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
-        for round_item in selected_rounds
-    }
-    if (
-        selected_user_uuids
-        & set(str(value) for value in transformed.dropped_sidechain_round_user_uuids)
-    ) or (
-        selected_user_uuids
-        & set(str(value) for value in transformed.dropped_unconfirmed_user_uuids)
-    ):
-        return _failure(
-            'context_plan_capacity_raw_selection_changed',
-            ['selected round was dropped by transform'],
-        )
-
-    expected_events = _capacity_context_emitted_event_uuids(
-        graph, selected_rounds,
-    )
-    actual_events = [str(value) for value in transformed.uuid_map.keys()]
-    if actual_events != expected_events:
-        return _failure(
-            'context_plan_capacity_raw_identity_mismatch',
-            ['native event set differs from exact ContextPlan rounds'],
-        )
-
-    events: list[dict[str, Any]] = list(transformed.events)
-    anchor_standalone = bool(
-        anchor_status in {
-            AnchorStatus.ANCHOR_RETAINED,
-            AnchorStatus.ANCHOR_IMAGE_DEGRADED,
+    events: list[dict[str, Any]] = []
+    expected_events: list[str] = []
+    if selected_rounds:
+        try:
+            transformed = transform_transcript(graph, request)
+        except TransformError as exc:
+            return _failure(
+                'context_plan_capacity_raw_transform_failed',
+                [str(exc)],
+            )
+        selected_user_uuids = {
+            str(round_item.candidate_user_event_uuid) for round_item in selected_rounds
         }
-        and not anchor_raw_satisfied
-    )
+        if (
+            transformed.selected_round_count != len(selected_rounds)
+            or selected_user_uuids & set(
+                str(value) for value in transformed.dropped_sidechain_round_user_uuids
+            )
+            or selected_user_uuids & set(
+                str(value) for value in transformed.dropped_unconfirmed_user_uuids
+            )
+        ):
+            return _failure(
+                'context_plan_capacity_raw_selection_changed',
+                ['selected=%s expected=%s' % (
+                    transformed.selected_round_count, len(selected_rounds),
+                )],
+            )
+        expected_events = _capacity_context_emitted_event_uuids(
+            graph, selected_rounds,
+        )
+        if [str(value) for value in transformed.uuid_map.keys()] != expected_events:
+            return _failure(
+                'context_plan_capacity_raw_identity_mismatch',
+                ['native event set differs from exact ContextPlan rounds'],
+            )
+        events = list(transformed.events)
+
     anchor_output_event_uuid = None
     if anchor_standalone:
-        if not anchor_event_uuid or anchor_canonical is None:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_missing',
-                ['standalone anchor payload is unavailable'],
-            )
-        source_event = graph.by_uuid.get(anchor_event_uuid)
-        if source_event is None:
+        source_event = graph.by_uuid.get(anchor_event_uuid) if anchor_event_uuid else None
+        anchor_canonical = canonical.get(anchor_event_uuid) if anchor_event_uuid else None
+        if (
+            source_event is None
+            or anchor_canonical is None
+            or source_event.event_role != EventRole.CANDIDATE_USER
+        ):
             return _failure(
                 'context_plan_capacity_anchor_mapping_missing',
                 ['standalone anchor event is unavailable'],
@@ -1314,37 +1023,41 @@ def prepare_capacity_swap_for_context_plan(
             new_event_uuid=anchor_output_event_uuid,
             canonical=anchor_canonical,
         )
-        events = merge_prepended_user_and_tail(anchor_event, transformed.events)
-    serialized = serialize_events(events)
-    validation = validate_transcript_events(
-        events,
-        ValidatorOptions(
-            session_id=cid,
-            thinking_policy=ThinkingPolicy.DROP,
-            forbid_sidechain=True,
-            forbid_summary=True,
-            expected_round_count=(
-                None if anchor_standalone else len(selected_rounds)
-            ),
-            max_round_count=(
-                None if anchor_standalone else len(selected_rounds)
-            ),
-            old_uuids=set(graph.by_uuid.keys()),
-            unknown_event_mode='reject',
-        ),
-    )
-    if not validation.ok:
-        return _failure(
-            'context_plan_capacity_raw_validator_rejected',
-            list(validation.errors),
+        events = (
+            merge_prepended_user_and_tail(anchor_event, events)
+            if events else [anchor_event]
         )
+    serialized = serialize_events(events) if events else ''
+    if events:
+        validation = validate_transcript_events(
+            events,
+            ValidatorOptions(
+                session_id=cid,
+                thinking_policy=ThinkingPolicy.DROP,
+                forbid_sidechain=True,
+                forbid_summary=True,
+                expected_round_count=(
+                    None if anchor_standalone else len(selected_rounds)
+                ),
+                max_round_count=(
+                    None if anchor_standalone else len(selected_rounds)
+                ),
+                old_uuids=set(graph.by_uuid.keys()),
+                unknown_event_mode='reject',
+            ),
+        )
+        if not validation.ok:
+            return _failure(
+                'context_plan_capacity_raw_validator_rejected',
+                list(validation.errors),
+            )
 
     selected_message_ids: list[int] = []
     if anchor_standalone and int(anchor_message_id) > 0:
         selected_message_ids.append(int(anchor_message_id))
     for event_uuid in expected_events:
         event = graph.by_uuid.get(event_uuid)
-        message_id = int(event_to_mid.get(event_uuid, 0) or 0)
+        message_id = owner_by_uuid.get(event_uuid, (0, ''))[0]
         if message_id <= 0 and (
             event is None or event.event_role != EventRole.TOOL_RESULT_USER
         ):
@@ -1364,6 +1077,8 @@ def prepare_capacity_swap_for_context_plan(
         'context_plan_exact_raw',
         'context_plan_anchor_status:%s' % anchor_status.value,
     ]
+    if readable_ids:
+        anchor_warnings.append('context_plan_raw_readable:%d' % len(readable_ids))
     if anchor_raw_satisfied:
         anchor_warnings.append('context_plan_anchor_raw_satisfied')
     elif anchor_standalone:
@@ -1388,13 +1103,14 @@ def prepare_capacity_swap_for_context_plan(
         anchor_event_uuid=anchor_event_uuid,
         selected_round_count=len(selected_rounds),
         selected_message_ids=tuple(selected_message_ids),
-        estimated_tokens=estimate_serialized_token_count(events),
+        estimated_tokens=estimate_serialized_token_count(events) if events else 0,
         serialized_bytes=serialized_bytes,
         event_count=len(events),
         output_sha256=sha256_text(serialized),
         serialized_jsonl=serialized,
         boundary_required=True,
         warnings=tuple(anchor_warnings),
+        readable_raw_representation_ids=tuple(readable_ids),
     )
     return CapacitySwapRuntimeResult(
         ok=True,
@@ -1735,6 +1451,9 @@ class CapacitySwapStagedHooks:
 
     spawn_and_health: Callable[..., Any]
     # spawn_and_health(effective_system, env, *, resume_session_id, jsonl_path, expected_sha256) -> staged
+    # Used when no raw representation travels natively (nothing to resume).
+    spawn_fresh_and_health: Optional[Callable[..., Any]] = None
+    # spawn_fresh_and_health(effective_system, env, *, session_id) -> staged
 
 
 def run_capacity_swap_handoff(
@@ -1770,29 +1489,52 @@ def run_capacity_swap_handoff(
             source_resident_generation=prep.source_resident_generation,
         )
 
-    try:
-        jsonl_path, file_sha = publish_capacity_swap_candidate_jsonl(
-            cand, cwd=cwd, claude_home=claude_home,
-        )
-    except CapacitySwapRuntimeError as exc:
+    # Only a ContextPlan candidate whose raw history all travels readable has
+    # nothing to resume; any other empty candidate keeps failing at publish.
+    fresh = int(cand.event_count) == 0 and bool(
+        getattr(cand, 'readable_raw_representation_ids', ())
+    )
+    if fresh and staged_hooks.spawn_fresh_and_health is None:
         return CapacitySwapRuntimeResult(
             ok=False,
-            error_code=exc.error_code,
+            error_code='staged_fresh_unsupported',
             candidate=cand,
             source_context_id=prep.source_context_id,
             source_context_epoch=prep.source_context_epoch,
             source_resident_generation=prep.source_resident_generation,
         )
+    jsonl_path = file_sha = None
+    if not fresh:
+        try:
+            jsonl_path, file_sha = publish_capacity_swap_candidate_jsonl(
+                cand, cwd=cwd, claude_home=claude_home,
+            )
+        except CapacitySwapRuntimeError as exc:
+            return CapacitySwapRuntimeResult(
+                ok=False,
+                error_code=exc.error_code,
+                candidate=cand,
+                source_context_id=prep.source_context_id,
+                source_context_epoch=prep.source_context_epoch,
+                source_resident_generation=prep.source_resident_generation,
+            )
 
     effective_system = with_capacity_boundary_suffix(static_system)
     try:
-        staged = staged_hooks.spawn_and_health(
-            effective_system,
-            dict(env),
-            resume_session_id=cand.candidate_session_id,
-            jsonl_path=jsonl_path,
-            expected_sha256=file_sha,
-        )
+        if fresh:
+            staged = staged_hooks.spawn_fresh_and_health(
+                effective_system,
+                dict(env),
+                session_id=cand.candidate_session_id,
+            )
+        else:
+            staged = staged_hooks.spawn_and_health(
+                effective_system,
+                dict(env),
+                resume_session_id=cand.candidate_session_id,
+                jsonl_path=jsonl_path,
+                expected_sha256=file_sha,
+            )
     except Exception as exc:
         logger.info('capacity swap staged failed: %s', type(exc).__name__)
         return CapacitySwapRuntimeResult(
@@ -1802,7 +1544,7 @@ def run_capacity_swap_handoff(
             source_context_id=prep.source_context_id,
             source_context_epoch=prep.source_context_epoch,
             source_resident_generation=prep.source_resident_generation,
-            jsonl_path=str(jsonl_path),
+            jsonl_path=str(jsonl_path) if jsonl_path else None,
             jsonl_sha256=file_sha,
             effective_system=effective_system,
             warnings=[f'{type(exc).__name__}:{exc}'],
@@ -1817,7 +1559,7 @@ def run_capacity_swap_handoff(
         source_resident_generation=prep.source_resident_generation,
         target_resident_generation=int(cand.target_resident_generation),
         candidate_session_id=cand.candidate_session_id,
-        jsonl_path=str(jsonl_path),
+        jsonl_path=str(jsonl_path) if jsonl_path else None,
         jsonl_sha256=file_sha,
         effective_system=effective_system,
         warnings=list(prep.warnings),

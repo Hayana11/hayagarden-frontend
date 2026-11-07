@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 import cc_resident
 import config_store
@@ -2113,8 +2113,35 @@ def _freeze_capacity_context_bootstrap(
     }
 
 
+def _capacity_readable_raw_blocks(
+    plan: DailyTurnPlan,
+    *,
+    context_plan: Any,
+    chunk_bodies: dict[str, str],
+    readable_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Materialize readable raw blocks before handoff, so a failure leaves the old resident."""
+    wanted = {str(value) for value in readable_ids}
+    blocks = [
+        dict(block)
+        for block in _project_context_plan_history(
+            plan,
+            context_plan=context_plan,
+            chunk_bodies=chunk_bodies,
+        ).get('context_plan_representation_blocks') or []
+        if str(block.get('kind') or '') == 'raw'
+        and str(block.get('representation_id') or '') in wanted
+    ]
+    if len(blocks) != len(wanted):
+        raise DailyRuntimeError(
+            'readable Capacity raw representation is unavailable',
+            error_code='context_plan_source_unavailable',
+        )
+    return blocks
+
+
 def _project_capacity_context_bootstrap(plan: DailyTurnPlan) -> dict[str, Any]:
-    """Project only chunk blocks plus fixed first-stdin content."""
+    """Project chunk and readable raw blocks plus fixed first-stdin content."""
     context_plan = getattr(plan, 'capacity_context_plan', None)
     if context_plan is None:
         raise DailyRuntimeError(
@@ -2127,13 +2154,22 @@ def _project_capacity_context_bootstrap(plan: DailyTurnPlan) -> dict[str, Any]:
         chunk_bodies=dict(getattr(plan, 'capacity_context_chunk_bodies', {}) or {}),
     )
     bootstrap = dict(getattr(plan, 'capacity_context_bootstrap', None) or {})
-    chunk_blocks = [
-        dict(block)
-        for block in (assembly.get('context_plan_representation_blocks') or [])
-        if isinstance(block, dict) and str(block.get('kind') or '') == 'chunk'
-    ]
+    readable = {
+        str(block['representation_id']): dict(block)
+        for block in (bootstrap.get('readable_raw_blocks') or ())
+    }
+    blocks = []
+    for block in (assembly.get('context_plan_representation_blocks') or []):
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get('kind') or '')
+        if kind == 'chunk':
+            blocks.append(dict(block))
+        elif kind == 'raw' and str(block.get('representation_id') or '') in readable:
+            blocks.append(readable[str(block['representation_id'])])
+    chunk_blocks = [block for block in blocks if block['kind'] == 'chunk']
     assembly['capacity_context_bootstrap'] = True
-    assembly['context_plan_representation_blocks'] = chunk_blocks
+    assembly['context_plan_representation_blocks'] = blocks
     assembly['current_day_history'] = []
     assembly['day_handoff'] = ''
     assembly['carryover_messages'] = []
@@ -2169,7 +2205,8 @@ def _project_capacity_context_bootstrap(plan: DailyTurnPlan) -> dict[str, Any]:
         'context_plan_id': str(getattr(context_plan, 'plan_id', '') or ''),
         'context_plan_hash': str(getattr(context_plan, 'plan_hash', '') or ''),
         'context_plan_capacity_chunk_count': len(chunk_blocks),
-        'context_plan_capacity_raw_in_first_stdin': False,
+        'context_plan_capacity_raw_in_first_stdin': bool(readable),
+        'context_plan_capacity_readable_raw_representation_ids': tuple(readable),
     })
     assembly['manifest'] = manifest
     return assembly
@@ -4109,6 +4146,7 @@ def _validate_production_context_install(
     """Fail closed unless the consumed plan is the provider-visible install."""
     context_plan = _context_plan_for_receipt(plan)
     capacity_split = _is_capacity_context_plan(plan)
+    readable_raw_ids: set[str] = set()
     if capacity_split:
         plan.manifest['capacity_context_install_parity'] = 'PENDING'
     if context_plan is None:
@@ -4371,8 +4409,16 @@ def _validate_production_context_install(
                 'Capacity first-stdin bootstrap is missing',
                 error_code='context_plan_capacity_bootstrap_missing',
             )
+        readable_raw_ids = {
+            str(block.get('representation_id') or '')
+            for block in (
+                (getattr(plan, 'capacity_context_bootstrap', None) or {})
+                .get('readable_raw_blocks') or ()
+            )
+        }
         if assembly.get('context_plan_representation_blocks') and any(
             str(block.get('kind') or '') == 'raw'
+            and str(block.get('representation_id') or '') not in readable_raw_ids
             for block in assembly.get('context_plan_representation_blocks')
             if isinstance(block, dict)
         ):
@@ -4419,6 +4465,7 @@ def _validate_production_context_install(
         representation for representation in context_plan.representations
         if not capacity_split
         or str(getattr(representation, 'kind', '') or '') == 'chunk'
+        or str(getattr(representation, 'representation_id', '') or '') in readable_raw_ids
     )
     if len(blocks) != len(expected_blocks):
         raise DailyRuntimeError(
@@ -5710,30 +5757,14 @@ def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStage
     """Production hooks: spawn a sibling ResidentSession for staged --resume."""
     import cc_resident as _cc
 
-    def spawn_and_health(
-        system_text,
-        env,
-        *,
-        resume_session_id,
-        jsonl_path,
-        expected_sha256,
-    ):
+    def _staged(start, **health):
         cwd = str(getattr(live_resident, 'cwd', '') or '')
         allowed = str(getattr(live_resident, '_allowed_tools', '') or '')
         mcp = str(getattr(live_resident, '_mcp_config_path', '') or (cwd + '/cc-tools.json'))
         staged = _cc.ResidentSession(cwd, allowed, mcp)
         try:
-            staged.spawn_resumable(
-                system_text,
-                env,
-                resume_session_id=str(resume_session_id),
-                tool_profile=DAILY_TOOL_PROFILE,
-                reason='capacity_swap',
-            )
-            staged.wait_staged_health(
-                jsonl_path=jsonl_path,
-                expected_sha256=expected_sha256,
-            )
+            start(staged)
+            staged.wait_staged_health(**health)
         except Exception:
             try:
                 staged._kill(quiet=True)
@@ -5742,7 +5773,43 @@ def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStage
             raise
         return staged
 
-    return CapacitySwapStagedHooks(spawn_and_health=spawn_and_health)
+    def spawn_and_health(
+        system_text,
+        env,
+        *,
+        resume_session_id,
+        jsonl_path,
+        expected_sha256,
+    ):
+        return _staged(
+            lambda staged: staged.spawn_resumable(
+                system_text,
+                env,
+                resume_session_id=str(resume_session_id),
+                tool_profile=DAILY_TOOL_PROFILE,
+                reason='capacity_swap',
+            ),
+            jsonl_path=jsonl_path,
+            expected_sha256=expected_sha256,
+        )
+
+    def spawn_fresh_and_health(system_text, env, *, session_id):
+        staged = _staged(lambda staged: staged.spawn_fresh_named(
+            system_text,
+            env,
+            session_id=str(session_id),
+            tool_profile=DAILY_TOOL_PROFILE,
+            reason='capacity_swap',
+        ))
+        # Capacity owns this session's bootstrap/reprepare; the hot Daily
+        # turn must not treat it as a cold respawn (not "CURRENT user sent").
+        staged._cold = False
+        return staged
+
+    return CapacitySwapStagedHooks(
+        spawn_and_health=spawn_and_health,
+        spawn_fresh_and_health=spawn_fresh_and_health,
+    )
 
 
 def reprepare_after_registered_session_change(
@@ -6501,6 +6568,20 @@ def _attempt_capacity_swap_before_stdin(
                 static_system=target_system,
                 claude_home=claude_home,
             )
+            readable_ids = tuple(getattr(
+                getattr(prepare_result, 'candidate', None),
+                'readable_raw_representation_ids',
+                (),
+            ) or ())
+            if readable_ids:
+                plan.capacity_context_bootstrap['readable_raw_blocks'] = (
+                    _capacity_readable_raw_blocks(
+                        plan,
+                        context_plan=context_plan,
+                        chunk_bodies=dict(chunk_bodies),
+                        readable_ids=readable_ids,
+                    )
+                )
         except DailyRuntimeError as exc:
             return {
                 'ok': False,

@@ -100,6 +100,10 @@ class CapacitySwapCandidate:
 
     warnings: tuple[str, ...] = ()
 
+    # ContextPlan raw representations carried as readable first-stdin bodies
+    # because a member has no native mapping in the source transcript.
+    readable_raw_representation_ids: tuple[str, ...] = ()
+
 
 @dataclass
 class CapacitySwapPrepareResult:
