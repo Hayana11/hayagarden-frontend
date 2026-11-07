@@ -498,7 +498,7 @@ def _fake_spawn_resumable(self, system_text, env, *, resume_session_id, tool_pro
     self._proc = _AliveProc(9003)
     self._system_text = system_text
     self._session_id = resume_session_id
-    self._cold = True
+    self._cold = False  # mirrors real spawn_resumable
     self._generation += 1
 
 
@@ -543,7 +543,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
             'TARGET', {}, resume_session_id='forged', jsonl_path='/tmp/x.jsonl',
             expected_sha256='0' * 64,
         )
-        self.assertTrue(resumed._cold)  # resumable Capacity unchanged
+        self.assertFalse(resumed._cold)  # resumable is already hot; #659 leaves it alone
 
     def _plan(self):
         return types.SimpleNamespace(
