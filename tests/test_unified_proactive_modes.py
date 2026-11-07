@@ -292,8 +292,21 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
                 mock.patch.object(uh, 'prepare_shared_transcript_watermark',
                                   return_value=(watermark, 'ok')), \
                 mock.patch.object(uh, 'begin_shared_wake_delivery_fence', return_value=fence), \
-                mock.patch.object(uh, 'commit_shared_transcript_watermark',
-                                  return_value={'committed': True}), \
+                mock.patch.object(
+                    uh,
+                    'prepare_shared_transcript_native_binding',
+                    return_value={
+                        'context_id': 1,
+                        'context_epoch': 1,
+                        'resident_generation': 1,
+                        'process_generation': 1,
+                        'claude_session_id': 'sid-1',
+                        'transcript_path': '/tmp/sid-1.jsonl',
+                        'start_offset': 0,
+                        'end_offset': 120,
+                        'events': [],
+                    },
+                ), \
                 mock.patch.object(cc_history_rewrite, 'guard_cc_generation',
                                   side_effect=lambda events: events), \
                 mock.patch.object(display_thinking, 'get_display_thinking_snapshot',

@@ -5641,6 +5641,7 @@ def _run_unified_normal_main_chat_turn(
         from chat.cc_history_rewrite import guard_cc_generation
         from chat.unified_heartbeat_a1 import (
             begin_shared_wake_delivery_fence,
+            commit_shared_transcript_watermark,
             prepare_shared_transcript_native_binding,
             prepare_shared_transcript_watermark,
         )
@@ -5965,11 +5966,22 @@ def _run_unified_normal_main_chat_turn(
         result_cache_info['self_state'] = ''.join(self_state_acc)
         result_cache_info['display_segments'] = display_segments.to_json()
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
-        native_transcript_binding = prepare_shared_transcript_native_binding(
-            watermark,
-            resident,
-            jsonl_finality=jsonl_finality,
-        )
+        native_transcript_binding = None
+        transcript_skip = None
+        if silent:
+            transcript_skip = commit_shared_transcript_watermark(
+                watermark,
+                resident,
+                db_path=DB_PATH,
+                jsonl_finality=jsonl_finality,
+            )
+            result_cache_info['transcript_skip'] = transcript_skip
+        else:
+            native_transcript_binding = prepare_shared_transcript_native_binding(
+                watermark,
+                resident,
+                jsonl_finality=jsonl_finality,
+            )
         if (
             wake_cache_refresh_candidate is not None
             and wake_cache_refresh_candidate[0] is not None
@@ -5979,15 +5991,28 @@ def _run_unified_normal_main_chat_turn(
                 wall_at=wake_cache_refresh_candidate[0],
                 monotonic_at=wake_cache_refresh_candidate[1],
             )
-        _wake_live_trace(
-            trace_id,
-            'NATIVE_BINDING_PREPARED',
-            context_id=int(watermark.context_id),
-            context_epoch=int(watermark.context_epoch),
-            resident_generation=int(watermark.resident_generation),
-            start_offset=native_transcript_binding['start_offset'],
-            end_offset=native_transcript_binding['end_offset'],
-        )
+        if transcript_skip is not None:
+            _wake_live_trace(
+                trace_id,
+                'WATERMARK_COMMIT',
+                watermark_committed=True,
+                context_id=transcript_skip.get('context_id'),
+                context_epoch=int(watermark.context_epoch),
+                resident_generation=transcript_skip.get('resident_generation'),
+                main_skip_start=transcript_skip.get('start_offset'),
+                main_skip_end=transcript_skip.get('end_offset'),
+                registry_scan_offset=transcript_skip.get('end_offset'),
+            )
+        else:
+            _wake_live_trace(
+                trace_id,
+                'NATIVE_BINDING_PREPARED',
+                context_id=int(watermark.context_id),
+                context_epoch=int(watermark.context_epoch),
+                resident_generation=int(watermark.resident_generation),
+                start_offset=native_transcript_binding['start_offset'],
+                end_offset=native_transcript_binding['end_offset'],
+            )
         return {
             'text': text,
             'silent': silent,
