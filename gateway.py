@@ -5625,14 +5625,7 @@ def _run_unified_normal_main_chat_turn(
     activity_desc: str = '',
     self_trigger_note: str = '',
 ) -> dict:
-    """Run one proactive round through the formal main Chat resident path.
-
-    This is deliberately a provider-only control round: the existing main
-    Chat resident receives the smallest possible internal trigger, while the
-    SharedTranscriptWatermark keeps that control range out of formal Chat
-    user/assistant mapping. No Planner, B2, B3 Renderer, or fallback runner
-    is involved.
-    """
+    """Run a shared normal Wake turn through the main Chat resident."""
     # Everything from entry to the stdin flush is pre-model: nothing in this
     # prologue has shown the trigger (or a reminder note) to the model.
     try:
@@ -5644,6 +5637,7 @@ def _run_unified_normal_main_chat_turn(
         from chat.unified_heartbeat_a1 import (
             begin_shared_wake_delivery_fence,
             commit_shared_transcript_watermark,
+            prepare_shared_transcript_native_binding,
             prepare_shared_transcript_watermark,
         )
         from chat.display_thinking import (
@@ -5967,13 +5961,22 @@ def _run_unified_normal_main_chat_turn(
         result_cache_info['self_state'] = ''.join(self_state_acc)
         result_cache_info['display_segments'] = display_segments.to_json()
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
-        transcript_skip = commit_shared_transcript_watermark(
-            watermark,
-            resident,
-            db_path=DB_PATH,
-            jsonl_finality=jsonl_finality,
-        )
-        result_cache_info['transcript_skip'] = transcript_skip
+        native_transcript_binding = None
+        transcript_skip = None
+        if silent:
+            transcript_skip = commit_shared_transcript_watermark(
+                watermark,
+                resident,
+                db_path=DB_PATH,
+                jsonl_finality=jsonl_finality,
+            )
+            result_cache_info['transcript_skip'] = transcript_skip
+        else:
+            native_transcript_binding = prepare_shared_transcript_native_binding(
+                watermark,
+                resident,
+                jsonl_finality=jsonl_finality,
+            )
         if (
             wake_cache_refresh_candidate is not None
             and wake_cache_refresh_candidate[0] is not None
@@ -5983,27 +5986,16 @@ def _run_unified_normal_main_chat_turn(
                 wall_at=wake_cache_refresh_candidate[0],
                 monotonic_at=wake_cache_refresh_candidate[1],
             )
-        observation_skip = result_cache_info.get(
-            'observation_transcript_skip'
-        )
+        binding_range = transcript_skip or native_transcript_binding
         _wake_live_trace(
             trace_id,
-            'WATERMARK_COMMIT',
-            watermark_committed=True,
-            context_id=transcript_skip.get('context_id'),
-            context_epoch=transcript_skip.get('context_epoch'),
-            resident_generation=transcript_skip.get('resident_generation'),
-            observation_skip_start=(
-                observation_skip.get('start_offset')
-                if isinstance(observation_skip, dict) else None
-            ),
-            observation_skip_end=(
-                observation_skip.get('end_offset')
-                if isinstance(observation_skip, dict) else None
-            ),
-            main_skip_start=transcript_skip.get('start_offset'),
-            main_skip_end=transcript_skip.get('end_offset'),
-            registry_scan_offset=transcript_skip.get('end_offset'),
+            'WATERMARK_COMMIT' if transcript_skip else 'NATIVE_BINDING_PREPARED',
+            watermark_committed=transcript_skip is not None,
+            context_id=int(watermark.context_id),
+            context_epoch=int(watermark.context_epoch),
+            resident_generation=int(watermark.resident_generation),
+            start_offset=binding_range['start_offset'],
+            end_offset=binding_range['end_offset'],
         )
         return {
             'text': text,
@@ -6018,6 +6010,7 @@ def _run_unified_normal_main_chat_turn(
                 or 'claude-code:shared-resident'
             ),
             'cache_info': result_cache_info,
+            'native_transcript_binding': native_transcript_binding,
             '_shared_delivery_fence': delivery_fence,
         }
     except UnifiedNormalWakeSharedUnavailable as exc:
@@ -10656,6 +10649,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 surfaced_desire_ids=[],
                 desire_ledger_enabled=False,
                 cache_info=main_cache_info,
+                native_transcript_binding=main_turn.get(
+                    'native_transcript_binding'
+                ),
                 tool_calls_json=json.dumps(
                     [
                         {k: v for k, v in call.items() if k != 'id'}
@@ -11291,6 +11287,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 cache_info=wake_cache_info,
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
+                native_transcript_binding=render_out.get(
+                    'native_transcript_binding'
+                ),
                 settle_fired_drive=(
                     None
                     if basic_normal

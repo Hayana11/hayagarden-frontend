@@ -292,8 +292,33 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
                 mock.patch.object(uh, 'prepare_shared_transcript_watermark',
                                   return_value=(watermark, 'ok')), \
                 mock.patch.object(uh, 'begin_shared_wake_delivery_fence', return_value=fence), \
-                mock.patch.object(uh, 'commit_shared_transcript_watermark',
-                                  return_value={'committed': True}), \
+                mock.patch.object(
+                    uh,
+                    'commit_shared_transcript_watermark',
+                    return_value={
+                        'context_id': 1,
+                        'context_epoch': 1,
+                        'resident_generation': 1,
+                        'start_offset': 0,
+                        'end_offset': 120,
+                        'skipped_provider_round': True,
+                    },
+                ), \
+                mock.patch.object(
+                    uh,
+                    'prepare_shared_transcript_native_binding',
+                    return_value={
+                        'context_id': 1,
+                        'context_epoch': 1,
+                        'resident_generation': 1,
+                        'process_generation': 1,
+                        'claude_session_id': 'sid-1',
+                        'transcript_path': '/tmp/sid-1.jsonl',
+                        'start_offset': 0,
+                        'end_offset': 120,
+                        'events': [],
+                    },
+                ), \
                 mock.patch.object(cc_history_rewrite, 'guard_cc_generation',
                                   side_effect=lambda events: events), \
                 mock.patch.object(display_thinking, 'get_display_thinking_snapshot',
@@ -349,6 +374,10 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         self.assertTrue(result['silent'])
         self.assertEqual(result['text'], '')
         self.assertIn('只回复 [[SILENT]]，它不会发给她', sent[0])
+        self.assertTrue(
+            result['cache_info']['transcript_skip']['skipped_provider_round']
+        )
+        self.assertIsNone(result['native_transcript_binding'])
 
     def test_spoken_text_is_not_silent_and_marker_never_leaks(self):
         result, _ = self._run(events=self._done('早安 [[SILENT]]'))
