@@ -5982,9 +5982,9 @@ def _run_unified_normal_main_chat_turn(
         _wake_live_trace(
             trace_id,
             'NATIVE_BINDING_PREPARED',
-            context_id=native_transcript_binding['context_id'],
-            context_epoch=native_transcript_binding['context_epoch'],
-            resident_generation=native_transcript_binding['resident_generation'],
+            context_id=int(watermark.context_id),
+            context_epoch=int(watermark.context_epoch),
+            resident_generation=int(watermark.resident_generation),
             start_offset=native_transcript_binding['start_offset'],
             end_offset=native_transcript_binding['end_offset'],
         )

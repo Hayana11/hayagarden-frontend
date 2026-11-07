@@ -1267,12 +1267,10 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 {},
             ))
 
-        commit_result = {
-            'context_id': 12,
-            'resident_generation': 2,
+        native_binding = {
             'start_offset': 100,
             'end_offset': 250,
-            'skipped_provider_round': True,
+            'events': [],
         }
         patches = (
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
@@ -1295,8 +1293,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 return_value=(self.watermark(), 'ok'),
             ),
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark',
-                return_value=commit_result,
+                uh, 'prepare_shared_transcript_native_binding',
+                return_value=native_binding,
             ),
             mock.patch.object(
                 uh, 'retire_shared_resident_after_failed_delivery',
@@ -1395,7 +1393,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 'RESIDENT_CHECK_2', 'WATERMARK_PREPARED',
                 'DELIVERY_FENCE_STARTED', 'STDIN_BEGIN', 'STDIN_FLUSHED',
                 'TOOL_USE', 'TOOL_RESULT', 'PROVIDER_DONE',
-                'JSONL_FINALITY', 'WATERMARK_COMMIT',
+                'JSONL_FINALITY', 'NATIVE_BINDING_PREPARED',
             ],
         )
         tool_use = next(event for event in events if event['stage'] == 'TOOL_USE')
