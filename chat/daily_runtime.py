@@ -5794,13 +5794,17 @@ def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStage
         )
 
     def spawn_fresh_and_health(system_text, env, *, session_id):
-        return _staged(lambda staged: staged.spawn_fresh_named(
+        staged = _staged(lambda staged: staged.spawn_fresh_named(
             system_text,
             env,
             session_id=str(session_id),
             tool_profile=DAILY_TOOL_PROFILE,
             reason='capacity_swap',
         ))
+        # Capacity owns this session's bootstrap/reprepare; the hot Daily
+        # turn must not treat it as a cold respawn (not "CURRENT user sent").
+        staged._cold = False
+        return staged
 
     return CapacitySwapStagedHooks(
         spawn_and_health=spawn_and_health,

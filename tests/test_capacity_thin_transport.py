@@ -472,5 +472,186 @@ class ThinCapacityHandoffTests(unittest.TestCase):
         self.assertEqual(result.error_code, 'staged_fresh_unsupported')
 
 
+
+class _AliveProc:
+    def __init__(self, pid):
+        self.pid = pid
+        self.killed = False
+
+    def poll(self):
+        return None if not self.killed else -9
+
+    def kill(self):
+        self.killed = True
+
+
+def _fake_spawn_fresh_named(self, system_text, env, *, session_id, tool_profile=None, reason=None):
+    # Mirrors the real state transition of ResidentSession.spawn_fresh_named.
+    self._proc = _AliveProc(9002)
+    self._system_text = system_text
+    self._session_id = session_id
+    self._cold = True
+    self._generation += 1
+
+
+def _fake_spawn_resumable(self, system_text, env, *, resume_session_id, tool_profile=None, reason=None):
+    self._proc = _AliveProc(9003)
+    self._system_text = system_text
+    self._session_id = resume_session_id
+    self._cold = True
+    self._generation += 1
+
+
+class FreshCapacityStagedColdTests(unittest.TestCase):
+    """Capacity owns the fresh session's bootstrap: no later hot->cold respawn."""
+
+    def setUp(self):
+        import cc_resident
+        self.cc = cc_resident
+        daily_runtime.reset_bindings_for_tests()
+        self.addCleanup(daily_runtime.reset_bindings_for_tests)
+        patches = [
+            mock.patch.object(cc_resident.ResidentSession, 'spawn_fresh_named', _fake_spawn_fresh_named),
+            mock.patch.object(cc_resident.ResidentSession, 'spawn_resumable', _fake_spawn_resumable),
+            mock.patch.object(cc_resident.ResidentSession, 'wait_staged_health', lambda self, **kw: None),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _live(self):
+        live = self.cc.ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        live._proc = _AliveProc(9001)
+        live._session_id = 'source-session'
+        live._system_text = 'SOURCE SYSTEM'
+        live._cold = True
+        live._generation = 1
+        live._decide_respawn_reason = lambda *a, **k: None
+        return live
+
+    def test_real_fresh_named_spawn_still_marks_the_process_cold(self):
+        import inspect
+        source = inspect.getsource(self.cc.ResidentSession.spawn_fresh_named)
+        self.assertIn('self._cold = True', source)
+
+    def test_fresh_hook_hands_back_a_capacity_owned_hot_process(self):
+        hooks = daily_runtime._default_capacity_swap_staged_hooks(self._live())
+        staged = hooks.spawn_fresh_and_health('TARGET', {}, session_id='fresh-session')
+        self.assertEqual(staged._session_id, 'fresh-session')
+        self.assertFalse(staged._cold)
+        resumed = hooks.spawn_and_health(
+            'TARGET', {}, resume_session_id='forged', jsonl_path='/tmp/x.jsonl',
+            expected_sha256='0' * 64,
+        )
+        self.assertTrue(resumed._cold)  # resumable Capacity unchanged
+
+    def _plan(self):
+        return types.SimpleNamespace(
+            request_id='capacity-fresh', chat_id='default', context_id=7, context_epoch=3,
+            resident_generation=1, resident_key='default:e3:g1', user_message_id=5,
+            epoch_token={}, lease_owner='test-owner', is_cold=False, is_respawn=False,
+            cursor_before=0, assembly={}, manifest={'provider': 'claude_code', 'model': ''},
+            user_content='CURRENT', user_image_url='', user_attachments=(),
+            provider_display_thinking_suffix='', db_path='test.db', worker_id='test-worker',
+            tool_profile='test-profile', turn_lease={}, capacity_context_plan=object(),
+            continuity_plan=None, hot_desired_plan=None, _current_user_stdin_flushed=False,
+        )
+
+    def _run_turn(self, live, plan, *, shadow=None):
+        sent = []
+        swaps = []
+
+        def attempt(plan_, **kwargs):
+            hooks = daily_runtime._default_capacity_swap_staged_hooks(live)
+            staged = hooks.spawn_fresh_and_health('TARGET', {}, session_id='fresh-session')
+            state = daily_runtime.install_capacity_swap_into_live_resident(
+                live_resident=live, staged_resident=staged,
+            )
+            plan_._staged_proc = live._proc
+            plan_.resident_generation = 2
+            plan_.resident_key = 'default:e3:g2'
+            plan_._capacity_swap_install_state = state
+            plan_._capacity_swap_deferred_old_proc = state['old_proc']
+            swaps.append(state)
+            return {'ok': True, 'effective_system': 'TARGET'}
+
+        def send_turn(content, **kwargs):
+            sent.append((live._proc.pid, live._session_id, plan.resident_generation, content))
+            plan._current_user_stdin_flushed = True  # stop at the provider boundary
+            raise _ReachedSend()
+
+        live.send_turn = send_turn
+        heartbeat = mock.Mock(failed=False)
+        heartbeat.stop.return_value = False
+        doors = iter([
+            {'requires_respawn': True, 'capacity_swap': True, 'reason': 'turn_limit'},
+            {'requires_respawn': False},
+        ])
+        with mock.patch.object(daily_runtime, 'verify_epoch_token'), \
+                mock.patch.object(daily_runtime, 'LeaseHeartbeat', return_value=heartbeat), \
+                mock.patch.object(daily_runtime, 'peek_registered_respawn_decision',
+                                  side_effect=lambda *a, **k: next(doors)), \
+                mock.patch.object(daily_runtime, '_attempt_capacity_swap_before_stdin',
+                                  side_effect=attempt), \
+                mock.patch.object(daily_runtime, 'format_resident_turn_content',
+                                  return_value='TARGET CONTENT'), \
+                mock.patch.object(daily_runtime.dc, 'get_resident_history_cursor', return_value=0), \
+                mock.patch.object(daily_runtime.dc, 'upsert_resident_owner'), \
+                mock.patch.object(daily_runtime, '_capture_transcript_start'), \
+                mock.patch.object(daily_runtime, '_validate_hot_no_op_payload'), \
+                mock.patch.object(daily_runtime, '_observe_continuity_shadow', side_effect=shadow), \
+                mock.patch.object(daily_runtime, 'try_restore_same_context_last_good') as last_good, \
+                mock.patch.object(daily_runtime, 'reprepare_after_hot_cold_mismatch') as hot_cold:
+            try:
+                list(daily_runtime.ensure_resident_and_stream(
+                    plan, resident=live, env={}, static_system='TARGET',
+                ))
+            except _ReachedSend:
+                pass
+            except daily_runtime.DailyRuntimeError as exc:
+                return sent, swaps, hot_cold, last_good, exc
+        return sent, swaps, hot_cold, last_good, None
+
+    def test_fresh_handoff_sends_current_user_from_gen2_without_gen3(self):
+        live = self._live()
+        plan = self._plan()
+        sent, swaps, hot_cold, last_good, error = self._run_turn(live, plan)
+        self.assertIsNone(error)
+        self.assertEqual(len(swaps), 1)
+        self.assertEqual(swaps[0]['old_attrs']['_session_id'], 'source-session')
+        hot_cold.assert_not_called()
+        last_good.assert_not_called()
+        # Exactly one stdin, from the staged fresh process, under gen2.
+        self.assertEqual(sent, [(9002, 'fresh-session', 2, 'TARGET CONTENT')])
+        self.assertEqual(plan.resident_generation, 2)
+        self.assertFalse(live._cold)
+        self.assertFalse(live.ensure_alive('TARGET', {}, tool_profile='test-profile'))
+        self.assertFalse(swaps[0]['old_proc'].killed)
+
+    def test_pre_stdin_failure_after_fresh_adoption_restores_the_old_process(self):
+        live = self._live()
+        old_proc = live._proc
+        plan = self._plan()
+        failure = daily_runtime.DailyRuntimeError(
+            'forced pre-stdin parity failure',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        sent, swaps, hot_cold, last_good, error = self._run_turn(live, plan, shadow=failure)
+        self.assertIsNotNone(error)
+        self.assertEqual(error.error_code, 'context_plan_current_request_parity_failed')
+        self.assertEqual(sent, [])
+        hot_cold.assert_not_called()
+        self.assertIs(live._proc, old_proc)
+        self.assertFalse(old_proc.killed)
+        self.assertTrue(live._cold)  # old resident's own flag, restored
+        self.assertTrue(plan._staged_proc.killed)  # gen2 staged process cleaned up
+        self.assertEqual(live._generation, 1)
+        self.assertEqual(live._session_id, 'source-session')
+
+
+class _ReachedSend(Exception):
+    pass
+
+
 if __name__ == '__main__':
     unittest.main()
