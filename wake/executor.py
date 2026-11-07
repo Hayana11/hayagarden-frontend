@@ -5,7 +5,7 @@ wake/executor.py
 import datetime
 import json
 import logging
-from typing import Optional
+from typing import Mapping, Optional
 
 from wake.unified_modes import is_unified_wake_provenance_mode
 
@@ -53,7 +53,8 @@ def execute(action: str, thoughts: str, content: str,
             settle_outcome_at: Optional[str] = None,
             settlement_required: bool = True,
             tool_calls_json: str = '',
-            display_segments_json: str = ''):
+            display_segments_json: str = '',
+            native_transcript_binding=None):
     """
     action: 'none' | 'message' | 'diary' | 'explore' | 'call'
       ('call' only records the call he placed: an audit row, never pushed or
@@ -326,6 +327,33 @@ def execute(action: str, thoughts: str, content: str,
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking) VALUES (?,?,?)",
                     (author, content, thoughts),
+                )
+            if native_transcript_binding is not None:
+                if (
+                    not isinstance(native_transcript_binding, Mapping)
+                    or not isinstance(wake_cache_info, dict)
+                    or action != 'message'
+                    or wake_cache_info.get('canonical_chat_history') is not True
+                    or wake_cache_info.get('unified_chat_resident') is not True
+                    or wake_cache_info.get('provider') != 'claude_code'
+                    or wake_cache_info.get('source') != 'wake'
+                ):
+                    raise RuntimeError(
+                        'wake native binding requires canonical shared Claude message'
+                    )
+                message_row = conn.execute(
+                    'SELECT last_insert_rowid()',
+                ).fetchone()
+                if message_row is None or int(message_row[0] or 0) <= 0:
+                    raise RuntimeError('wake native binding message_id missing')
+                from chat.claude_event_mapping import (
+                    commit_shared_wake_native_binding,
+                )
+                commit_shared_wake_native_binding(
+                    conn,
+                    message_id=int(message_row[0]),
+                    binding=native_transcript_binding,
+                    window_identity=window_identity,
                 )
         elif (
             deliver_chat

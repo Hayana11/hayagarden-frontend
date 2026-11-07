@@ -428,15 +428,17 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
                  mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
-                 mock.patch.object(uh, 'commit_shared_transcript_watermark', return_value={
-                     'start_offset': 100, 'end_offset': 180, 'skipped_provider_round': True,
-                 }), \
+                 mock.patch.object(
+                     uh,
+                     'prepare_shared_transcript_native_binding',
+                     return_value={'start_offset': 100, 'end_offset': 180, 'events': []},
+                 ), \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \
                  mock.patch.object(b3, 'invoke_renderer_relay') as relay:
                 out = b3.invoke_renderer(renderer_input=self.renderer_input())
         self.assertIsNotNone(out)
         self.assertTrue(out['shared_resident'])
-        self.assertTrue(out['transcript_skip']['skipped_provider_round'])
+        self.assertEqual(out['native_transcript_binding']['start_offset'], 100)
         self.assertEqual(len(resident.sent), 1)
         self.assertEqual(marker_seen_during_send, [True])
         self.assertEqual(released, [])
@@ -897,12 +899,16 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
                  mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
-                 mock.patch.object(uh, 'commit_shared_transcript_watermark', side_effect=RuntimeError('cas')), \
+                 mock.patch.object(
+                     uh,
+                     'prepare_shared_transcript_native_binding',
+                     side_effect=RuntimeError('prepare'),
+                 ), \
                  mock.patch('config_store.get_bool', return_value=True), \
                  mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
                  mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
-                with self.assertRaisesRegex(RuntimeError, 'uh_a1_transcript_watermark_commit_failed'):
+                with self.assertRaisesRegex(RuntimeError, 'prepare'):
                     b3._try_invoke_shared_renderer(
                         renderer_input=self.renderer_input(),
                     )
@@ -992,7 +998,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             ],
         }
 
-        commit_calls = []
+        binding_calls = []
         release_calls = []
         def main_stream(*args, **kwargs):
             self.assertEqual(
@@ -1065,10 +1071,14 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 return_value=(self.watermark(), 'ok'),
             ),
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark',
+                uh, 'prepare_shared_transcript_native_binding',
                 side_effect=lambda *args, **kwargs: (
-                    commit_calls.append(kwargs.get('jsonl_finality'))
-                    or {'committed': True}
+                    binding_calls.append(kwargs.get('jsonl_finality'))
+                    or {
+                        'start_offset': 100,
+                        'end_offset': 180,
+                        'events': [],
+                    }
                 ),
             ),
             mock.patch.object(
@@ -1096,7 +1106,9 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
 
         self.assertEqual(resident._replay_calls, 3)
         self.assertTrue(result['cache_info']['jsonl_usage']['stream_totals_match'])
-        self.assertEqual(len(commit_calls), 1)
+        self.assertEqual(len(binding_calls), 1)
+        self.assertEqual(result['native_transcript_binding']['end_offset'], 180)
+        self.assertNotIn('transcript_skip', result['cache_info'])
         self.assertEqual(resident.followup_calls, 0)
         list(resident.send_turn('follow-up'))
         self.assertEqual(resident.followup_calls, 1)
@@ -1151,7 +1163,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 uh, 'retire_shared_resident_after_failed_delivery',
             ) as retire,
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark', commit,
+                uh, 'prepare_shared_transcript_native_binding', commit,
             ),
             mock.patch.object(
                 cc_history_rewrite, 'guard_cc_generation',

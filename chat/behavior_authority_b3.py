@@ -495,7 +495,7 @@ def _try_invoke_shared_renderer(
         import gateway
         from chat.unified_heartbeat_a1 import (
             begin_shared_wake_delivery_fence,
-            commit_shared_transcript_watermark,
+            prepare_shared_transcript_native_binding,
             prepare_shared_transcript_watermark,
         )
         from tools.lease_signer import issue_turn_lease
@@ -585,20 +585,14 @@ def _try_invoke_shared_renderer(
         except Exception as exc:
             raise RuntimeError('uh_a1_shared_renderer_invalid_output') from exc
 
-        # This provider-only Wake round is deliberately not a formal Chat
-        # mapping pair. Advance the exact Registry scan watermark past it so
-        # the next Chat mapping starts at the next formal user turn.
-        try:
-            result['transcript_skip'] = commit_shared_transcript_watermark(
+        # Preserve the exact native range for the executor transaction.
+        result['native_transcript_binding'] = (
+            prepare_shared_transcript_native_binding(
                 watermark,
                 resident,
-                db_path=db_path,
                 jsonl_finality=result.get('transcript_finality'),
             )
-        except Exception as exc:
-            raise RuntimeError(
-                'uh_a1_transcript_watermark_commit_failed'
-            ) from exc
+        )
         candidate_wall = result.pop('_cache_refresh_candidate_at', None)
         candidate_monotonic = result.pop(
             '_cache_refresh_candidate_monotonic', None,

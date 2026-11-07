@@ -42,6 +42,7 @@ ROLE_USER = 'user'
 ROLE_ASSISTANT = 'assistant'
 ROLE_TOOL_USE = 'tool_use'
 ROLE_TOOL_RESULT_USER = 'tool_result_user'
+ROLE_PROVIDER_INPUT = 'provider_input'
 
 ERROR_MAPPING_LAG = 'mapping_lag'
 ERROR_CATCHUP_REQUIRED = 'catchup_required'
@@ -255,6 +256,68 @@ def mapping_role_for_event(event: TranscriptEvent, *, is_canonical_user: bool) -
     return None
 
 
+def plan_shared_wake_native_event_mappings(
+    graph: TranscriptGraph,
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    claude_session_id: str,
+    start_offset: int,
+    end_offset: int,
+) -> list[dict[str, Any]]:
+    """Plan native events for one shared Wake round without writing state."""
+    if len(graph.candidate_rounds) != 1:
+        raise MappingRejected(
+            f'expected one shared Wake round, got {len(graph.candidate_rounds)}',
+            error_code='shared_wake_round_shape',
+        )
+    rnd = graph.candidate_rounds[0]
+    _assert_complete_terminal_round(graph, rnd)
+    planned = []
+    planned_events = []
+    for uid in rnd.event_uuids:
+        event = graph.by_uuid[uid]
+        role = (
+            ROLE_PROVIDER_INPUT
+            if event.event_role in {
+                EventRole.CANDIDATE_USER,
+                EventRole.USER_CONTINUATION,
+            }
+            else mapping_role_for_event(event, is_canonical_user=False)
+        )
+        if role is None:
+            continue
+        offset = event.byte_offset
+        if offset is None or not int(start_offset) <= int(offset) < int(end_offset):
+            raise MappingRejected(
+                f'shared Wake event offset outside range: {uid}',
+                error_code='shared_wake_event_offset',
+            )
+        planned.append({
+            'event_uuid': str(uid),
+            'role': role,
+            'claude_session_id': str(event.session_id or '').strip(),
+            'context_id': int(context_id),
+            'context_epoch': int(context_epoch),
+            'resident_generation': int(resident_generation),
+            'jsonl_byte_offset': int(offset),
+        })
+        planned_events.append(event)
+
+    roles = {str(row['role']) for row in planned}
+    if ROLE_PROVIDER_INPUT not in roles or ROLE_ASSISTANT not in roles:
+        raise MappingRejected(
+            'shared Wake native round lacks provider input or assistant output',
+            error_code='shared_wake_native_shape',
+        )
+    _assert_planned_event_sessions(
+        planned_events,
+        registry_session_id=str(claude_session_id),
+    )
+    return planned
+
+
 def _assert_message_window(
     conn: sqlite3.Connection,
     message_id: int,
@@ -381,6 +444,102 @@ def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> st
     """Insert or idempotently confirm one mapping row. Returns event_uuid."""
     uid, _inserted = _insert_mapping_row_with_receipt(conn, planned)
     return uid
+
+
+def commit_shared_wake_native_binding(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+    binding: Mapping[str, Any],
+    window_identity: Any,
+) -> list[str]:
+    """Bind prepared Wake events and CAS its cursor in the caller transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError('shared Wake native binding requires active transaction')
+    from chat.window_identity import normalize_window_identity
+
+    identity = normalize_window_identity(window_identity)
+    context_id = int(binding['context_id'])
+    context_epoch = int(binding['context_epoch'])
+    resident_generation = int(binding['resident_generation'])
+    session_id = str(binding['claude_session_id'] or '').strip()
+    transcript_path = str(binding['transcript_path'] or '').strip()
+    process_generation = int(binding['process_generation'])
+    start_offset = int(binding['start_offset'])
+    end_offset = int(binding['end_offset'])
+    if (
+        identity is None
+        or identity['context_id'] != context_id
+        or identity['context_epoch'] != context_epoch
+        or identity['resident_generation'] != resident_generation
+    ):
+        raise MappingRejected(
+            'shared Wake native binding window identity mismatch',
+            error_code='shared_wake_window_mismatch',
+        )
+
+    registry = get_context_claude_session(
+        context_id, resident_generation, conn=conn,
+    )
+    if registry is None or (
+        int(registry['context_epoch']) != context_epoch
+        or str(registry['chat_id']) != identity['chat_id']
+        or str(registry['claude_session_id']) != session_id
+        or str(registry['transcript_path']) != transcript_path
+        or str(registry['scan_status']) != SCAN_STATUS_READY
+        or int(registry['scan_offset']) != start_offset
+        or (
+            registry.get('process_generation') is not None
+            and int(registry['process_generation']) != process_generation
+        )
+    ):
+        raise MappingRejected(
+            'shared Wake native binding Registry changed',
+            error_code='shared_wake_registry_changed',
+        )
+
+    graph = read_transcript_range(
+        transcript_path,
+        start_offset,
+        end_offset,
+    )
+    events = plan_shared_wake_native_event_mappings(
+        graph,
+        context_id=context_id,
+        context_epoch=context_epoch,
+        resident_generation=resident_generation,
+        claude_session_id=session_id,
+        start_offset=start_offset,
+        end_offset=end_offset,
+    )
+    if events != binding['events']:
+        raise MappingRejected(
+            'shared Wake native transcript range changed before commit',
+            error_code='shared_wake_transcript_changed',
+        )
+
+    mapped = []
+    for event in events:
+        row = dict(event)
+        row['message_id'] = int(message_id)
+        mapped.append(_insert_mapping_row(conn, row))
+
+    updated = cas_advance_scan_offset(
+        context_id=context_id,
+        resident_generation=resident_generation,
+        expected_offset=start_offset,
+        new_offset=end_offset,
+        last_mapped_message_id=None,
+        scan_status=SCAN_STATUS_READY,
+        scan_error_code=None,
+        conn=conn,
+    )
+    if int(updated.get('scan_offset') or -1) != end_offset:
+        raise MappingRejected(
+            'shared Wake native Registry cursor did not advance',
+            error_code='shared_wake_cursor_mismatch',
+        )
+    return mapped
 
 
 def _assert_planned_event_sessions(

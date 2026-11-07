@@ -300,6 +300,10 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
             section,
         )
         self.assertIn(
+            "prepare_shared_transcript_native_binding(",
+            section,
+        )
+        self.assertNotIn(
             "commit_shared_transcript_watermark(",
             section,
         )
