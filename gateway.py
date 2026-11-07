@@ -5625,12 +5625,7 @@ def _run_unified_normal_main_chat_turn(
     activity_desc: str = '',
     self_trigger_note: str = '',
 ) -> dict:
-    """Run one proactive round through the formal main Chat resident path.
-
-    The provider input is internal and has no daily_message_contexts pair.
-    Bind its native events to the delivered Wake message in the executor
-    transaction. No Planner, B2, B3 Renderer, or fallback runner is involved.
-    """
+    """Run a shared normal Wake turn through the main Chat resident."""
     # Everything from entry to the stdin flush is pre-model: nothing in this
     # prologue has shown the trigger (or a reminder note) to the model.
     try:
@@ -5991,28 +5986,17 @@ def _run_unified_normal_main_chat_turn(
                 wall_at=wake_cache_refresh_candidate[0],
                 monotonic_at=wake_cache_refresh_candidate[1],
             )
-        if transcript_skip is not None:
-            _wake_live_trace(
-                trace_id,
-                'WATERMARK_COMMIT',
-                watermark_committed=True,
-                context_id=transcript_skip.get('context_id'),
-                context_epoch=int(watermark.context_epoch),
-                resident_generation=transcript_skip.get('resident_generation'),
-                main_skip_start=transcript_skip.get('start_offset'),
-                main_skip_end=transcript_skip.get('end_offset'),
-                registry_scan_offset=transcript_skip.get('end_offset'),
-            )
-        else:
-            _wake_live_trace(
-                trace_id,
-                'NATIVE_BINDING_PREPARED',
-                context_id=int(watermark.context_id),
-                context_epoch=int(watermark.context_epoch),
-                resident_generation=int(watermark.resident_generation),
-                start_offset=native_transcript_binding['start_offset'],
-                end_offset=native_transcript_binding['end_offset'],
-            )
+        binding_range = transcript_skip or native_transcript_binding
+        _wake_live_trace(
+            trace_id,
+            'WATERMARK_COMMIT' if transcript_skip else 'NATIVE_BINDING_PREPARED',
+            watermark_committed=transcript_skip is not None,
+            context_id=int(watermark.context_id),
+            context_epoch=int(watermark.context_epoch),
+            resident_generation=int(watermark.resident_generation),
+            start_offset=binding_range['start_offset'],
+            end_offset=binding_range['end_offset'],
+        )
         return {
             'text': text,
             'silent': silent,

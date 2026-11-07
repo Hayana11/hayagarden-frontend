@@ -588,17 +588,12 @@ def _try_invoke_shared_renderer(
 
         # Preserve the exact native range for the executor transaction.
         if result.get('silent'):
-            try:
-                result['transcript_skip'] = commit_shared_transcript_watermark(
-                    watermark,
-                    resident,
-                    db_path=db_path,
-                    jsonl_finality=result.get('transcript_finality'),
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    'uh_a1_transcript_watermark_commit_failed'
-                ) from exc
+            result['transcript_skip'] = commit_shared_transcript_watermark(
+                watermark,
+                resident,
+                db_path=db_path,
+                jsonl_finality=result.get('transcript_finality'),
+            )
         else:
             result['native_transcript_binding'] = (
                 prepare_shared_transcript_native_binding(

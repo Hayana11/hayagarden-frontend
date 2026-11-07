@@ -467,22 +467,16 @@ def commit_shared_wake_native_binding(
     process_generation = int(binding['process_generation'])
     start_offset = int(binding['start_offset'])
     end_offset = int(binding['end_offset'])
+    registry = get_context_claude_session(
+        context_id, resident_generation, conn=conn,
+    )
     if (
         identity is None
         or identity['context_id'] != context_id
         or identity['context_epoch'] != context_epoch
         or identity['resident_generation'] != resident_generation
-    ):
-        raise MappingRejected(
-            'shared Wake native binding window identity mismatch',
-            error_code='shared_wake_window_mismatch',
-        )
-
-    registry = get_context_claude_session(
-        context_id, resident_generation, conn=conn,
-    )
-    if registry is None or (
-        int(registry['context_epoch']) != context_epoch
+        or registry is None
+        or int(registry['context_epoch']) != context_epoch
         or str(registry['chat_id']) != identity['chat_id']
         or str(registry['claude_session_id']) != session_id
         or str(registry['transcript_path']) != transcript_path
@@ -494,7 +488,7 @@ def commit_shared_wake_native_binding(
         )
     ):
         raise MappingRejected(
-            'shared Wake native binding Registry changed',
+            'shared Wake native binding window or Registry changed',
             error_code='shared_wake_registry_changed',
         )
 
