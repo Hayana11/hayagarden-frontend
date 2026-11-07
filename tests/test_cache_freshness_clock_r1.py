@@ -401,8 +401,12 @@ class CacheFreshnessBoundaryTests(unittest.TestCase):
             self,
             source,
             'stream_totals_match',
-            'commit_shared_transcript_watermark(',
+            'prepare_shared_transcript_native_binding(',
             'commit_cache_freshness(',
+        )
+        self.assertIn(
+            "if silent:\n            transcript_skip = commit_shared_transcript_watermark(",
+            source,
         )
 
     def test_unified_wake_jsonl_failure_precedes_commit(self):
@@ -423,12 +427,16 @@ class CacheFreshnessBoundaryTests(unittest.TestCase):
         _assert_order(
             self,
             source,
-            'commit_shared_transcript_watermark(',
+            'prepare_shared_transcript_native_binding(',
             'commit_cache_freshness(',
         )
-        self.assertLess(
-            source.index('uh_a1_transcript_watermark_commit_failed'),
-            source.index('commit_cache_freshness('),
+        self.assertIn(
+            "if result.get('silent'):\n            result['transcript_skip'] = commit_shared_transcript_watermark(",
+            source,
+        )
+        self.assertIn(
+            "else:\n            result['native_transcript_binding'] = (",
+            source,
         )
 
     def test_unified_wake_skip_has_no_freshness_commit(self):
