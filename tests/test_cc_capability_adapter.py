@@ -283,6 +283,57 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             shown["physical_surface_fingerprint"],
         )
 
+    def test_capability_uses_resident_http_service_when_configured(self):
+        lease_path = "/tmp/hayagarden-uh-a0-turn-leases/" + "a" * 32 + ".json"
+        stdio = build_uh_a0_mcp_config(env={"UH_A0_TURN_LEASE_PATH": lease_path})
+        self.assertEqual(stdio["mcpServers"]["capability"]["type"], "stdio")
+
+        token = "t" * 40
+        cfg = build_uh_a0_mcp_config(env={
+            "UH_A0_TURN_LEASE_PATH": lease_path,
+            "UH_A0_CAPABILITY_MCP_URL": "http://127.0.0.1:3102/mcp",
+            "UH_A0_CAPABILITY_MCP_TOKEN": token,
+        })
+        self.assertEqual(cfg["mcpServers"]["capability"], {
+            "type": "http",
+            "url": "http://127.0.0.1:3102/mcp",
+            "headers": {
+                "Authorization": "Bearer ${UH_A0_CAPABILITY_MCP_TOKEN}",
+                "X-UH-A0-Profile": "uh_a0",
+                "X-UH-A0-Turn-Lease-Path": lease_path,
+            },
+        })
+        # The config file is world-readable; only the placeholder may land in it.
+        self.assertNotIn(token, json.dumps(cfg))
+        # Only the capability entry changes transport.
+        for name in set(stdio["mcpServers"]) - {"capability"}:
+            self.assertEqual(cfg["mcpServers"][name], stdio["mcpServers"][name])
+
+        for bad in (
+            {"UH_A0_CAPABILITY_MCP_URL": "http://10.0.0.5:3102/mcp", "UH_A0_CAPABILITY_MCP_TOKEN": token},
+            {"UH_A0_CAPABILITY_MCP_URL": "http://127.0.0.1:3102/mcp"},
+            {"UH_A0_CAPABILITY_MCP_URL": "http://127.0.0.1:3102/mcp", "UH_A0_CAPABILITY_MCP_TOKEN": "short"},
+        ):
+            with self.subTest(env=sorted(bad)), self.assertRaises(ValueError):
+                build_uh_a0_mcp_config(env={"UH_A0_TURN_LEASE_PATH": lease_path, **bad})
+
+    def test_resident_capability_header_follows_each_resident_lease(self):
+        url_env = {
+            "UH_A0_CAPABILITY_MCP_URL": "http://127.0.0.1:3102/mcp",
+            "UH_A0_CAPABILITY_MCP_TOKEN": "t" * 40,
+        }
+        first = cc_resident.ResidentSession(cwd=self._tmp.name, allowed_tools="", mcp_config_path=None)
+        second = cc_resident.ResidentSession(cwd=self._tmp.name, allowed_tools="", mcp_config_path=None)
+        for session in (first, second):
+            session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
+        headers = []
+        for session in (first, second):
+            env = session._prepare_spawn_env(dict(url_env))
+            cfg = build_uh_a0_mcp_config(env=env)
+            headers.append(cfg["mcpServers"]["capability"]["headers"]["X-UH-A0-Turn-Lease-Path"])
+            self.assertEqual(headers[-1], env["UH_A0_TURN_LEASE_PATH"])
+        self.assertNotEqual(headers[0], headers[1])
+
     def test_build_mcp_config_can_omit_external_only(self):
         full = build_uh_a0_mcp_config(env={})
         lean = build_uh_a0_mcp_config(env={}, include_external=False)

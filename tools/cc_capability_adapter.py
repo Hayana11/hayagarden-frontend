@@ -121,6 +121,25 @@ UH_A0_MCP_CONFIG_FILENAME = "cc-tools-uh-a0.json"
 UH_A0_SETTINGS_FILENAME = "cc-settings-uh-a0.json"
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
 EXTERNAL_MCP_SERVER_FILENAME = "external-mcp-surface-server.js"
+CAPABILITY_MCP_URL_ENV = "UH_A0_CAPABILITY_MCP_URL"
+CAPABILITY_MCP_TOKEN_ENV = "UH_A0_CAPABILITY_MCP_TOKEN"
+MIN_CAPABILITY_MCP_TOKEN_LENGTH = 32
+CAPABILITY_TURN_LEASE_HEADER = "X-UH-A0-Turn-Lease-Path"
+
+
+def resolve_capability_mcp_url(env=None):
+    """Resident capability service URL, or "" to keep the per-spawn stdio proxy."""
+    environ = os.environ if env is None else env
+    url = str(environ.get(CAPABILITY_MCP_URL_ENV) or "").strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://127.0.0.1:", "http://localhost:")):
+        raise ValueError("UH-A0 capability MCP URL must be loopback http")
+    # The token reaches the service only through the CLI's own environment;
+    # the per-spawn config file (world-readable) carries just the placeholder.
+    if len(str(environ.get(CAPABILITY_MCP_TOKEN_ENV) or "").strip()) < MIN_CAPABILITY_MCP_TOKEN_LENGTH:
+        raise ValueError("UH-A0 capability MCP token is missing from the spawn environment")
+    return url
 
 
 def resolve_uh_a0_turn_lease_path(cwd=None, *, env=None):
@@ -312,6 +331,7 @@ def build_uh_a0_mcp_config(
     leave it out when no external tool is visible, since it would expose nothing.
     """
     root = Path(__file__).resolve().parent.parent
+    lease_path = resolve_uh_a0_turn_lease_path(env=env)
     servers = {
         "home": {
             "type": "http",
@@ -334,7 +354,7 @@ def build_uh_a0_mcp_config(
                 "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
                 "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
                 "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
-                "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
+                "UH_A0_TURN_LEASE_PATH": lease_path,
             },
         },
         "external": {
@@ -347,6 +367,19 @@ def build_uh_a0_mcp_config(
             },
         },
     }
+    capability_url = resolve_capability_mcp_url(env)
+    if capability_url:
+        # The resident capability service is shared by every Claude process;
+        # each binds its own turn lease by header at MCP initialize.
+        servers["capability"] = {
+            "type": "http",
+            "url": capability_url,
+            "headers": {
+                "Authorization": "Bearer ${" + CAPABILITY_MCP_TOKEN_ENV + "}",
+                "X-UH-A0-Profile": "uh_a0",
+                CAPABILITY_TURN_LEASE_HEADER: lease_path,
+            },
+        }
     if not include_external:
         del servers["external"]
     if legacy_mcp_config_path is not None:
