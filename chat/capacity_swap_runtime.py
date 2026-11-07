@@ -1489,7 +1489,11 @@ def run_capacity_swap_handoff(
             source_resident_generation=prep.source_resident_generation,
         )
 
-    fresh = int(cand.event_count) == 0
+    # Only a ContextPlan candidate whose raw history all travels readable has
+    # nothing to resume; any other empty candidate keeps failing at publish.
+    fresh = int(cand.event_count) == 0 and bool(
+        getattr(cand, 'readable_raw_representation_ids', ())
+    )
     if fresh and staged_hooks.spawn_fresh_and_health is None:
         return CapacitySwapRuntimeResult(
             ok=False,

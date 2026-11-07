@@ -412,10 +412,11 @@ class ThinCapacityBootstrapTests(unittest.TestCase):
 
 
 class ThinCapacityHandoffTests(unittest.TestCase):
-    def _prep(self, event_count):
+    def _prep(self, event_count, readable=('raw:recent',)):
         candidate = types.SimpleNamespace(
             event_count=event_count, candidate_session_id='cand-session',
             target_resident_generation=2, serialized_jsonl='',
+            readable_raw_representation_ids=readable,
         )
         return types.SimpleNamespace(
             ok=True, candidate=candidate, source_context_id=7, source_context_epoch=3,
@@ -443,6 +444,21 @@ class ThinCapacityHandoffTests(unittest.TestCase):
         self.assertEqual(result.target_resident_generation, 2)
         self.assertEqual(fresh.call_args.kwargs, {'session_id': 'cand-session'})
         self.assertEqual(result.staged_resident, 'staged')
+
+    def test_empty_candidate_without_readable_raw_still_fails_at_publish(self):
+        fresh = mock.Mock(side_effect=AssertionError('legacy empty is not fresh'))
+        result = run_capacity_swap_handoff(
+            plan=types.SimpleNamespace(transcript_cwd='/tmp'),
+            trigger_reason='soft_context', static_system='STATIC', env={},
+            live_resident=types.SimpleNamespace(cwd='/tmp'),
+            staged_hooks=CapacitySwapStagedHooks(
+                spawn_and_health=mock.Mock(), spawn_fresh_and_health=fresh,
+            ),
+            prepare_result=self._prep(0, readable=()),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, 'empty_candidate')
+        fresh.assert_not_called()
 
     def test_fresh_session_without_a_fresh_hook_fails_closed(self):
         result = run_capacity_swap_handoff(
