@@ -108,6 +108,39 @@ class ResidentEffortTests(unittest.TestCase):
             def poll(self):
                 return None
 
+        with patch.dict(sys.modules, modules), \
+                patch.object(cc_resident.config_store, 'get', side_effect=config_get), \
+                patch.object(cc_resident.subprocess, 'Popen', return_value=Proc()) as popen:
+            main = cc_resident.ResidentSession('/tmp', '', '')
+            main._spawn('system', None)
+            self.assertIn(['--effort', 'high'], [popen.call_args.args[0][i:i + 2] for i in range(len(popen.call_args.args[0]) - 1)])
+
+            staged = cc_resident.ResidentSession('/tmp', '', '')
+            staged.spawn_resumable('system', None, resume_session_id='session-1')
+            fresh = cc_resident.ResidentSession('/tmp', '', '')
+            fresh.spawn_fresh_named('system', None, session_id='12345678-1234-5678-1234-567812345678')
+            self.assertEqual(popen.call_count, 3)
+            for call in popen.call_args_list:
+                args = call.args[0]
+                self.assertIn('--effort', args)
+                self.assertIn('high', args)
+
+    def test_resume_uses_fresh_system_prompt_snapshot_without_changing_spawn_surface(self):
+        import cc_resident
+
+        resident, modules, config_get = self._resident()
+
+        class Proc:
+            pid = 123
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self):
+                return None
+
+        model_args = ['--model', 'claude-sonnet-5']
+        effort_args = ['--effort', 'high']
         with (
             patch.dict(sys.modules, modules),
             patch.object(cc_resident.config_store, 'get', side_effect=config_get),
