@@ -75,6 +75,7 @@ class ResidentEffortTests(unittest.TestCase):
         runtime.claude_cmd_for_version = lambda version, *args, **kwargs: ['/native/versions/' + version, *args]
         runtime.require_managed_claude_runtime = lambda **kwargs: '2.1.280'
         runtime.require_pinned_claude_version = runtime.require_managed_claude_runtime
+        runtime.service_home = lambda env=None: '/tmp'
         history = types.ModuleType('chat.cc_history_rewrite')
         history.current_history_rewrite_epoch = lambda: ''
         history.sanitize_bound_epoch = lambda value: str(value or '')
@@ -123,6 +124,68 @@ class ResidentEffortTests(unittest.TestCase):
                 args = call.args[0]
                 self.assertIn('--effort', args)
                 self.assertIn('high', args)
+
+    def test_resume_uses_fresh_system_prompt_snapshot_without_changing_spawn_surface(self):
+        import cc_resident
+
+        resident, modules, config_get = self._resident()
+
+        class Proc:
+            pid = 123
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self):
+                return None
+
+        model_args = ['--model', 'claude-sonnet-5']
+        effort_args = ['--effort', 'high']
+        with patch.dict(sys.modules, modules), \\
+                patch.object(cc_resident.config_store, 'get', side_effect=config_get), \\
+                patch.object(cc_resident.subprocess, 'Popen', return_value=Proc()) as popen, \\
+                patch.object(cc_model, 'cc_model_snapshot', return_value=(
+                    'claude-sonnet-5', 'explicit:claude-sonnet-5', model_args,
+                )), \\
+                patch.object(cc_model, 'cc_model_runtime_compatibility', return_value=(True, None)), \\
+                patch.object(cc_effort, 'cc_effort_snapshot', return_value=(
+                    'high', 'explicit:high', effort_args,
+                )):
+            resident.ResidentSession('/tmp', 'Read,Glob', '/tmp/cc-tools.json')._spawn('system', None)
+            resident.ResidentSession('/tmp', 'Read,Glob', '/tmp/cc-tools.json').spawn_resumable(
+                'system', None, resume_session_id='session-1',
+            )
+            resident.ResidentSession('/tmp', 'Read,Glob', '/tmp/cc-tools.json').spawn_fresh_named(
+                'system', None, session_id='12345678-1234-5678-1234-567812345678',
+            )
+
+        fresh_args, resume_args, fresh_named_args = [
+            call.args[0] for call in popen.call_args_list
+        ]
+        self.assertEqual(popen.call_count, 3)
+        self.assertNotIn('--system-prompt-snapshot', fresh_args)
+        self.assertEqual(resume_args.count('--system-prompt-snapshot'), 1)
+        self.assertEqual(
+            resume_args[resume_args.index('--system-prompt-snapshot') + 1],
+            'off',
+        )
+        self.assertNotIn('--system-prompt-snapshot', fresh_named_args)
+
+        for args in (fresh_args, resume_args, fresh_named_args):
+            with self.subTest(args=args):
+                self.assertIn('--model', args)
+                self.assertEqual(args[args.index('--model') + 1], 'claude-sonnet-5')
+                self.assertIn('--effort', args)
+                self.assertEqual(args[args.index('--effort') + 1], 'high')
+                self.assertIn('--tools', args)
+                self.assertEqual(args[args.index('--tools') + 1], '')
+                self.assertEqual(args[args.index('--mcp-config') + 1], '/tmp/cc-tools.json')
+                self.assertIn('--strict-mcp-config', args)
+                self.assertEqual(args[args.index('--allowedTools') + 1], 'Read,Glob')
+                self.assertEqual(
+                    args[args.index('--thinking-display') + 1],
+                    'summarized',
+                )
 
     def test_default_spawn_omits_effort(self):
         import cc_resident
