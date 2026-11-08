@@ -107,7 +107,9 @@ def _chat_stream_failure_event(exc, *, partial_rescue=False):
         error_type = str(getattr(exc, 'provider_error_type', None) or '')
         category = str(getattr(exc, 'provider_error_category', None) or '')
         failure_class = str(getattr(exc, 'turn_failure_class', None) or '')
-        if category == 'reasoning_extraction' or category == 'content_safety_refusal':
+        if code == 'max_agentic_turns':
+            message = 'Claude Code 本轮工具调用次数达到配置上限，当前回复已停止。'
+        elif category == 'reasoning_extraction' or category == 'content_safety_refusal':
             message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
         elif category == 'rate_limit':
             message = 'Claude 请求暂时受限，请稍后再试。'
