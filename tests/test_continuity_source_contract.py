@@ -7,6 +7,7 @@ import unittest
 
 from continuity.contracts import SourceMember
 from continuity.coverage import validate_exact_coverage
+from continuity.materialization import materialize_source_members
 from continuity.sources import (
     build_source_members,
     build_source_snapshot,
@@ -207,6 +208,40 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
         )
         self.assertTrue(report.valid)
         self.assertEqual(report.source_hash, first.source_hash)
+
+    def test_earlier_wake_precedes_later_turn_through_materialization(self):
+        same_time = '2026-09-08 10:00:00'
+        wake_cache = json.dumps({
+            'wake_mode': 'normal',
+            'canonical_chat_history': True,
+            'unified_chat_resident': True,
+            'b3_authority': True,
+            'source': 'wake',
+            'provider': 'claude_code',
+        })
+        rows = [
+            row(
+                1, 'assistant', 'WAKE_1_BODY',
+                source_kind='wake', cache_info=wake_cache, created_at=same_time,
+            ),
+            row(2, 'hayana', 'TURN_2_USER', created_at=same_time),
+            row(3, 'assistant', 'TURN_3_ASSISTANT', created_at=same_time),
+        ]
+        members = build_source_members(
+            derive_completed_turns(rows),
+            derive_autonomous_events(rows),
+        )
+
+        self.assertEqual(
+            [(member.seq, member.source_kind, member.source_ref) for member in members],
+            [(0, 'autonomous_event', 'wake:1'), (1, 'completed_turn', 'turn:2:3')],
+        )
+        materialized = materialize_source_members(members, rows)
+        self.assertEqual(materialized.source_refs, ('wake:1', 'turn:2:3'))
+        self.assertLess(
+            materialized.body.index('WAKE_1_BODY'),
+            materialized.body.index('TURN_2_USER'),
+        )
 
     def test_candidate_refs_are_independent_expected_membership(self):
         turns, events = self._units()
