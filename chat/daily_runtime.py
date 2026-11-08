@@ -3586,6 +3586,18 @@ def _prepare_hot_context_plan(
         frozen=frozen,
     )
     if canonical_hot_source_scope is None:
+        scope_diagnostic = getattr(plan, 'hot_scope_diagnostic', None)
+        if (
+            isinstance(scope_diagnostic, dict)
+            and scope_diagnostic.get('stage') in {'native_tail', 'tail_identity'}
+            and scope_diagnostic.get('status') == 'missing'
+        ):
+            _set_hot_decision(
+                plan,
+                'RESPAWN',
+                str(scope_diagnostic.get('reason') or 'native_tail_missing'),
+            )
+            return 'RESPAWN'
         _set_hot_decision(plan, 'BLOCKED', 'hot_source_scope_unproven')
         error = DailyRuntimeError(
             'hot canonical source scope is not proven',

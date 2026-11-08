@@ -6295,6 +6295,384 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(plan.hot_decision, 'BLOCKED')
         self.assertEqual(plan.hot_decision_reason, 'hot_source_scope_unproven')
 
+    def test_prepare_hot_respawns_for_explicit_native_tail_missing_only(self):
+        missing_reasons = (
+            'same_context_last_good_missing',
+            'same_context_last_good_identity_mismatch',
+            'native_tail_mapping_missing',
+            'native_tail_offset_missing',
+            'native_tail_offset_mismatch',
+        )
+        for reason in missing_reasons:
+            with self.subTest(reason=reason):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_live_identity_decision',
+                    return_value=(
+                        'PASS',
+                        '',
+                        {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+                    ),
+                ), mock.patch.object(
+                    dr,
+                    '_hot_native_tail_proof',
+                    return_value={'status': 'missing', 'reason': reason},
+                ), mock.patch.object(
+                    dr,
+                    '_build_production_context_plan',
+                ) as build:
+                    decision = dr._prepare_hot_context_plan(
+                        plan, resident=object(), static_system='STATIC',
+                    )
+                self.assertEqual(decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision_reason, reason)
+                self.assertEqual(plan.hot_scope_diagnostic['status'], 'missing')
+                build.assert_not_called()
+
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=(
+                'PASS',
+                '',
+                {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+            ),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': None},
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build:
+            decision = dr._prepare_hot_context_plan(
+                plan, resident=object(), static_system='STATIC',
+            )
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(
+            plan.hot_scope_diagnostic['reason'],
+            'native_tail_source_member_missing',
+        )
+        build.assert_not_called()
+
+    def test_prepare_hot_keeps_ambiguous_and_untrusted_receipts_blocked(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=(
+                'PASS',
+                '',
+                {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+            ),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'ambiguous',
+                'reason': 'multiple_canonical_tail_turns',
+            },
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_hot_source_scope_unavailable',
+        )
+        self.assertEqual(plan.hot_scope_diagnostic['status'], 'ambiguous')
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+
+        for receipt_overrides in (
+            {'receipt': None},
+            {'membership_valid': False},
+        ):
+            with self.subTest(receipt_overrides=receipt_overrides):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                plan.hot_receipt_frozen.update(receipt_overrides)
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_native_tail_proof',
+                ) as native_tail:
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._prepare_hot_context_plan(
+                            plan, resident=object(), static_system='STATIC',
+                        )
+                self.assertEqual(
+                    raised.exception.error_code,
+                    'context_plan_hot_source_scope_unavailable',
+                )
+                self.assertEqual(
+                    plan.hot_scope_diagnostic['stage'], 'receipt_gate',
+                )
+                self.assertEqual(plan.hot_scope_diagnostic['status'], 'blocked')
+                native_tail.assert_not_called()
+
+    def test_prepare_hot_native_tail_pass_keeps_no_op(self):
+        db, proof_plan, frozen, registry = self._native_tail_fixture()
+        try:
+            frozen.update({
+                'receipt_members_complete': True,
+                'membership_valid': True,
+                'receipt_read_error': None,
+                'installed_source_watermark': frozen['receipt'].installed_source_watermark,
+            })
+            plan = dr.DailyTurnPlan(
+                request_id='hot-native-tail-pass',
+                chat_id='default',
+                local_day='2026-07-27',
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                user_message_id=proof_plan.user_message_id,
+                epoch_token={},
+                lease_owner='worker',
+                is_cold=False,
+                is_respawn=False,
+                cursor_before=2,
+                assembly={},
+                manifest={'provider': 'claude_code', 'model': 'model-1'},
+                db_path=db,
+            )
+            context_plan = self._fake_hot_context_plan()
+            with mock.patch.object(
+                dr, '_freeze_hot_receipt', return_value=frozen,
+            ), mock.patch.object(
+                dr, '_hot_live_identity_decision',
+                return_value=('PASS', '', registry),
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 400,
+                },
+            ), mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+                return_value=(context_plan, {}),
+            ), mock.patch.object(
+                dr, '_reconcile_hot_context_plan', return_value='NO_OP',
+            ) as reconcile:
+                decision = dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+            self.assertEqual(decision, 'NO_OP')
+            self.assertIsNone(plan.hot_scope_diagnostic)
+            reconcile.assert_called_once()
+        finally:
+            os.unlink(db)
+
+    def test_native_tail_offset_gap_respawns_before_one_current_user_send(self):
+        db, proof_plan, frozen, registry = self._native_tail_fixture(
+            registry_offset=650,
+        )
+        events = []
+        try:
+            conn = sqlite3.connect(db)
+            current_user_id = int(conn.execute(
+                'INSERT INTO chat_messages '
+                '(author, content, source_kind, created_at) VALUES (?,?,?,?)',
+                ('hayana', 'current user once', 'chat', '2026-07-27 10:01:00'),
+            ).lastrowid)
+            conn.commit()
+            conn.close()
+            self.assertEqual(current_user_id, proof_plan.user_message_id)
+            frozen.update({
+                'receipt_members_complete': True,
+                'membership_valid': True,
+                'receipt_read_error': None,
+                'installed_source_watermark': frozen['receipt'].installed_source_watermark,
+                'expected_receipt_revision': 0,
+            })
+
+            def make_plan(*, generation, cold, pending):
+                return dr.DailyTurnPlan(
+                    request_id='hot-native-tail-gap',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    context_id=7,
+                    context_epoch=3,
+                    resident_generation=generation,
+                    resident_key='default:e3:g%d' % generation,
+                    user_message_id=current_user_id,
+                    epoch_token={
+                        'context_id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': generation,
+                        'chat_id': 'default',
+                    },
+                    lease_owner='worker',
+                    is_cold=cold,
+                    is_respawn=cold,
+                    cursor_before=2,
+                    assembly={'manifest': {}, 'state_snapshot': {}},
+                    manifest={
+                        'provider': 'claude_code',
+                        'model': 'model-1',
+                        'context_plan_hot_pending': pending,
+                        'static_system_sha256': 'static-hash',
+                        'persona_sha256': 'persona-hash',
+                    },
+                    user_content='current user once',
+                    db_path=db,
+                    tool_profile=cc_resident.TOOL_PROFILE_LEGACY,
+                )
+
+            plan = make_plan(generation=1, cold=False, pending=True)
+
+            reprepare_capture = {}
+
+            def prepare_cold_plan(**kwargs):
+                self.assertFalse(getattr(plan, '_current_user_stdin_flushed', False))
+                self.assertEqual(kwargs['user_message_id'], current_user_id)
+                reprepare_capture['diagnostic'] = dict(plan.hot_scope_diagnostic)
+                events.append('cold_reprepare')
+                return make_plan(generation=2, cold=True, pending=False)
+
+            class Heartbeat:
+                failed = False
+
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def start(self):
+                    pass
+
+                def stop(self):
+                    return False
+
+            class Resident(_FakeResident):
+                def send_turn(
+                    self,
+                    content,
+                    commit_meta=None,
+                    turn_lease=None,
+                    on_stdin_flushed=None,
+                ):
+                    self.sent.append(str(content))
+                    events.append('provider_send')
+                    if on_stdin_flushed is not None:
+                        on_stdin_flushed()
+                    events.append('stdin_flushed')
+                    yield ('text', 'daily reply')
+                    yield ('done', ('daily reply', '', {}, {}))
+
+            resident = Resident()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(dr, 'LeaseHeartbeat', Heartbeat))
+                stack.enter_context(mock.patch.object(dr, 'verify_epoch_token'))
+                stack.enter_context(mock.patch.object(dr, 'get_local_binding', return_value=None))
+                stack.enter_context(mock.patch.object(dr, '_binding_matches_plan', return_value=True))
+                stack.enter_context(mock.patch.object(dr, '_resident_is_alive', return_value=True))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'peek_registered_respawn_decision',
+                    return_value={'effective_system': 'STATIC'},
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=frozen,
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr, '_hot_live_identity_decision',
+                    return_value=('PASS', '', registry),
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'get_same_context_last_good',
+                    return_value={
+                        'context_id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                        'claude_session_id': 'session-1',
+                        'transcript_end_offset': 400,
+                    },
+                ))
+                stack.enter_context(mock.patch.object(dr, 'is_epoch_token_current', return_value=False))
+                stack.enter_context(mock.patch.object(dr, '_release_lease'))
+                stack.enter_context(mock.patch.object(dr, 'close_local_resident_if_bound'))
+                stack.enter_context(mock.patch.object(
+                    dr, 'prepare_daily_turn', side_effect=prepare_cold_plan,
+                ))
+                respawn = stack.enter_context(mock.patch.object(
+                    dr,
+                    'reprepare_after_registered_session_change',
+                    wraps=dr.reprepare_after_registered_session_change,
+                ))
+                stack.enter_context(mock.patch.object(dr, '_build_production_context_plan'))
+                stack.enter_context(mock.patch(
+                    'chat.reality_context.build_reality_context',
+                    return_value={'time_anchor': '', 'weather_anchor': ''},
+                ))
+                stack.enter_context(mock.patch(
+                    'chat.reality_context.prepend_reality_to_provider_content',
+                    side_effect=lambda content, _reality: content,
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'format_resident_turn_content',
+                    side_effect=lambda **kwargs: kwargs['user_content'],
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    '_apply_daily_cold_prompt_fence',
+                    side_effect=lambda _plan, **kwargs: kwargs['content'],
+                ))
+                stack.enter_context(mock.patch.object(dr, '_bind_context_install_render_receipt'))
+                stack.enter_context(mock.patch.object(dr.dc, 'get_resident_history_cursor', return_value=2))
+                stack.enter_context(mock.patch.object(dr, 'set_local_binding'))
+                stack.enter_context(mock.patch.object(dr.dc, 'upsert_resident_owner'))
+                stack.enter_context(mock.patch.object(dr, '_capture_transcript_start'))
+                stack.enter_context(mock.patch.object(dr, '_capture_transcript_end'))
+                stack.enter_context(mock.patch.object(dr, '_validate_hot_no_op_payload'))
+                stack.enter_context(mock.patch.object(dr, '_observe_continuity_shadow'))
+                events_out = list(dr.ensure_resident_and_stream(
+                    plan, resident=resident, env={}, static_system='STATIC',
+                ))
+
+            self.assertEqual(plan.hot_decision, 'RESPAWN')
+            self.assertEqual(plan.hot_decision_reason, 'native_tail_offset_mismatch')
+            self.assertEqual(reprepare_capture['diagnostic']['status'], 'missing')
+            self.assertEqual(
+                reprepare_capture['diagnostic']['reason'],
+                'native_tail_offset_mismatch',
+            )
+            self.assertEqual(respawn.call_count, 1)
+            self.assertEqual(resident.sent, ['current user once'])
+            self.assertEqual(events.count('provider_send'), 1)
+            self.assertLess(events.index('cold_reprepare'), events.index('stdin_flushed'))
+            self.assertTrue(any(evt == 'done' for evt, _payload in events_out))
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE id=? AND content=?",
+                    (current_user_id, 'current user once'),
+                ).fetchone()[0],
+                1,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
     def test_hot_receipt_commit_uses_this_turn_plan_identity(self):
         from chat import context_receipt as receipt_store
 
