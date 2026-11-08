@@ -1644,6 +1644,11 @@ def compose_spawn_argv(
     """
     from chat.cc_runtime import claude_cmd_for_version
     extra_session = [str(part) for part in session_args]
+    resume_snapshot_args = (
+        ['--system-prompt-snapshot', 'off']
+        if len(extra_session) == 2 and extra_session[0] == '--resume'
+        else []
+    )
     return claude_cmd_for_version(
         runtime_version,
         '-p',
@@ -1652,6 +1657,7 @@ def compose_spawn_argv(
         '--verbose',
         '--include-partial-messages',
         '--system-prompt', system_text,
+        *resume_snapshot_args,
         '--max-turns', str(max_turns),
         '--tools', tool_flags['tools'],
         '--thinking-display', 'summarized',
