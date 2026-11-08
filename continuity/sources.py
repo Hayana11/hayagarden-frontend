@@ -408,12 +408,14 @@ def build_source_members(
     turns: Iterable[CanonicalTurn],
     events: Iterable[AutonomousEvent],
 ) -> tuple[SourceMember, ...]:
-    units: list[tuple[str, str, str, str, str, int, str]] = []
+    units: list[tuple[int, str, str, str, str, str, int, str]] = []
     for turn in turns:
         size = turn.user_input_ref.logical_size
         size += sum(ref.logical_size for ref in turn.assistant_committed_output_refs)
         size += sum(ref.logical_size for ref in turn.tool_outcome_refs)
+        canonical_order_id = int(turn.user_input_ref.source_ref.rsplit(':', 1)[1])
         units.append((
+            canonical_order_id,
             turn.started_at,
             'completed_turn',
             turn.turn_id,
@@ -423,7 +425,11 @@ def build_source_members(
             turn.branch_id,
         ))
     for event in events:
+        canonical_order_id = int(
+            event.committed_content_ref.source_ref.rsplit(':', 1)[1]
+        )
         units.append((
+            canonical_order_id,
             event.created_at,
             'autonomous_event',
             event.event_id,
@@ -432,7 +438,7 @@ def build_source_members(
             event.committed_content_ref.logical_size,
             event.branch_id,
         ))
-    units.sort(key=lambda item: (item[0], item[2]))
+    units.sort(key=lambda item: item[0])
     return tuple(
         SourceMember(
             seq=index,
@@ -445,7 +451,7 @@ def build_source_members(
             created_at=created_at,
             branch_id=branch_id or 'active-transcript',
         )
-        for index, (created_at, kind, ref, revision, role, logical_size, branch_id)
+        for index, (_, created_at, kind, ref, revision, role, logical_size, branch_id)
         in enumerate(units)
     )
 
