@@ -279,6 +279,42 @@ class ChatTerminalContractTests(unittest.TestCase):
                 self.assertEqual(error_code, result['error_code'])
                 self.assertEqual(failure_class, result['turn_failure_class'])
 
+    def test_error_max_turns_has_dedicated_class_and_user_message(self):
+        provider_error = cc_resident.classify_provider_error_event({
+            'type': 'result',
+            'subtype': 'error_max_turns',
+            'is_error': True,
+            'result': 'partial',
+        })
+        expected = 'Claude Code 本轮工具调用次数达到配置上限，当前回复已停止。'
+        self.assertEqual('max_agentic_turns', provider_error['error_code'])
+        self.assertEqual('error_max_turns', provider_error['provider_error_type'])
+        self.assertEqual('max_agentic_turns', provider_error['provider_error_category'])
+        self.assertEqual('TURN_LEVEL', provider_error['turn_failure_class'])
+        self.assertFalse(provider_error['retryable'])
+        self.assertEqual(expected, provider_error['public_message'])
+        self.assertEqual(
+            'TURN_LEVEL',
+            cc_resident.resident_failure_class(provider_error['error_code']),
+        )
+
+        error = cc_resident.ResidentError(
+            provider_error['public_message'],
+            error_code=provider_error['error_code'],
+            provider_error_type=provider_error['provider_error_type'],
+            provider_error_category=provider_error['provider_error_category'],
+            turn_failure_class=provider_error['turn_failure_class'],
+            retryable=provider_error['retryable'],
+        )
+        event = gateway._chat_stream_failure_event(error)
+        self.assertEqual('max_agentic_turns', event['code'])
+        self.assertEqual('max_agentic_turns', event['error_code'])
+        self.assertEqual(expected, event['d'])
+        self.assertEqual(expected, event['message'])
+        self.assertFalse(event['retryable'])
+
+
+
     def test_frontend_done_false_is_visible_and_finality_events_are_nonterminal(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         frontend = (root / 'app' / 'src' / 'lib' / 'chat.ts').read_text(encoding='utf-8')

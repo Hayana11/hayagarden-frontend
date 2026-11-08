@@ -1400,6 +1400,7 @@ _TURN_FAILURE_CODES = frozenset({
     'invalid_request',
     'rate_limit',
     'provider_error',
+    'max_agentic_turns',
 })
 
 
@@ -1451,15 +1452,27 @@ def classify_provider_error_event(event, *, refusal_marker=False):
         if isinstance(block, dict) and block.get('type') == 'text':
             parts.append(str(block.get('text') or ''))
     searchable = ' '.join(parts).lower().replace('-', '_').replace(' ', '_')
+    max_turn_signals = (
+        error_type,
+        event.get('subtype'),
+        event.get('stop_reason'),
+        category,
+        event.get('result') if isinstance(event.get('result'), str) else '',
+    )
+    is_max_turns = any(
+        str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+        == 'error_max_turns'
+        for value in max_turn_signals
+    )
     safe_type = error_type.strip().lower().replace('-', '_').replace(' ', '_')
     known_types = {
         'invalid_request', 'invalid_request_error', 'rate_limit',
         'rate_limit_error', 'overloaded_error', 'authentication_error',
         'permission_error', 'connection_error', 'timeout_error',
-        'model_refusal_no_fallback',
+        'model_refusal_no_fallback', 'error_max_turns',
     }
     if safe_type not in known_types:
-        safe_type = 'provider_api_error'
+        safe_type = 'error_max_turns' if is_max_turns else 'provider_api_error'
 
     is_reasoning_refusal = 'reasoning_extraction' in searchable
     is_refusal = (
@@ -1475,7 +1488,13 @@ def classify_provider_error_event(event, *, refusal_marker=False):
         'connection_reset', 'connection_closed',
     ))
 
-    if is_reasoning_refusal:
+    if is_max_turns:
+        failure_code = 'max_agentic_turns'
+        failure_category = 'max_agentic_turns'
+        public_message = 'Claude Code 本轮工具调用次数达到配置上限，当前回复已停止。'
+        failure_class = 'TURN_LEVEL'
+        retryable = False
+    elif is_reasoning_refusal:
         failure_code = 'provider_refusal'
         failure_category = 'reasoning_extraction'
         public_message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
@@ -1634,7 +1653,7 @@ def compose_spawn_argv(
     model_args=(),
     effort_args=(),
     session_args=(),
-    max_turns='5',
+    max_turns=None,
 ):
     """Build the provider-visible Claude argv used by main-chat spawn paths.
 
@@ -1649,6 +1668,11 @@ def compose_spawn_argv(
         if len(extra_session) == 2 and extra_session[0] == '--resume'
         else []
     )
+    max_turns = (
+        config_store.get_int('CC_MAX_AGENTIC_TURNS', 0)
+        if max_turns is None else int(max_turns or 0)
+    )
+    max_turn_args = ['--max-turns', str(max_turns)] if max_turns > 0 else []
     return claude_cmd_for_version(
         runtime_version,
         '-p',
@@ -1658,7 +1682,7 @@ def compose_spawn_argv(
         '--include-partial-messages',
         '--system-prompt', system_text,
         *resume_snapshot_args,
-        '--max-turns', str(max_turns),
+        *max_turn_args,
         '--tools', tool_flags['tools'],
         '--thinking-display', 'summarized',
         '--exclude-dynamic-system-prompt-sections',
