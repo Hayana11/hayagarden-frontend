@@ -108,10 +108,11 @@ class DayBlockShadowTests(unittest.TestCase):
         self.assertEqual(ids, {1, 2, 3, 4, 7})
         self.assertEqual(len(turns), 2)
         self.assertEqual(len(events), 1)
+        # created_at order deliberately conflicts with message ids; canonical message order wins.
         self.assertEqual([m.source_kind for m in members],
-                         ["completed_turn", "autonomous_event", "completed_turn", "attachment_span"])
+                         ["completed_turn", "completed_turn", "autonomous_event", "attachment_span"])
         self.assertEqual([m.source_ref for m in members],
-                         ["turn:1:2", "wake:7", "turn:3:4", "attachment:4:0"])
+                         ["turn:1:2", "turn:3:4", "wake:7", "attachment:4:0"])
         self.assertEqual(materialized.source_refs, tuple(m.source_ref for m in members))
         self.assertFalse(any(m.source_ref.startswith("dayblock_visible_turn:") for m in members))
         self.assertNotIn("today must not enter", materialized.body)
