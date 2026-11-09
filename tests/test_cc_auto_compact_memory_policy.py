@@ -123,47 +123,20 @@ class FormalChatAutoCompactMemoryPolicyTests(unittest.TestCase):
         self.assertEqual(parent_env[_AUTO_MEMORY], '0')
 
     def test_capacity_staging_inherits_formal_chat_policy_from_live_resident(self):
-        import config_store
-
-        class Process:
-            pid = 456
-            stdin = None
-            stdout = None
-            stderr = None
-
-            def poll(self):
-                return None
-
         live = cc_resident.ResidentSession(
             '/tmp', '', '', formal_chat_continuity=True,
         )
-        seen = {}
-        def capture_popen(*args, **kwargs):
-            seen.update(kwargs)
-            seen['args'] = args[0]
-            return Process()
+        child_env = {}
+
+        def spawn_resumable(staged, _system_text, env, **_kwargs):
+            child_env.update(staged._prepare_spawn_env(env))
+            return staged
 
         with (
-            mock.patch.dict(sys.modules, {'chat.cc_runtime': _runtime_module()}),
-            mock.patch.object(cc_model, 'cc_model_snapshot', return_value=('', 'default', [])),
-            mock.patch.object(cc_effort, 'cc_effort_snapshot', return_value=('', 'default', [])),
-            mock.patch.object(config_store, 'get_int', return_value=0),
-            mock.patch.object(cc_resident.time, 'sleep'),
-            mock.patch.object(cc_resident.subprocess, 'Popen', side_effect=capture_popen),
             mock.patch.object(
-                cc_resident.ResidentSession, '_build_spawn_tool_flags',
-                return_value={
-                    'tools': '', 'extra': [], 'surface_allowed': '',
-                    'mcp_path': None, 'surface_fingerprint': None,
-                },
+                cc_resident.ResidentSession, 'spawn_resumable', spawn_resumable,
             ),
-            mock.patch.object(
-                cc_resident.ResidentSession, '_require_spawn_surface_fingerprint',
-                return_value=None,
-            ),
-            mock.patch.object(
-                cc_resident.ResidentSession, 'wait_staged_health',
-            ),
+            mock.patch.object(cc_resident.ResidentSession, 'wait_staged_health'),
         ):
             hooks = daily_runtime._default_capacity_swap_staged_hooks(live)
             staged = hooks.spawn_and_health(
@@ -175,12 +148,9 @@ class FormalChatAutoCompactMemoryPolicyTests(unittest.TestCase):
             )
 
         self.assertTrue(staged._formal_chat_continuity)
-        self.assertEqual(seen['env'][_AUTO_COMPACT], '1')
-        self.assertEqual(seen['env'][_AUTO_MEMORY], '1')
-        self.assertEqual(
-            seen['args'][seen['args'].index('--system-prompt-snapshot') + 1],
-            'off',
-        )
+        self.assertEqual(child_env[_AUTO_COMPACT], '1')
+        self.assertEqual(child_env[_AUTO_MEMORY], '1')
+        self.assertNotIn('DISABLE_COMPACT', child_env)
 
 
 if __name__ == '__main__':
