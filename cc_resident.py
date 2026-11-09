@@ -403,6 +403,7 @@ def _cold_start_sync_summary(diagnostic):
 _TURN_TIMING_LOGGER_NAME = 'hayagarden.turn_timing'
 # (duration name, start field, end field). birth_ms matches the chat page's
 # "出生" counter: request in -> first thinking/text out, minus network.
+# birth_origin is birth_started_at, or request_received_at when absent.
 _TURN_TIMING_SPANS = (
     ('plan_ms', 'request_received_at', 'plan_ready_at'),
     ('hot_context_plan_ms', 'hot_context_plan_start_at', 'hot_context_plan_end_at'),
@@ -411,8 +412,8 @@ _TURN_TIMING_SPANS = (
     ('spawn_to_init_ms', 'process_spawn_at', 'claude_init_event_at'),
     ('pre_provider_ms', 'request_received_at', 'stdin_flush_at'),
     ('provider_first_content_ms', 'stdin_flush_at', 'first_thinking_or_text_at'),
-    ('birth_ms', 'request_received_at', 'first_thinking_or_text_at'),
-    ('total_ms', 'request_received_at', 'terminal_at'),
+    ('birth_ms', 'birth_origin', 'first_thinking_or_text_at'),
+    ('total_ms', 'birth_origin', 'terminal_at'),
 )
 
 
@@ -435,11 +436,24 @@ def _turn_timing_logger():
 
 def _turn_timing_durations(diagnostic):
     durations = {}
+    # The 出生 clock starts when the gateway takes the stream request
+    # (birth_started_at); turns without it fall back to the Daily prepare.
+    fields = dict(diagnostic)
+    fields['birth_origin'] = diagnostic.get('birth_started_at') or diagnostic.get('request_received_at')
     for name, start_field, end_field in _TURN_TIMING_SPANS:
-        start, end = diagnostic.get(start_field), diagnostic.get(end_field)
+        start, end = fields.get(start_field), fields.get(end_field)
         if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
             durations[name] = int(round((end - start) * 1000))
     return durations
+
+
+def _birth_summary(diagnostic):
+    """The same step list the chat page shows (chat.turn_birth), or None."""
+    try:
+        from chat import turn_birth
+        return turn_birth.summarize(diagnostic)
+    except Exception:
+        return None
 
 
 def _log_cold_start_timing(diagnostic):
@@ -455,6 +469,7 @@ def _log_cold_start_timing(diagnostic):
                 or ('cold' if diagnostic.get('generation_records') else 'hot')
             )[:20],
             'durations_ms': _turn_timing_durations(diagnostic),
+            'birth': _birth_summary(diagnostic),
             'hot_context_plan_decision': (
                 str(diagnostic.get('hot_context_plan_decision') or '')[:40] or None
             ),

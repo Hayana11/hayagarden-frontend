@@ -1,4 +1,4 @@
-import { normalizeToolCall, type ChatToolCall, type MemoryRecall } from './chat';
+import { normalizeToolCall, type BirthTiming, type ChatToolCall, type MemoryRecall } from './chat';
 import { lastItem } from './lastItem';
 
 export type LiveSegment =
@@ -28,6 +28,7 @@ export interface LiveState {
   lastEvent: LiveEvent;
   canonicalSha256?: string;
   memoryRecall?: MemoryRecall;
+  birth?: BirthTiming;
 }
 
 export function createLiveState(): LiveState {
@@ -37,6 +38,10 @@ export function createLiveState(): LiveState {
 /** Recall arrives before the first delta; it never becomes a segment or moves lastEvent. */
 export function setLiveMemoryRecall(state: LiveState, recall: MemoryRecall): LiveState {
   return { ...state, memoryRecall: recall };
+}
+
+export function setLiveBirth(state: LiveState, birth: BirthTiming): LiveState {
+  return { ...state, birth };
 }
 
 export function isTextCaretActive(state: LiveState): boolean {

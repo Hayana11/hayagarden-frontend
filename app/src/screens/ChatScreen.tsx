@@ -69,6 +69,7 @@ import {
   isTextCaretActive,
   replaceWithCanonicalProjection,
   setLiveMemoryRecall,
+  setLiveBirth,
   upsertToolUse,
   type LiveSegment,
   type LiveState,
@@ -165,6 +166,7 @@ import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typo
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
 import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
+import { ChatBirthPanel } from '../components/ChatBirthPanel';
 import { CallTranscriptSheet } from '../components/CallTranscriptSheet';
 import { createTypingPulse } from '../lib/typingPulse';
 import {
@@ -1815,6 +1817,9 @@ export function ChatScreen() {
           onMemoryRecall: (recall) => {
             updateLive((l) => setLiveMemoryRecall(l, recall));
           },
+          onBirth: (birth) => {
+            updateLive((l) => setLiveBirth(l, birth));
+          },
           onNotice: (s) => showToast(s),
         },
         ctrl,
@@ -2733,6 +2738,7 @@ export function ChatScreen() {
     const mediaItems = messageMediaItems(m);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+        <ChatBirthPanel key={presentationKey + '-birth'} birth={usage?.birth} />
         {renderMemoryRecall(usage?.memoryRecall, presentationKey + '-recall')}
         <div className="chat-message-content chat-message-content-assistant">
           {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
@@ -2825,6 +2831,7 @@ export function ChatScreen() {
     const presentationKey = handoff?.presentationKey || 'chat-live-fallback';
     return (
       <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+          <ChatBirthPanel key={presentationKey + '-birth'} birth={l.birth} />
           {renderMemoryRecall(l.memoryRecall, presentationKey + '-recall')}
           <div className="chat-message-content chat-message-content-assistant">
             <div key={presentationKey + '-segments'} className="vstack vstack-12">

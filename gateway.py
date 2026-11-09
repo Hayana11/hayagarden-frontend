@@ -7635,10 +7635,17 @@ def _call_with_sse_keepalive(fn, *, interval=None):
     return box.get('value')
 
 
+def _birth_chars(text):
+    """Size of a loaded block for the 出生 panel ('4.1k 字'); never the text itself."""
+    n = len(str(text or ''))
+    return '%.1fk 字' % (n / 1000.0) if n >= 1000 else '%d 字' % n
+
+
 def _stream_cc_daily_soft_window(
     _turn_data, _uc, *, request_reality_context='',
 ):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
+    _birth_started_at = time.time()  # the 出生 clock: request in -> first word out
     import hashlib
     import logging
     from moments_turn import DEFAULT_CONVERSATION_ID
@@ -7647,6 +7654,7 @@ def _stream_cc_daily_soft_window(
     from chat import daily_runtime as _daily_rt
     from chat import context_window as _cw
     from chat import cold_bootstrap_budget as _cbb
+    from chat import turn_birth as _turn_birth
     from chat.system_builder import build_cc_daily_static_parts
 
     # First-turn READY bypass — before ordinary prepare_daily_turn.
@@ -7796,7 +7804,9 @@ def _stream_cc_daily_soft_window(
         _prepared = {}
 
         def _prepare_static_and_plan():
+            persona_started_at = time.time()
             static_parts = build_cc_daily_static_parts()
+            persona_ended_at = time.time()
             _prepared['static_parts'] = static_parts
             full_system = static_parts['full_system']
             _prepared['plan'] = _daily_rt.prepare_daily_turn(
@@ -7818,6 +7828,17 @@ def _stream_cc_daily_soft_window(
             # the Gateway -> Daily boundary; in-place reprepare preserves this
             # dynamic attribute on the original plan object.
             _prepared['plan']._turn_flight_recorder = _turn_data.get('_turn_flight_recorder')
+            _birth_record = getattr(_prepared['plan'], 'cold_start_diagnostic', None)
+            if isinstance(_birth_record, dict):
+                _birth_record['birth_started_at'] = round(_birth_started_at, 6)
+                _turn_birth.record_phase(
+                    _birth_record, 'persona', '载入人设',
+                    persona_started_at, persona_ended_at,
+                    '人设 %s · 系统提示 %s' % (
+                        _birth_chars(static_parts.get('persona')),
+                        _birth_chars(full_system),
+                    ),
+                )
 
         try:
             yield from _call_with_sse_keepalive(_prepare_static_and_plan)
@@ -7858,10 +7879,11 @@ def _stream_cc_daily_soft_window(
         # prompt that carries it has really been sent.
         _recall_pending = dict(getattr(_daily_plan, 'memory_recall', None) or {})
         _recall_shown = None
+        _birth_shown = None
         _daily_done_seen = False
 
         def _handle_daily_event(evt, payload):
-            nonlocal _recall_shown
+            nonlocal _recall_shown, _birth_shown
             nonlocal deferred_payload, cache_refresh_candidate
             nonlocal cc_usage, text, thinking, unexpected_save
             nonlocal _daily_done_seen, turn_terminal
@@ -7878,6 +7900,15 @@ def _stream_cc_daily_soft_window(
                     't': 'memory_recall',
                     'd': _recall_shown,
                 }, ensure_ascii=False) + SSE_END
+            if _birth_shown is None and evt in ('think', 'text', 'self_state', 'tool_use'):
+                # The first word is out: show how this reply was born, step by step.
+                _birth_shown = _turn_birth.summarize(
+                    getattr(_daily_plan, 'cold_start_diagnostic', None),
+                ) or False
+                if _birth_shown:
+                    yield 'data: ' + json.dumps({
+                        't': 'birth', 'd': _birth_shown,
+                    }, ensure_ascii=False) + SSE_END
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 display_segments.append_text(str(payload or ''))
@@ -8054,6 +8085,8 @@ def _stream_cc_daily_soft_window(
         if _recall_shown:
             # Kept with the reply so history shows what surfaced after a reload.
             cc_usage['memory_recall'] = _recall_shown
+        if _birth_shown:
+            cc_usage['birth'] = _birth_shown
         cc_usage['canonical_sha256'] = canonical.projection_hash
         cc_usage['canonical_content_length'] = len(canonical.content)
         cc_usage['canonical_provider_round_count'] = len(canonical.provider_rounds)
