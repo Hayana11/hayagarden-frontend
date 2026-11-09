@@ -1694,10 +1694,13 @@ class ResidentSession:
     """One persistent `claude` subprocess. Not safe for concurrent turns —
     caller must serialize (gateway.py already does via _gen_acquire_or_wait)."""
 
-    def __init__(self, cwd, allowed_tools, mcp_config_path):
+    def __init__(
+        self, cwd, allowed_tools, mcp_config_path, *, formal_chat_continuity=False,
+    ):
         self._cwd = cwd
         self._allowed_tools = allowed_tools
         self._mcp_config_path = mcp_config_path
+        self._formal_chat_continuity = bool(formal_chat_continuity)
         self._proc = None
         self._system_text = None
         self._session_id = None
@@ -1774,6 +1777,10 @@ class ResidentSession:
             prepared['HOME'] = str(service_home(prepared))
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             prepared['UH_A0_TURN_LEASE_PATH'] = self._uh_a0_turn_lease_path
+        # Only the designated Chat continuity family owns these policies.
+        if self._formal_chat_continuity:
+            prepared['DISABLE_AUTO_COMPACT'] = '1'
+            prepared['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
         return prepared
 
     def _reset_session_meta(self, *, respawn_reason):
