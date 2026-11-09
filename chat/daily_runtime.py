@@ -5773,7 +5773,12 @@ def _default_capacity_swap_staged_hooks(live_resident: Any) -> CapacitySwapStage
         cwd = str(getattr(live_resident, 'cwd', '') or '')
         allowed = str(getattr(live_resident, '_allowed_tools', '') or '')
         mcp = str(getattr(live_resident, '_mcp_config_path', '') or (cwd + '/cc-tools.json'))
-        staged = _cc.ResidentSession(cwd, allowed, mcp)
+        staged = _cc.ResidentSession(
+            cwd, allowed, mcp,
+            formal_chat_continuity=bool(
+                getattr(live_resident, '_formal_chat_continuity', False)
+            ),
+        )
         try:
             start(staged)
             staged.wait_staged_health(**health)
