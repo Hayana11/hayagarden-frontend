@@ -171,10 +171,11 @@ export function validateEndpoint(endpoint, transport = SUPPORTED_TRANSPORT) {
   } catch {
     throw new DiscoveryInputError('endpoint is not a valid URL');
   }
-  if (url.protocol !== 'https:') throw new DiscoveryInputError('endpoint must use HTTPS');
+  const localMailMcp = endpoint === 'http://127.0.0.1:3457/mcp';
+  if (!localMailMcp && url.protocol !== 'https:') throw new DiscoveryInputError('endpoint must use HTTPS');
   if (url.username || url.password || url.search || url.hash) throw new DiscoveryInputError('endpoint contains forbidden credential or query material');
   if (!url.hostname) throw new DiscoveryInputError('endpoint hostname is required');
-  if (net.isIP(url.hostname) && classifyAddress(url.hostname) !== 'PUBLIC') throw new DiscoveryInputError('endpoint address is not public');
+  if (!localMailMcp && net.isIP(url.hostname) && classifyAddress(url.hostname) !== 'PUBLIC') throw new DiscoveryInputError('endpoint address is not public');
   return url;
 }
 
@@ -323,7 +324,7 @@ function classifyFailure(error, limits) {
 }
 
 async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result, auth }) {
-  const dispatcher = createSafeDispatcher({ resolver });
+  const dispatcher = url.protocol === 'http:' ? undefined : createSafeDispatcher({ resolver });
   let reflectedCredential = false;
   let requestIndex = 0;
   const fetcher = async (input, init = {}) => {

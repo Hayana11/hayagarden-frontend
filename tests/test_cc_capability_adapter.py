@@ -283,6 +283,25 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             shown["physical_surface_fingerprint"],
         )
 
+    def test_upstream_mail_tools_are_in_the_shared_physical_surface(self):
+        tools = tuple(
+            {
+                "surface_tool_name": f"fedya_mail__{name}",
+                "control_id": f"ext:mail:{name}",
+                "fingerprint": (str(index) * 64)[:64],
+                "source_registry_revision": 2,
+            }
+            for index, name in enumerate(("list_recent", "get_message", "send_email"), 1)
+        )
+        with mock.patch(
+            "tools.cc_capability_adapter._external_surface_catalog",
+            return_value=([{"server_id": "mail"}], tools),
+        ):
+            plan = build_uh_a0_spawn_plan(cwd=self._tmp.name, env={})
+        expected = {f"mcp__external__fedya_mail__{name}" for name in ("list_recent", "get_message", "send_email")}
+        self.assertTrue(expected.issubset(set(plan["external_mcp_tools"])))
+        self.assertTrue(expected.issubset(set(plan["surface_allowlist"])))
+
     def test_build_mcp_config_can_omit_external_only(self):
         full = build_uh_a0_mcp_config(env={})
         lean = build_uh_a0_mcp_config(env={}, include_external=False)

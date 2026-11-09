@@ -69,7 +69,7 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.connection.close()
         self.tmp.cleanup()
 
-    def _ingest(self):
+    def _ingest(self, tools=None):
         connected = self.servers.mark_connected(
             self.server.server_id, self.servers.get(self.server.server_id).revision
         )
@@ -79,7 +79,7 @@ class ExternalSurfaceTests(unittest.TestCase):
             "registry_revision": connected.revision,
             "catalog_complete": True,
             "tool_record_boundary": "SDK_VISIBLE_RAW",
-            "tools": [{
+            "tools": tools or [{
                 "name": "roll",
                 "description": "Roll Monopoly dice",
                 "inputSchema": {
@@ -105,6 +105,33 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(tool["source_registry_revision"], catalog[0]["revision"])
         self.assertNotIn("endpoint", tool)
         self.assertNotIn("secret_ref", tool)
+
+    def test_upstream_mail_tools_flow_to_chat_and_wake_through_the_existing_fence(self):
+        names = ("list_recent", "get_message", "send_email")
+        raw_tools = [{
+            "name": name,
+            "description": f"Upstream {name}",
+            "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}}},
+        } for name in names]
+        self._ingest(raw_tools)
+        catalog = list_external_surface(self._graph())
+        tools = current_external_tools(catalog)
+        self.assertEqual({tool["remote_tool_name"] for tool in tools}, set(names))
+        definitions = model_tool_definitions(catalog)
+        self.assertEqual({item["name"] for item in definitions}, {tool["surface_tool_name"] for tool in tools})
+        for mode in ("chat", "wake"):
+            lease = issue_turn_lease(
+                turn_id=f"gmail-{mode}", turn_mode=mode,
+                issued_from="default_policy", issued_at="2026-11-09T00:00:00Z",
+            )
+            for tool in tools:
+                with self.subTest(mode=mode, tool=tool["remote_tool_name"]):
+                    with patch("tools.execution_fence.external_surface_tool", return_value=tool):
+                        decision = evaluate_tool_call(
+                            "mcp__external__" + tool["surface_tool_name"], {}, lease
+                        )
+                    self.assertEqual(decision["lease_decision"], "ALLOW")
+                    self.assertEqual(decision["capability_id"], "external_mcp:" + tool["control_id"])
 
     def test_native_discovery_does_not_copy_or_rewrite_canonical_schema(self):
         self._ingest()
