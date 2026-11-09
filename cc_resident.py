@@ -199,7 +199,7 @@ def _bounded_diagnostic_text(value, limit=_TIMEOUT_DIAGNOSTIC_MAX_CHARS):
 
 
 
-_COLD_START_DIAGNOSTIC_EVENT = 'UH_A0_COLD_START_TIMING'
+_COLD_START_DIAGNOSTIC_EVENT = 'TURN_TIMING'
 _COLD_START_DIAGNOSTIC_MAX_GENERATIONS = 32
 
 
@@ -257,6 +257,22 @@ def _cold_start_mark(diagnostic, field, *, record=None):
     if not diagnostic.get(field):
         diagnostic[field] = when
     return when
+
+
+def _mark_turn_stdin_flushed(diagnostic, record):
+    """The user message reached Claude: everything before this is ours."""
+    if not isinstance(diagnostic, dict):
+        return
+    if record is not None and not any(
+        record is own for own in diagnostic.get('generation_records') or []
+    ):
+        record = None  # a spawn record from an earlier turn; leave it alone
+    if record is not None:
+        record['reached_stdin'] = True
+    try:
+        _cold_start_mark(diagnostic, 'stdin_flush_at', record=record)
+    except Exception:
+        pass
 
 
 def _cold_start_stderr_category(proc):
@@ -384,13 +400,64 @@ def _cold_start_sync_summary(diagnostic):
     return diagnostic
 
 
+_TURN_TIMING_LOGGER_NAME = 'hayagarden.turn_timing'
+# (duration name, start field, end field). birth_ms matches the chat page's
+# "出生" counter: request in -> first thinking/text out, minus network.
+_TURN_TIMING_SPANS = (
+    ('plan_ms', 'request_received_at', 'plan_ready_at'),
+    ('hot_context_plan_ms', 'hot_context_plan_start_at', 'hot_context_plan_end_at'),
+    ('capacity_swap_ms', 'capacity_swap_start_at', 'capacity_swap_end_at'),
+    ('ensure_alive_ms', 'ensure_alive_start_at', 'ensure_alive_end_at'),
+    ('spawn_to_init_ms', 'process_spawn_at', 'claude_init_event_at'),
+    ('pre_provider_ms', 'request_received_at', 'stdin_flush_at'),
+    ('provider_first_content_ms', 'stdin_flush_at', 'first_thinking_or_text_at'),
+    ('birth_ms', 'request_received_at', 'first_thinking_or_text_at'),
+    ('total_ms', 'request_received_at', 'terminal_at'),
+)
+
+
+def _turn_timing_logger():
+    """A logger that reaches the journal whatever the root level is.
+
+    Production only lets WARNING through the root logger, which silently
+    dropped every cold-start timing line written at INFO since #609.
+    """
+    logger = logging.getLogger(_TURN_TIMING_LOGGER_NAME)
+    if not getattr(logger, '_hayagarden_timing_handler', False):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger._hayagarden_timing_handler = True
+    return logger
+
+
+def _turn_timing_durations(diagnostic):
+    durations = {}
+    for name, start_field, end_field in _TURN_TIMING_SPANS:
+        start, end = diagnostic.get(start_field), diagnostic.get(end_field)
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+            durations[name] = int(round((end - start) * 1000))
+    return durations
+
+
 def _log_cold_start_timing(diagnostic):
-    if not isinstance(diagnostic, dict) or not diagnostic.get('generation_records'):
+    """One timing line per turn, hot turns included (TURN_TIMING)."""
+    if not isinstance(diagnostic, dict) or not diagnostic.get('request_received_at'):
         return
     try:
         _cold_start_sync_summary(diagnostic)
         payload = {
             'stage': _COLD_START_DIAGNOSTIC_EVENT,
+            'turn_kind': str(
+                diagnostic.get('turn_kind')
+                or ('cold' if diagnostic.get('generation_records') else 'hot')
+            )[:20],
+            'durations_ms': _turn_timing_durations(diagnostic),
+            'hot_context_plan_decision': (
+                str(diagnostic.get('hot_context_plan_decision') or '')[:40] or None
+            ),
             'correlation_id': str(diagnostic.get('correlation_id') or '')[:200],
             'request_received_at': diagnostic.get('request_received_at'),
             'plan_ready_at': diagnostic.get('plan_ready_at'),
@@ -414,6 +481,10 @@ def _log_cold_start_timing(diagnostic):
                 'first_thinking_or_text_at',
             ),
             'terminal_at': diagnostic.get('terminal_at'),
+            'hot_context_plan_start_at': diagnostic.get('hot_context_plan_start_at'),
+            'hot_context_plan_end_at': diagnostic.get('hot_context_plan_end_at'),
+            'capacity_swap_start_at': diagnostic.get('capacity_swap_start_at'),
+            'capacity_swap_end_at': diagnostic.get('capacity_swap_end_at'),
             'generations': [
                 {
                     'gen': _diagnostic_int(record.get('gen')),
@@ -441,13 +512,15 @@ def _log_cold_start_timing(diagnostic):
                 for record in diagnostic.get('generation_records') or []
             ],
         }
-        logging.getLogger(__name__).info(
-            '[UH-A0-COLD-START] %s',
+        _turn_timing_logger().info(
+            '[TURN-TIMING] %s',
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
         )
     except Exception:
         # Timing diagnostics are strictly observational and never alter lifecycle.
         return
+
+
 def _diagnostic_path_hash(path):
     if not path:
         return None
@@ -3147,6 +3220,8 @@ class ResidentSession:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
             self._turn_stdin_flushed = True
+            _mark_turn_stdin_flushed(getattr(self, '_cold_start_diagnostic', None),
+                                     getattr(self, '_cold_start_active_record', None))
         except (BrokenPipeError, OSError) as e:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)

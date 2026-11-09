@@ -1319,6 +1319,18 @@ def _context_plan_consumer_enabled() -> bool:
         return False
 
 
+def _turn_timing_mark(plan: Any, field: str, *, decision: Any = None) -> None:
+    """Stamp a pre-provider phase on the turn's timing record (observational only)."""
+    try:
+        diagnostic = getattr(plan, 'cold_start_diagnostic', None)
+        if isinstance(diagnostic, dict) and not diagnostic.get(field):
+            diagnostic[field] = round(time.time(), 6)
+            if decision is not None:
+                diagnostic['hot_context_plan_decision'] = str(decision)[:40]
+    except Exception:
+        pass
+
+
 def _context_plan_policy(
     mode: str = 'hot',
     *,
@@ -5370,6 +5382,7 @@ def prepare_daily_turn(
             feedback_snapshot=feedback_snapshot,
         )
         plan.cold_start_diagnostic = cold_start_diagnostic
+        cold_start_diagnostic['turn_kind'] = turn_kind
         cold_start_diagnostic['plan_ready_at'] = round(time.time(), 6)
         verify_epoch_token(plan)
         return plan
@@ -8225,6 +8238,7 @@ def ensure_resident_and_stream(
 
             if door.get('capacity_swap'):
                 # Capacity-only path: same context_id/epoch, generation +1, SYSTEM_SUFFIX_V1.
+                _turn_timing_mark(plan, 'capacity_swap_start_at')
                 swap = _attempt_capacity_swap_before_stdin(
                     plan,
                     resident=resident,
@@ -8232,6 +8246,7 @@ def ensure_resident_and_stream(
                     env=env,
                     trigger_reason=str(door.get('reason') or ''),
                 )
+                _turn_timing_mark(plan, 'capacity_swap_end_at')
                 if swap.get('ok'):
                     effective_system = str(swap.get('effective_system') or effective_system)
                     yield from ensure_resident_and_stream(
@@ -8324,6 +8339,7 @@ def ensure_resident_and_stream(
             # Capacity has already had first refusal above.  Only now may a
             # normal-hot store/budget read decide whether this turn is NO_OP,
             # RESPAWN, or BLOCKED.
+            _turn_timing_mark(plan, 'hot_context_plan_start_at')
             try:
                 hot_decision = _prepare_hot_context_plan(
                     plan,
@@ -8331,9 +8347,11 @@ def ensure_resident_and_stream(
                     static_system=effective_system,
                 )
             except Exception:
+                _turn_timing_mark(plan, 'hot_context_plan_end_at', decision='EXCEPTION')
                 heartbeat.stop()
                 _release_lease(plan)
                 raise
+            _turn_timing_mark(plan, 'hot_context_plan_end_at', decision=hot_decision)
             if hot_decision == 'BLOCKED':
                 heartbeat.stop()
                 _release_lease(plan)
