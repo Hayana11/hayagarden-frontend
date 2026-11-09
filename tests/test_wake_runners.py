@@ -311,13 +311,7 @@ class WakeResidentRetirementTests(unittest.TestCase):
 
     def test_single_persistent_conversational_resident(self):
         gateway = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
-        self.assertEqual(
-            gateway.count(
-                'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
-            ),
-            1,
-        )
-        self.assertIn('_CC_RESIDENT = _SwappableResident(', gateway)
+        self.assertEqual(gateway.count('_CC_RESIDENT = _SwappableResident('), 1)
         self.assertEqual(gateway.count('_CC_WAKE_RESIDENT'), 0)
 
     def test_canonical_normal_wake_keeps_unified_main_chat_route(self):
