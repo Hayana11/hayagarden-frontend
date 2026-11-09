@@ -728,6 +728,25 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
         event_to_mid = {'old-u': 14716, 't2u': 14720, 't2a': 14721}
         sent_carriers = []
 
+        flow_db = sqlite3.connect(':memory:')
+        self.addCleanup(flow_db.close)
+        flow_db.execute(
+            'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, content TEXT)'
+        )
+        flow_db.execute(
+            'INSERT INTO chat_messages (id, content) VALUES (?, ?)',
+            (14987, 'CURRENT 14987'),
+        )
+
+        class NonClosingSQLiteConnection:
+            def close(self):
+                pass
+
+            def __getattr__(self, name):
+                return getattr(flow_db, name)
+
+        flow_conn = NonClosingSQLiteConnection()
+
         with tempfile.TemporaryDirectory(prefix='historical-anchor-flow-') as tmp:
             history_path = os.path.join(tmp, 'old-session.jsonl')
             Path(history_path).write_bytes(historical_bytes)
@@ -771,7 +790,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
                     side_effect=read_range,
                 ), mock.patch.object(
                     dc, '_connect',
-                    return_value=types.SimpleNamespace(close=lambda: None),
+                    return_value=flow_conn,
                 ), mock.patch(
                     'chat.capacity_swap_runtime._load_formal_messages_excluding_current',
                     return_value=formal,
@@ -800,16 +819,6 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
                     )
                 sent_carriers.append(prepared)
                 return prepared
-
-            flow_db = sqlite3.connect(':memory:')
-            self.addCleanup(flow_db.close)
-            flow_db.execute(
-                'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, content TEXT)'
-            )
-            flow_db.execute(
-                'INSERT INTO chat_messages (id, content) VALUES (?, ?)',
-                (14987, 'CURRENT 14987'),
-            )
 
             sent, swaps, hot_cold, last_good, error = self._run_turn(
                 live,
@@ -841,6 +850,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
             ).fetchall(),
             [(14987, 'CURRENT 14987')],
         )
+        self.assertEqual(flow_db.total_changes, 1)
 
     def test_pre_stdin_failure_after_fresh_adoption_restores_the_old_process(self):
         live = self._live()
