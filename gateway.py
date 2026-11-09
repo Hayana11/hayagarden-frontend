@@ -3461,6 +3461,156 @@ def _coread_get(path):
         return json.loads(r.read().decode())
 
 
+def _coread_post(path, payload):
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    req = urllib.request.Request(
+        'http://127.0.0.1:5050' + path, data=body,
+        headers={'Content-Type': 'application/json'}, method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read().decode())
+
+
+def _co_read_paragraphs(text):
+    return [re.sub(r'\n+', ' ', re.sub(r'(?m)^#+\s*', '', p)).strip()
+            for p in re.split(r'\n\s*\n+', str(text or '').replace('\r', '')) if p.strip()]
+
+
+def _co_read_prepare_batch():
+    current = _coread_get('/api/books/current').get('book')
+    if not current:
+        return None
+    book_id = current.get('bookId')
+    path = '/api/books/%s' % urllib.parse.quote(book_id)
+    chunks = _coread_get(path + '/chunks').get('chunks', [])
+    chapters = [c for c in chunks if c.get('title') and not re.search('cover', c.get('title', ''), re.I)]
+    progress = _coread_get(path + '/progress').get('progress', {})
+    pending = progress.get('assistantPendingBatch')
+    if pending:
+        return book_id, pending
+    read_ids = set(progress.get('readChunkIds', []))
+    unlocked = max((i for i, c in enumerate(chapters) if c.get('id') in read_ids), default=-1)
+    if unlocked < 0:
+        return None
+    position = progress.get('assistantPosition') or {}
+    index = next((i for i, c in enumerate(chapters) if c.get('id') == position.get('chunkId')), -1)
+    start = 0
+    meta = chapters[0]
+    if index >= 0:
+        meta = chapters[index]
+        chapter = _coread_get(path + '/chunks/' + urllib.parse.quote(meta['id']))
+        paras = _co_read_paragraphs(chapter.get('text'))
+        start = int(position.get('paragraphIdx', -1)) + 1
+        if start >= len(paras):
+            index += 1
+            if index > unlocked:
+                return None
+            meta, start = chapters[index], 0
+    chapter = _coread_get(path + '/chunks/' + urllib.parse.quote(meta['id']))
+    paras = _co_read_paragraphs(chapter.get('text'))
+    if start >= len(paras):
+        return None
+    batch = {
+        'batchId': str(uuid.uuid4()), 'chunkId': meta['id'],
+        'startParagraph': start, 'endParagraph': min(start + 5, len(paras) - 1),
+    }
+    _coread_post(path + '/progress', {'actor': 'fy', 'pendingBatch': batch})
+    return book_id, batch
+
+
+def _co_read_batch_text(book_id, batch):
+    path = '/api/books/%s' % urllib.parse.quote(book_id)
+    chapter = _coread_get(path + '/chunks/' + urllib.parse.quote(batch['chunkId']))
+    paragraphs = _co_read_paragraphs(chapter.get('text'))
+    start, end = batch['startParagraph'], batch['endParagraph']
+    if start < 0 or end >= len(paragraphs):
+        raise ValueError('reading batch is outside chapter text')
+    chunks = _coread_get(path + '/chunks').get('chunks', [])
+    chapters = [c for c in chunks if c.get('title') and not re.search('cover', c.get('title', ''), re.I)]
+    title = next((c.get('title') for c in chapters if c.get('id') == batch['chunkId']), '当前章节')
+    annotations = _coread_get(path + '/annotations').get('annotations', [])
+    comments = [a for a in annotations if a.get('chunkId') == batch['chunkId']
+                and start <= int(a.get('paragraphIdx', -1)) <= end]
+    rows = ['书名：%s；章节：%s；本批阅读第 %d–%d 段。' %
+            (chapter.get('bookTitle', ''), title, start + 1, end + 1), '正文：']
+    rows.extend('§%d %s' % (i + 1, paragraphs[i]) for i in range(start, end + 1))
+    if comments:
+        rows.append('本批位置已有的共读痕迹：')
+        for a in comments:
+            author = '费佳' if a.get('author') in ('fy', 'fyodor') else '哈娅'
+            rows.append('§%s [%s%s] id=%s「%s」%s' % (
+                int(a.get('paragraphIdx', 0)) + 1, author,
+                '划线' if a.get('kind') == 'highlight' else '批注',
+                a.get('id', ''), a.get('quote', ''),
+                ('：' + a.get('note', '')) if a.get('note') else '',
+            ))
+    return '\n'.join(rows)
+
+
+def _co_read_add_comment(args):
+    prepared = _co_read_prepare_batch()
+    if not prepared:
+        return '当前没有已解锁的待读段落。'
+    book_id, batch = prepared
+    try:
+        paragraph_idx = int(args.get('paragraph_idx')) - 1
+    except (TypeError, ValueError):
+        return '段落编号无效。'
+    quote = str(args.get('quote') or '').strip()
+    note = str(args.get('note') or '').strip()
+    kind = args.get('kind') if args.get('kind') in ('highlight', 'note') else ('note' if note else 'highlight')
+    if not quote or not batch['startParagraph'] <= paragraph_idx <= batch['endParagraph']:
+        return '只能在当前这一批已读段落中留痕。'
+    path = '/api/books/%s' % urllib.parse.quote(book_id)
+    chapter = _coread_get(path + '/chunks/' + urllib.parse.quote(batch['chunkId']))
+    paragraphs = _co_read_paragraphs(chapter.get('text'))
+    if paragraph_idx >= len(paragraphs) or quote not in paragraphs[paragraph_idx]:
+        return '原文与段落坐标不匹配，未保存。'
+    reply_to = str(args.get('reply_to') or '').strip()
+    if reply_to:
+        annotations = _coread_get(path + '/annotations').get('annotations', [])
+        parent = next((a for a in annotations if a.get('id') == reply_to), None)
+        if (not parent or parent.get('author') != 'haya'
+                or parent.get('chunkId') != batch['chunkId']
+                or parent.get('paragraphIdx') != paragraph_idx):
+            return '只能回复本段中哈娅已经写过的批注。'
+    payload = {
+        'chunkId': batch['chunkId'], 'quote': quote, 'kind': kind,
+        'author': 'fy', 'note': note, 'paragraphIdx': paragraph_idx,
+    }
+    if reply_to:
+        payload['replyTo'] = reply_to
+    _coread_post(path + '/annotations', payload)
+    return '已将共读痕迹留在当前段落。'
+
+
+def _run_co_read_wake_batch():
+    prepared = _co_read_prepare_batch()
+    if not prepared:
+        return False
+    book_id, batch = prepared
+    reading = _co_read_batch_text(book_id, batch)
+    system = build_system(
+        wake=True, include_relationship_context=True,
+        allow_side_effects=False, capability_profile='relay_wake',
+    )
+    task = (
+        '这是与普通聊天隔离的一次自主共读。请读完下面这一小批正文和其中已有批注，'
+        '可以选择不留痕；若有必要，只能用 co_read_add_comment 在这一批段落上划线、写批注，'
+        '或回复同段的哈娅批注。reply_to 使用已有批注 id。不要总结整本书，不输出给哈娅的聊天，'
+        '最后用一句简短内部确认结束。本次内容不会进入普通聊天记录。\n\n' + reading
+    )
+    text, _ = _wake_agent_loop(
+        system, [{'role': 'user', 'content': task}],
+        max_rounds=2, tools=CO_READ_TOOLS, mode='summarize', dry_run=True,
+    )
+    if not text.strip():
+        raise RuntimeError('共读 Relay 没有返回完成结果')
+    path = '/api/books/%s/progress' % urllib.parse.quote(book_id)
+    _coread_post(path, {'actor': 'fy', 'confirmBatchId': batch['batchId']})
+    return True
+
+
 def _read_book(book_id=None, chunk_id=None):
     """翻开我们在读的书：看书名/进度/这一章的正文(分段带段号)/她和我在这章留下的批注。
     不传 book_id 用当前在读的书；不传 chunk_id 用上次读到的那一章。只读，不动她的进度。"""
@@ -3911,6 +4061,8 @@ def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
             return _web_search(args.get('query', ''))
+        if name == 'co_read_add_comment':
+            return _co_read_add_comment(args)
         if name == 'read_book':
             return _read_book(args.get('book_id'), args.get('chunk_id'))
         if name == 'annotate_book':
@@ -10053,6 +10205,18 @@ WAKE_TOOLS = [
     },
 ] + CALENDAR_TOOLS + CODEBASE_READ_TOOLS
 
+CO_READ_TOOLS = [{
+    'name': 'co_read_add_comment',
+    'description': '在当前已解锁阅读批次的指定段落划线、写批注或回复哈娅的本段批注；段落编号从 1 开始。',
+    'input_schema': {'type': 'object', 'properties': {
+        'paragraph_idx': {'type': 'integer'},
+        'quote': {'type': 'string'},
+        'kind': {'type': 'string', 'enum': ['highlight', 'note']},
+        'note': {'type': 'string'},
+        'reply_to': {'type': 'string'},
+    }, 'required': ['paragraph_idx', 'quote']},
+}]
+
 def _wake_agent_loop(
     system, messages, max_rounds=6, tools=None, t_hours=0.0, mode='normal',
     dry_run=False,
@@ -10614,6 +10778,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 getattr(guard_clock, 'last_user_at', None)
                 if guard_clock.reliable else None
             )
+            try:
+                _run_co_read_wake_batch()
+            except Exception:
+                import logging as _co_read_logging
+                _co_read_logging.getLogger('gateway').exception('[co_read] isolated Wake reading failed')
             main_turn_entered = True
             main_turn = _run_unified_normal_main_chat_turn(
                 wake_run_id=wake_run_id,
