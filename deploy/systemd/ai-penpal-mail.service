@@ -1,0 +1,18 @@
+[Unit]
+Description=Upstream ai-penpal-mail Streamable HTTP MCP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-penpal-mail
+Group=ai-penpal-mail
+WorkingDirectory=/opt/ai-penpal-mail/source
+EnvironmentFile=/etc/ai-penpal-mail/.env
+ExecStart=/usr/bin/node /opt/ai-penpal-mail/source/mail-mcp.mjs --sse
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

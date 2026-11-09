@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll the upstream Gmail MCP and queue Unified Wake for new mail
+After=ai-penpal-mail.service
+
+[Service]
+Type=oneshot
+User=ai-penpal-mail
+Group=ai-penpal-mail
+WorkingDirectory=/opt/frontend
+ExecStart=/usr/bin/node /opt/frontend/scripts/gmail_wake_poll.mjs
+UMask=0077

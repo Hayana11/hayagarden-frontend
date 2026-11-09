@@ -21,7 +21,7 @@ function jsonResponse(payload, status = 200) {
 function fixtureFetch({ pages = [{ tools: [] }], statusFor = {}, calls = [] } = {}) {
   return async (_url, init) => {
     const body = JSON.parse(init.body);
-    calls.push({ method: body.method, headers: init.headers, redirect: init.redirect, signal: init.signal });
+    calls.push({ method: body.method, headers: init.headers, redirect: init.redirect, signal: init.signal, dispatcher: init.dispatcher });
     if (body.method === 'initialize') {
       return jsonResponse({ jsonrpc: '2.0', id: body.id, result: {
         protocolVersion: '2025-06-18',
@@ -198,6 +198,22 @@ test('auth, redirect, pagination loop, and limits fail closed without retries', 
   const limited = await discoverExternalMcp({ endpoint: 'https://public.example.test/mcp', limits: { maxPages: 1 }, fetchImpl: fixtureFetch({ pages: [{ tools: [], nextCursor: '1' }, { tools: [] }] }) });
   assert.equal(limited.status, DISCOVERY_STATUS.LIMIT_EXCEEDED);
   assert.equal(limited.catalog_complete, false);
+});
+
+test('only the exact local mail MCP endpoint is allowed to use HTTP and loopback', async () => {
+  const endpoint = 'http://127.0.0.1:3457/mcp';
+  assert.equal(validateEndpoint(endpoint).href, endpoint);
+  for (const other of [
+    'http://localhost:3457/mcp',
+    'http://127.0.0.1:3458/mcp',
+    'http://127.0.0.1:3457/other',
+    'https://127.0.0.1:3457/mcp',
+  ]) assert.throws(() => validateEndpoint(other));
+  const calls = [];
+  const result = await discoverExternalMcp({ endpoint, fetchImpl: fixtureFetch({ calls }) });
+  assert.equal(result.status, DISCOVERY_STATUS.SUCCESS);
+  assert.deepEqual(result.tools, []);
+  assert.ok(calls.every((call) => call.dispatcher === undefined));
 });
 
 test('HTTPS/transport and egress policy reject unsafe targets and mixed DNS', () => {
