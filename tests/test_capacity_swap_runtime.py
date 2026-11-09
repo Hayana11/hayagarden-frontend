@@ -1995,6 +1995,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             emit_anchor_user_event as emit_anchor_user_event_real,
         )
 
+        tmp_dir = tempfile.mkdtemp(prefix='capacity-anchor-case-')
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+
         raw_user_id = 1 if raw_anchor else 3
         raw_assistant_id = 2 if raw_anchor else 4
         raw_uuid = 'u1' if raw_anchor else 'u2'
@@ -2023,7 +2026,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             json.dumps(raw_assistant, separators=(',', ':')) + '\n'
         ).encode('utf-8')
         current_bytes = raw_user_line + raw_assistant_line
-        current_path = os.path.join(self.tmp, 'current-session.jsonl')
+        current_path = os.path.join(tmp_dir, 'current-session.jsonl')
         Path(current_path).write_bytes(current_bytes)
         raw_user_offset = 0
         raw_assistant_offset = len(raw_user_line)
@@ -2149,7 +2152,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                     'message': {'role': 'user', 'content': 'OLD EVENT'},
                 }, separators=(',', ':')) + '\n'
             ).encode('utf-8')
-            history_path = os.path.join(self.tmp, 'old-session.jsonl')
+            history_path = os.path.join(tmp_dir, 'old-session.jsonl')
             Path(history_path).write_bytes(history_payload)
             history_registry = {
                 'scan_status': 'ready',
