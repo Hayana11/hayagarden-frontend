@@ -12075,6 +12075,7 @@ def _gw_build_switch_hooks():
         system_text, env = _system_text_and_env()
         staged = cc_resident.ResidentSession(
             CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+            formal_chat_continuity=True,
         )
         try:
             staged.spawn_fresh_named(
