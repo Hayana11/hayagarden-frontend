@@ -7,8 +7,12 @@ materialization. Broken native mappings fail closed instead of downgrading.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from chat import daily_context as dc
@@ -557,21 +561,42 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
             continuity_plan=None, hot_desired_plan=None, _current_user_stdin_flushed=False,
         )
 
-    def _run_turn(self, live, plan, *, shadow=None):
+    def _run_turn(
+        self,
+        live,
+        plan,
+        *,
+        shadow=None,
+        carrier_prepare=None,
+        provider_content='TARGET CONTENT',
+    ):
         sent = []
         swaps = []
 
         def attempt(plan_, **kwargs):
+            prepared = carrier_prepare(plan_) if carrier_prepare is not None else None
+            if prepared is not None:
+                if not prepared.ok or prepared.candidate is None:
+                    raise AssertionError((prepared.error_code, prepared.warnings))
             hooks = daily_runtime._default_capacity_swap_staged_hooks(live)
-            staged = hooks.spawn_fresh_and_health('TARGET', {}, session_id='fresh-session')
+            session_id = (
+                prepared.candidate.candidate_session_id
+                if prepared is not None else 'fresh-session'
+            )
+            staged = hooks.spawn_fresh_and_health(
+                'TARGET', {}, session_id=session_id,
+            )
             state = daily_runtime.install_capacity_swap_into_live_resident(
                 live_resident=live, staged_resident=staged,
             )
+            source_generation = int(plan_.resident_generation)
             plan_._staged_proc = live._proc
-            plan_.resident_generation = 2
-            plan_.resident_key = 'default:e3:g2'
+            plan_.resident_generation = source_generation + 1
+            plan_.resident_key = 'default:e3:g%d' % plan_.resident_generation
             plan_._capacity_swap_install_state = state
             plan_._capacity_swap_deferred_old_proc = state['old_proc']
+            if prepared is not None:
+                state['candidate'] = prepared.candidate
             swaps.append(state)
             return {'ok': True, 'effective_system': 'TARGET'}
 
@@ -594,7 +619,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
                 mock.patch.object(daily_runtime, '_attempt_capacity_swap_before_stdin',
                                   side_effect=attempt), \
                 mock.patch.object(daily_runtime, 'format_resident_turn_content',
-                                  return_value='TARGET CONTENT'), \
+                                  return_value=provider_content), \
                 mock.patch.object(daily_runtime.dc, 'get_resident_history_cursor', return_value=0), \
                 mock.patch.object(daily_runtime.dc, 'upsert_resident_owner'), \
                 mock.patch.object(daily_runtime, '_capture_transcript_start'), \
@@ -627,6 +652,205 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
         self.assertFalse(live._cold)
         self.assertFalse(live.ensure_alive('TARGET', {}, tool_profile='test-profile'))
         self.assertFalse(swaps[0]['old_proc'].killed)
+
+    def test_historical_anchor_capacity_flow_sends_current_once(self):
+        from chat.claude_transcript_reader import (
+            read_transcript_range as read_transcript_range_real,
+        )
+
+        live = self._live()
+        live._generation = 219
+        plan = self._plan()
+        plan.resident_generation = 219
+        plan.resident_key = 'default:e3:g219'
+        plan.user_message_id = 14987
+        plan.cursor_before = 14986
+        plan.user_content = 'CURRENT 14987'
+
+        member = next(
+            item for item in _members()
+            if item.source_ref == 'turn:14720:14721'
+        )
+        context_plan = _context_plan([member])
+        context_plan.window_anchor = types.SimpleNamespace(
+            kind='window_anchor',
+            source_ref='message:14716',
+            source_revision='anchor-revision',
+            content_hash='anchor-hash',
+            estimated_tokens=1,
+            status='ANCHOR_RETAINED',
+        )
+        context_plan.window_anchor_status = 'ANCHOR_RETAINED'
+        context_plan.window_anchor_raw_satisfied = False
+
+        current_graph = _graph(wake_native=False)
+        formal = [
+            _row(14716, 'hayana', 'ANCHOR'),
+            _row(14720, 'hayana', 'TURN_TWO_USER'),
+            _row(14721, 'assistant', 'TURN_TWO_ASSISTANT'),
+        ]
+        current_registry = {
+            'scan_status': 'ready',
+            'transcript_path': '/tmp/source.jsonl',
+            'claude_session_id': SID,
+            'scan_offset': 1000,
+            'last_mapped_message_id': 14799,
+            'context_id': 7,
+            'context_epoch': 3,
+            'resident_generation': 219,
+        }
+        historical_bytes = (
+            json.dumps({
+                'type': 'user',
+                'uuid': 'old-u',
+                'sessionId': 'old-session',
+                'parentUuid': None,
+                'message': {'role': 'user', 'content': 'OLD EVENT'},
+            }, separators=(',', ':')) + '\n'
+        ).encode('utf-8')
+        mapping_rows = (
+            _mapping(
+                'old-u', 14716, 'user', 0,
+                claude_session_id='old-session', resident_generation=199,
+            ),
+            _mapping(
+                't2u', 14720, 'user', 70, resident_generation=219,
+            ),
+            _mapping(
+                't2a', 14721, 'assistant', 80, resident_generation=219,
+            ),
+        )
+        canonical = {
+            'old-u': 'ANCHOR',
+            't2u': 'TURN_TWO_USER',
+        }
+        mid_to_event = {14716: 'old-u', 14720: 't2u'}
+        event_to_mid = {'old-u': 14716, 't2u': 14720, 't2a': 14721}
+        sent_carriers = []
+
+        flow_db = sqlite3.connect(':memory:')
+        self.addCleanup(flow_db.close)
+        flow_db.execute(
+            'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, content TEXT)'
+        )
+        flow_db.execute(
+            'INSERT INTO chat_messages (id, content) VALUES (?, ?)',
+            (14987, 'CURRENT 14987'),
+        )
+
+        class NonClosingSQLiteConnection:
+            def close(self):
+                pass
+
+            def __getattr__(self, name):
+                return getattr(flow_db, name)
+
+        flow_conn = NonClosingSQLiteConnection()
+
+        with tempfile.TemporaryDirectory(prefix='historical-anchor-flow-') as tmp:
+            history_path = os.path.join(tmp, 'old-session.jsonl')
+            Path(history_path).write_bytes(historical_bytes)
+            historical_registry = {
+                'scan_status': 'ready',
+                'transcript_path': history_path,
+                'claude_session_id': 'old-session',
+                'scan_offset': len(historical_bytes),
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 199,
+            }
+
+            def get_registry(_context_id, generation, **_kwargs):
+                return (
+                    current_registry
+                    if int(generation) == 219
+                    else historical_registry
+                )
+
+            def read_range(path, start_offset, end_offset):
+                if str(path) == '/tmp/source.jsonl':
+                    return current_graph
+                return read_transcript_range_real(path, start_offset, end_offset)
+
+            def prepare_historical_carrier(carrier_plan):
+                with mock.patch(
+                    'chat.capacity_swap_runtime.get_context_claude_session',
+                    side_effect=get_registry,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime.latest_complete_assistant_watermark',
+                    return_value=14799,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime.registry_mapping_lags_watermark',
+                    return_value=False,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime._snapshot_prefix_sha256',
+                    return_value='a' * 64,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime.read_transcript_range',
+                    side_effect=read_range,
+                ), mock.patch.object(
+                    dc, '_connect',
+                    return_value=flow_conn,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime._load_formal_messages_excluding_current',
+                    return_value=formal,
+                ), mock.patch(
+                    'chat.capacity_swap_runtime._load_mapping_for_messages',
+                    return_value=(canonical, mid_to_event, event_to_mid),
+                ), mock.patch(
+                    'chat.capacity_swap_runtime._load_mapping_rows_for_messages',
+                    return_value=mapping_rows,
+                ), mock.patch(
+                    'continuity.sources.evidence_ref',
+                    return_value=types.SimpleNamespace(
+                        source_ref='message:14716',
+                        source_revision='anchor-revision',
+                        content_hash='anchor-hash',
+                    ),
+                ), mock.patch(
+                    'chat.context_window_preview._canonical_user_payload_from_db',
+                    return_value='ANCHOR',
+                ):
+                    prepared = prepare_capacity_swap_for_context_plan(
+                        plan=carrier_plan,
+                        context_plan=context_plan,
+                        trigger_reason='turn_limit',
+                        static_system='TARGET',
+                    )
+                sent_carriers.append(prepared)
+                return prepared
+
+            sent, swaps, hot_cold, last_good, error = self._run_turn(
+                live,
+                plan,
+                carrier_prepare=prepare_historical_carrier,
+                provider_content='CURRENT 14987',
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(sent_carriers), 1)
+        candidate = sent_carriers[0].candidate
+        self.assertTrue(sent_carriers[0].ok, sent_carriers[0].error_code)
+        self.assertEqual(candidate.anchor_message_id, 14716)
+        self.assertEqual(candidate.anchor_event_uuid, 'old-u')
+        self.assertEqual(candidate.selected_message_ids, (14716, 14720, 14721))
+        self.assertNotIn(14987, candidate.selected_message_ids)
+        self.assertEqual(len(swaps), 1)
+        self.assertEqual(swaps[0]['candidate'], candidate)
+        self.assertEqual(
+            sent,
+            [(9002, candidate.candidate_session_id, 220, 'CURRENT 14987')],
+        )
+        self.assertTrue(plan._current_user_stdin_flushed)
+        hot_cold.assert_not_called()
+        last_good.assert_not_called()
+        self.assertEqual(
+            flow_db.execute(
+                'SELECT id, content FROM chat_messages WHERE id=14987'
+            ).fetchall(),
+            [(14987, 'CURRENT 14987')],
+        )
+        self.assertEqual(flow_db.total_changes, 1)
 
     def test_pre_stdin_failure_after_fresh_adoption_restores_the_old_process(self):
         live = self._live()
