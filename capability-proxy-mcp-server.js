@@ -1,8 +1,11 @@
 'use strict';
 
+const os = require('os');
+const path = require('path');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
+const { timingSafeEqual } = require('crypto');
 const { z } = require('zod');
 const { readLightStatus } = require('./light-status-adapter');
 
@@ -53,34 +56,117 @@ function adapterTimeoutMs(toolName) {
   return timeout;
 }
 
-function adapterCommand() {
+// Resident HTTP mode serves every Claude process; each request names its
+// resident's turn lease file by header. Only files under the shared lease
+// directory are accepted (cc_resident._new_uh_a0_turn_lease_path).
+const TURN_LEASE_HEADER = 'x-uh-a0-turn-lease-path';
+// Loopback is reachable by every local user (including the workspace exec
+// sandbox), and lease paths are not secret, so the service also requires a
+// bearer token that only root-readable configuration holds.
+const SERVICE_TOKEN_ENV = 'UH_A0_CAPABILITY_MCP_TOKEN';
+const MIN_SERVICE_TOKEN_LENGTH = 32;
+const TURN_LEASE_FILENAME = /^[0-9a-f]{32}\.json$/;
+
+function turnLeaseDir(env = process.env) {
+  const configured = String(env.UH_A0_TURN_LEASE_DIR || '').trim();
+  return path.resolve(configured || path.join(os.tmpdir(), 'hayagarden-uh-a0-turn-leases'));
+}
+
+function acceptedTurnLeasePath(raw, env = process.env) {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (!value || !path.isAbsolute(value) || value !== path.normalize(value)) return null;
+  if (path.dirname(value) !== turnLeaseDir(env)) return null;
+  if (!TURN_LEASE_FILENAME.test(path.basename(value))) return null;
+  return value;
+}
+
+function serviceToken(env = process.env) {
+  const token = String(env[SERVICE_TOKEN_ENV] || '').trim();
+  return token.length >= MIN_SERVICE_TOKEN_LENGTH ? token : '';
+}
+
+function bearerMatches(header, token) {
+  const match = /^Bearer (.+)$/.exec(typeof header === 'string' ? header.trim() : '');
+  if (!match || !token) return false;
+  const given = Buffer.from(match[1]);
+  const expected = Buffer.from(token);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+function adapterCommand(env = process.env) {
   return {
-    python: process.env.PYTHON || 'python3',
-    cwd: process.env.UH_A0_REPO_ROOT || process.cwd(),
+    python: env.PYTHON || 'python3',
+    cwd: env.UH_A0_REPO_ROOT || process.cwd(),
   };
 }
 
-function verifyCapabilityAction(toolName, toolInput) {
-  const command = adapterCommand();
-  const physicalToolName = 'mcp__capability__' + toolName;
-  try {
-    const output = execFileSync(command.python, ['-m', 'tools.execution_fence', 'verify-json'], {
+function verifyInvocation(toolName, toolInput, env) {
+  const command = adapterCommand(env);
+  return {
+    file: command.python,
+    args: ['-m', 'tools.execution_fence', 'verify-json'],
+    options: {
       cwd: command.cwd,
-      env: process.env,
+      env,
       input: JSON.stringify({
-        tool_name: physicalToolName,
+        tool_name: 'mcp__capability__' + toolName,
         tool_input: toolInput,
       }),
       encoding: 'utf8',
       timeout: 3000,
-    });
-    return JSON.parse(output || '{}');
+    },
+  };
+}
+
+function verifyCapabilityAction(toolName, toolInput, env = process.env) {
+  const call = verifyInvocation(toolName, toolInput, env);
+  try {
+    return JSON.parse(execFileSync(call.file, call.args, call.options) || '{}');
   } catch (_error) {
     return { lease_decision: 'LEASE_MISMATCH' };
   }
 }
 
-function callAdapter(toolName, input, verifiedTurnId = null) {
+// Async twin of execFileSync for the tool path: a shared resident server must
+// not block every other resident while one adapter runs (gallery: up to 50s).
+function execFileAsync(file, args, { cwd, env, input, timeout }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish(new Error('adapter timed out (ETIMEDOUT)'));
+    }, timeout);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.pipe(process.stderr, { end: false });
+    child.on('error', (error) => finish(error));
+    child.on('close', (code) => {
+      if (code === 0) finish(null, stdout);
+      else finish(new Error('adapter exited with status ' + code));
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  });
+}
+
+async function verifyCapabilityActionAsync(toolName, toolInput, env = process.env) {
+  const call = verifyInvocation(toolName, toolInput, env);
+  try {
+    return JSON.parse((await execFileAsync(call.file, call.args, call.options)) || '{}');
+  } catch (_error) {
+    return { lease_decision: 'LEASE_MISMATCH' };
+  }
+}
+
+function adapterInvocation(toolName, input, verifiedTurnId, env) {
   const moduleName = ADAPTER_MODULES[toolName];
   if (!moduleName) {
     throw new Error('unknown capability proxy tool');
@@ -91,11 +177,11 @@ function callAdapter(toolName, input, verifiedTurnId = null) {
     : toolName === 'task_timer_start'
     ? 'TASK_TIMER_COMMANDS_DB_PATH'
     : 'TODO_INTERNAL_DB_PATH';
-  const dbPath = String(process.env[dbEnvName] || '').trim();
+  const dbPath = String(env[dbEnvName] || '').trim();
   if (!dbPath) {
     throw new Error(dbEnvName + ' is required');
   }
-  const command = adapterCommand();
+  const command = adapterCommand(env);
   const payload = isGallery ? {
     operation: toolName,
     tool_input: input,
@@ -126,18 +212,31 @@ function callAdapter(toolName, input, verifiedTurnId = null) {
     payload.shadow_surface = 'claude_code';
     if (verifiedTurnId) payload.shadow_turn_id = verifiedTurnId;
   }
-  const output = execFileSync(command.python, ['-m', moduleName], {
-    cwd: command.cwd,
-    env: {
-      ...process.env,
-      TODO_INTERNAL_DB_PATH: dbPath,
-      HAYA_DB_PATH: isGallery ? dbPath : process.env.HAYA_DB_PATH,
+  return {
+    file: command.python,
+    args: ['-m', moduleName],
+    options: {
+      cwd: command.cwd,
+      env: {
+        ...env,
+        TODO_INTERNAL_DB_PATH: dbPath,
+        HAYA_DB_PATH: isGallery ? dbPath : env.HAYA_DB_PATH,
+      },
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      timeout: adapterTimeoutMs(toolName),
     },
-    input: JSON.stringify(payload),
-    encoding: 'utf8',
-    timeout: adapterTimeoutMs(toolName),
-  });
-  return JSON.parse(output || '{}');
+  };
+}
+
+function callAdapter(toolName, input, verifiedTurnId = null, env = process.env) {
+  const call = adapterInvocation(toolName, input, verifiedTurnId, env);
+  return JSON.parse(execFileSync(call.file, call.args, call.options) || '{}');
+}
+
+async function callAdapterAsync(toolName, input, verifiedTurnId = null, env = process.env) {
+  const call = adapterInvocation(toolName, input, verifiedTurnId, env);
+  return JSON.parse((await execFileAsync(call.file, call.args, call.options)) || '{}');
 }
 
 function formatMemorySearch(result) {
@@ -179,8 +278,8 @@ function gateFailure(decision) {
   return { content: [{ type: 'text', text: 'UH-A0 ' + name }] };
 }
 
-function runProxy(toolName, input) {
-  const decision = verifyCapabilityAction(toolName, input);
+async function runProxy(toolName, input, env = process.env) {
+  const decision = await verifyCapabilityActionAsync(toolName, input, env);
   if (!decision || decision.lease_decision !== 'ALLOW') {
     return gateFailure(decision);
   }
@@ -188,10 +287,11 @@ function runProxy(toolName, input) {
     return {
       content: [{
         type: 'text',
-        text: resultText(toolName, callAdapter(
+        text: resultText(toolName, await callAdapterAsync(
           toolName,
           input,
           decision.verified_turn_id ?? null,
+          env,
         )),
       }],
     };
@@ -205,8 +305,8 @@ function runProxy(toolName, input) {
   }
 }
 
-async function runLightStatusProxy(input = {}) {
-  const decision = verifyCapabilityAction('home_light_status', input);
+async function runLightStatusProxy(input = {}, env = process.env) {
+  const decision = await verifyCapabilityActionAsync('home_light_status', input, env);
   if (!decision || decision.lease_decision !== 'ALLOW') {
     return gateFailure(decision);
   }
@@ -218,7 +318,7 @@ async function runLightStatusProxy(input = {}) {
   };
 }
 
-function buildServer() {
+function buildServer({ env = process.env } = {}) {
   const server = new McpServer({
     name: CAPABILITY_SERVER_NAME,
     version: '1.0.0',
@@ -227,17 +327,17 @@ function buildServer() {
   server.tool(
     'memory_search',
     { keyword: z.string().describe('搜索关键词') },
-    async ({ keyword }) => runProxy('memory_search', { keyword }),
+    async ({ keyword }) => runProxy('memory_search', { keyword }, env),
   );
   server.tool(
     'memory_write',
     { content: z.string().min(1).max(4000).describe('要保存的长期记忆正文') },
-    async ({ content }) => runProxy('memory_write', { content }),
+    async ({ content }) => runProxy('memory_write', { content }, env),
   );
   server.tool(
     'diary_write',
     { content: z.string().describe('要保存的日记正文') },
-    async ({ content }) => runProxy('diary_write', { content }),
+    async ({ content }) => runProxy('diary_write', { content }, env),
   );
   server.tool(
     'task_timer_start',
@@ -248,17 +348,17 @@ function buildServer() {
     async ({ title, countdown_seconds }) => runProxy('task_timer_start', {
       title,
       countdown_seconds: countdown_seconds ?? null,
-    }),
+    }, env),
   );
   server.tool(
     'home_light_status',
     {},
-    async () => runLightStatusProxy({}),
+    async () => runLightStatusProxy({}, env),
   );
   server.tool(
     'todo_read',
     {},
-    async () => runProxy('todo_read', {}),
+    async () => runProxy('todo_read', {}, env),
   );
   server.tool(
     'todo_write',
@@ -269,21 +369,21 @@ function buildServer() {
     async ({ content, due_date }) => runProxy('todo_write', {
       content,
       due_date: due_date ?? null,
-    }),
+    }, env),
   );
   server.tool(
     'ledger_read',
     { month: z.string().optional().describe('YYYY-MM，默认当月') },
     async ({ month }) => runProxy('ledger_read', {
       month: month ?? null,
-    }),
+    }, env),
   );
   server.tool(
     'ledger_budget_read',
     { month: z.string().optional().describe('YYYY-MM，默认当月') },
     async ({ month }) => runProxy('ledger_budget_read', {
       month: month ?? null,
-    }),
+    }, env),
   );
 
   server.tool(
@@ -299,7 +399,7 @@ function buildServer() {
       category: category ?? null,
       note: note ?? null,
       date: date ?? null,
-    }),
+    }, env),
   );
 
   server.tool(
@@ -320,6 +420,7 @@ function buildServer() {
         album: album ?? null,
         first_impression: first_impression ?? null,
       },
+      env,
     ),
   );
   server.tool(
@@ -338,6 +439,7 @@ function buildServer() {
         pid: pid ?? null,
         inspect_question: inspect_question ?? null,
       },
+      env,
     ),
   );
   server.tool(
@@ -345,13 +447,81 @@ function buildServer() {
     { viewpoint: z.enum(['fyodor', 'hayana']).optional() },
     async ({ viewpoint }) => runProxy('gallery_screenshot', {
       viewpoint: viewpoint ?? 'fyodor',
-    }),
+    }, env),
   );
 
   return server;
 }
 
+function createApp({ env = process.env } = {}) {
+  const token = serviceToken(env);
+  if (!token) {
+    throw new Error(SERVICE_TOKEN_ENV + ' must be set (at least ' + MIN_SERVICE_TOKEN_LENGTH + ' characters)');
+  }
+  // Loaded lazily so the stdio path does not pay for express at every spawn.
+  const express = require('express');
+  const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+  const app = express();
+  app.use(express.json({ limit: '1mb' }));
+
+  function rpcError(res, status, code, message, body) {
+    res.status(status).json({
+      jsonrpc: '2.0',
+      error: { code, message },
+      id: body && body.id != null ? body.id : null,
+    });
+  }
+
+  // Stateless: every request carries its resident's lease header and gets a
+  // fresh server bound to it, so a service restart cannot strand a session
+  // and no request can borrow another resident's lease.
+  app.post('/mcp', async (req, res) => {
+    if (!bearerMatches(req.headers.authorization, token)) {
+      rpcError(res, 401, -32001, 'Unauthorized', req.body);
+      return;
+    }
+    const leasePath = acceptedTurnLeasePath(req.headers[TURN_LEASE_HEADER], env);
+    if (!leasePath) {
+      rpcError(res, 403, -32003, 'UH-A0 turn lease path rejected', req.body);
+      return;
+    }
+    const server = buildServer({ env: { ...env, UH_A0_TURN_LEASE_PATH: leasePath } });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (_error) {
+      if (!res.headersSent) rpcError(res, 500, -32603, 'Internal server error', null);
+    }
+  });
+  app.all('/mcp', (req, res) => {
+    if (!bearerMatches(req.headers.authorization, token)) {
+      rpcError(res, 401, -32001, 'Unauthorized', null);
+      return;
+    }
+    rpcError(res, 405, -32000, 'Method not allowed', null);
+  });
+  return app;
+}
+
+function startCapabilityMcpServer({ host = '127.0.0.1', port = 0, ...options } = {}) {
+  const app = createApp(options);
+  return new Promise((resolve) => {
+    const listener = app.listen(port, host, () => resolve({ app, listener, port: listener.address().port }));
+  });
+}
+
 async function main() {
+  const port = Number(process.env.CAPABILITY_MCP_PORT || 0);
+  if (port > 0) {
+    await startCapabilityMcpServer({ port });
+    console.log(`Capability MCP server listening on 127.0.0.1:${port}/mcp`);
+    return;
+  }
   const transport = new StdioServerTransport();
   await buildServer().connect(transport);
 }
@@ -366,9 +536,17 @@ if (require.main === module) {
 module.exports = {
   ADAPTER_MODULES,
   CAPABILITY_PROXY_TOOL_NAMES,
+  SERVICE_TOKEN_ENV,
+  TURN_LEASE_HEADER,
+  acceptedTurnLeasePath,
   adapterTimeoutMs,
   buildServer,
   callAdapter,
+  callAdapterAsync,
+  createApp,
   runLightStatusProxy,
+  startCapabilityMcpServer,
+  turnLeaseDir,
   verifyCapabilityAction,
+  verifyCapabilityActionAsync,
 };
