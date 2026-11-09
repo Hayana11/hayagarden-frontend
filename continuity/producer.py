@@ -33,12 +33,10 @@ from continuity.store import (
     enqueue_generation_job,
     enqueue_job,
     ensure_schema,
-    load_candidate,
     load_claimed_source_revisions,
     load_generation_jobs,
     load_snapshot,
     materialize_job,
-    read_ready_surface,
 )
 from continuity.sources import (
     POLICY_VERSION as SOURCE_POLICY_VERSION,
@@ -312,6 +310,32 @@ def _source_rows_provider(
     return lambda: _scope_rows(source_db_path, identity)
 
 
+def _enqueue_candidate_generation_jobs(
+    conn: sqlite3.Connection,
+    candidates: tuple[CandidateBlock, ...],
+    snapshot: SourceSnapshot,
+    *,
+    settings_binding: Mapping[str, object] | None,
+    now: str,
+) -> tuple[Any, ...]:
+    return tuple(
+        enqueue_generation_job(
+            conn,
+            candidate,
+            snapshot,
+            generator_policy_version=GENERATOR_POLICY_VERSION,
+            prompt_policy_version=PROMPT_POLICY_VERSION,
+            measurement_semantics=(
+                str(settings_binding['measurement_semantics'])
+                if settings_binding else MEASUREMENT_SEMANTICS
+            ),
+            settings_binding=settings_binding,
+            now=now,
+        )
+        for candidate in candidates
+    )
+
+
 def run_continuity_producer(
     *,
     source_db_path: str | Path,
@@ -416,17 +440,13 @@ def run_continuity_producer(
                         close_partial_before_day=_local_calendar_day(now),
                         settings_binding=settings_binding,
                     )
-                    for candidate in stored_candidates:
-                        enqueue_generation_job(
-                            store_conn,
-                            candidate,
-                            snapshot,
-                            generator_policy_version=GENERATOR_POLICY_VERSION,
-                            prompt_policy_version=PROMPT_POLICY_VERSION,
-                            measurement_semantics=(str(settings_binding['measurement_semantics']) if settings_binding else MEASUREMENT_SEMANTICS),
-                            settings_binding=settings_binding,
-                            now=stamp,
-                        )
+                    _enqueue_candidate_generation_jobs(
+                        store_conn,
+                        stored_candidates,
+                        snapshot,
+                        settings_binding=settings_binding,
+                        now=stamp,
+                    )
                     queued_count = len(stored_candidates)
                     if settings_authority and settings_authority.get('pending_revision') and stored_candidates:
                         pending = settings_authority['pending_revision']
@@ -554,97 +574,46 @@ def run_continuity_producer(
 
 @dataclass(frozen=True)
 class TargetedColdBridgeResult:
-    """Evidence from one exact cold/respawn bridge seal attempt."""
+    """Outcome and active sealing settings for one exact cold bridge."""
 
     status: Literal['ready', 'failed', 'blocked']
     error_code: str | None = None
-    source_member_count: int = 0
     active_settings_revision_id: str | None = None
     target_logical_size: int | None = None
     max_completed_turns: int | None = None
-    snapshot_id: str | None = None
-    candidate_id: str | None = None
-    generation_job_id: str | None = None
-    generated_chunk_id: str | None = None
-    materialization_close_reason: str | None = None
     model_call_count: int = 0
-    claimed_source: bool = False
 
 
-def _target_member_identity(member: SourceMember) -> tuple[object, ...]:
-    return (
-        str(member.source_kind),
-        str(member.source_ref),
-        str(member.source_revision),
-        str(member.content_hash),
-        member.span_start,
-        member.span_end,
-        str(member.role),
-        str(member.branch_id),
-        int(member.logical_size),
-        str(member.created_at),
-    )
-
-
-def _candidate_members(
+def _candidate_group_covers_target(
     snapshot: SourceSnapshot,
-    candidate: CandidateBlock,
-) -> tuple[SourceMember, ...]:
-    by_seq = {int(member.seq): member for member in snapshot.members}
-    members: list[SourceMember] = []
-    if not (
-        len(candidate.source_seqs)
-        == len(candidate.source_refs)
-        == len(candidate.source_revisions)
-    ):
-        return ()
-    for seq, source_ref, source_revision in zip(
-        candidate.source_seqs,
-        candidate.source_refs,
-        candidate.source_revisions,
-    ):
-        member = by_seq.get(int(seq))
-        if member is None:
-            return ()
-        if (
-            str(member.source_ref) != str(source_ref)
-            or str(member.source_revision) != str(source_revision)
-        ):
-            return ()
-        members.append(member)
-    return tuple(members)
-
-
-def _candidate_matches_target(
-    snapshot: SourceSnapshot,
-    candidate: CandidateBlock,
+    candidates: tuple[CandidateBlock, ...],
     target_members: tuple[SourceMember, ...],
 ) -> bool:
-    actual = _candidate_members(snapshot, candidate)
-    return bool(actual) and tuple(
-        _target_member_identity(member) for member in actual
-    ) == tuple(
-        _target_member_identity(member) for member in target_members
-    )
-
-
-def _ready_bridge_chunk(
-    conn: sqlite3.Connection,
-    ready_chunks: tuple[Any, ...],
-    target_members: tuple[SourceMember, ...],
-) -> tuple[Any, CandidateBlock, SourceSnapshot] | None:
-    for chunk in ready_chunks:
-        if str(getattr(chunk, 'status', '') or '') != 'ready':
-            continue
-        candidate = load_candidate(conn, str(chunk.candidate_id))
-        snapshot = load_snapshot(conn, str(chunk.snapshot_id))
-        if (
-            candidate is not None
-            and snapshot is not None
-            and _candidate_matches_target(snapshot, candidate, target_members)
+    if not candidates:
+        return False
+    actual = []
+    for block_seq, candidate in enumerate(candidates):
+        if candidate.snapshot_id != snapshot.snapshot_id or candidate.block_seq != block_seq:
+            return False
+        if not (
+            len(candidate.source_seqs)
+            == len(candidate.source_refs)
+            == len(candidate.source_revisions)
         ):
-            return chunk, candidate, snapshot
-    return None
+            return False
+        actual.extend(
+            (int(seq), str(source_ref), str(source_revision))
+            for seq, source_ref, source_revision in zip(
+                candidate.source_seqs,
+                candidate.source_refs,
+                candidate.source_revisions,
+            )
+        )
+    expected = tuple(
+        (index, str(member.source_ref), str(member.source_revision))
+        for index, member in enumerate(target_members)
+    )
+    return tuple(actual) == expected
 
 
 def run_targeted_cold_bridge(
@@ -662,14 +631,11 @@ def run_targeted_cold_bridge(
     persona_text: str | None = None,
     now: str | None = None,
 ) -> TargetedColdBridgeResult:
-    """Seal and generate exactly one explicitly selected historical bridge.
-
-    The target is supplied by the already-built cold ContextPlan.  This
-    function never discovers a broader source range and never promotes
-    pending settings.
-    """
-
-    target_members = tuple(bridge_members)
+    """Drive one canonical bridge through the ordinary store and generator lifecycle."""
+    target_members = tuple(
+        replace(member, seq=index)
+        for index, member in enumerate(bridge_members)
+    )
     if not target_members:
         return TargetedColdBridgeResult(
             status='failed',
@@ -683,7 +649,6 @@ def run_targeted_cold_bridge(
         return TargetedColdBridgeResult(
             status='blocked',
             error_code='context_plan_cold_bridge_identity_ambiguous',
-            source_member_count=len(target_members),
         )
 
     identity = {
@@ -698,80 +663,37 @@ def run_targeted_cold_bridge(
         try:
             ensure_schema(store_conn)
             authority = load_authority(store_conn)
-            active_revision = authority['active_revision']
             settings_binding = binding_for_revision(
                 store_conn,
-                str(active_revision['revision_id']),
+                str(authority['active_revision']['revision_id']),
             )
-            policy = sealing_policy_for_revision(active_revision)
+            policy = sealing_policy_for_revision(authority['active_revision'])
             result_base = {
-                'source_member_count': len(target_members),
                 'active_settings_revision_id': str(
                     settings_binding['settings_revision_id']
                 ),
-                'target_logical_size': int(
-                    settings_binding['target_logical_size']
-                ),
-                'max_completed_turns': int(
-                    settings_binding['max_completed_turns']
-                ),
+                'target_logical_size': int(settings_binding['target_logical_size']),
+                'max_completed_turns': int(settings_binding['max_completed_turns']),
             }
-
-            surface = read_ready_surface(continuity_store_path)
-            if surface.status == 'corrupt':
-                return TargetedColdBridgeResult(
-                    status='failed',
-                    error_code=str(
-                        surface.error_code
-                        or 'context_plan_cold_bridge_ready_surface_corrupt'
-                    ),
-                    **result_base,
-                )
-            ready_chunks = tuple(surface.artifacts or ())
-            existing = _ready_bridge_chunk(
-                store_conn,
-                ready_chunks,
+            snapshot = _snapshot_for_members(
                 target_members,
+                identity=identity,
+                created_at=stamp,
             )
-            if existing is not None:
-                chunk, candidate, snapshot = existing
-                return TargetedColdBridgeResult(
-                    status='ready',
-                    snapshot_id=str(snapshot.snapshot_id),
-                    candidate_id=str(candidate.candidate_id),
-                    generation_job_id=str(chunk.generation_job_id),
-                    generated_chunk_id=str(chunk.chunk_id),
-                    materialization_close_reason=str(candidate.close_reason),
-                    **result_base,
-                )
-
             claimed = load_claimed_source_revisions(
                 store_conn,
                 source_refs=(member.source_ref for member in target_members),
             )
-            if any(key in claimed for key in target_keys):
+            if any(key in claimed for key in target_keys) and load_snapshot(
+                store_conn, snapshot.snapshot_id
+            ) is None:
                 return TargetedColdBridgeResult(
                     status='blocked',
                     error_code='context_plan_cold_bridge_claimed_not_ready',
-                    claimed_source=True,
                     **result_base,
                 )
 
-            snapshot_members = tuple(
-                replace(member, seq=index)
-                for index, member in enumerate(target_members)
-            )
-            snapshot = _snapshot_for_members(
-                snapshot_members,
-                identity=identity,
-                created_at=stamp,
-            )
-            sealing_job = enqueue_job(
-                store_conn,
-                snapshot,
-                policy,
-                now=stamp,
-            )
+            sealing_job = enqueue_job(store_conn, snapshot, policy, now=stamp)
             candidates = materialize_job(
                 store_conn,
                 sealing_job.job_id,
@@ -780,34 +702,21 @@ def run_targeted_cold_bridge(
                 include_end_of_snapshot=True,
                 settings_binding=settings_binding,
             )
-            if len(candidates) != 1:
-                return TargetedColdBridgeResult(
-                    status='failed',
-                    error_code='context_plan_cold_bridge_materialization_not_exact',
-                    snapshot_id=str(snapshot.snapshot_id),
-                    **result_base,
-                )
-            candidate = candidates[0]
-            if not _candidate_matches_target(
+            if not _candidate_group_covers_target(
                 snapshot,
-                candidate,
+                candidates,
                 target_members,
             ):
                 return TargetedColdBridgeResult(
-                    status='failed',
-                    error_code='context_plan_cold_bridge_candidate_identity_mismatch',
-                    snapshot_id=str(snapshot.snapshot_id),
-                    candidate_id=str(candidate.candidate_id),
-                    materialization_close_reason=str(candidate.close_reason),
+                    status='blocked',
+                    error_code='context_plan_cold_bridge_candidate_coverage_mismatch',
                     **result_base,
                 )
-            generation_job = enqueue_generation_job(
+
+            generation_jobs = _enqueue_candidate_generation_jobs(
                 store_conn,
-                candidate,
+                candidates,
                 snapshot,
-                generator_policy_version=GENERATOR_POLICY_VERSION,
-                prompt_policy_version=PROMPT_POLICY_VERSION,
-                measurement_semantics=str(settings_binding['measurement_semantics']),
                 settings_binding=settings_binding,
                 now=stamp,
             )
@@ -817,54 +726,44 @@ def run_targeted_cold_bridge(
                 nonlocal call_count
                 call_count += 1
 
-            try:
-                chunk = generate_continuity_chunk(
-                    store_conn,
-                    generation_job.generation_job_id,
-                    rows_provider=rows_provider,
-                    capture_authority=capture_authority,
-                    generate_fn=generate_fn,
-                    request_factory=request_factory,
-                    persona_reader=persona_reader,
-                    persona_text=persona_text,
-                    source_db_path=str(source_db_path),
-                    on_provider_call=count_provider_call,
-                    now=stamp,
-                )
-            except Exception as exc:
-                failed = load_generation_jobs(
-                    store_conn,
-                    statuses=('failed', 'stale', 'pending', 'generating'),
-                )
-                current = next(
-                    (
-                        item for item in failed
-                        if item.generation_job_id
-                        == generation_job.generation_job_id
-                    ),
-                    None,
-                )
-                return TargetedColdBridgeResult(
-                    status='failed',
-                    error_code=str(
-                        current.error_code
-                        if current is not None and current.error_code
-                        else exc
-                    ),
-                    snapshot_id=str(snapshot.snapshot_id),
-                    candidate_id=str(candidate.candidate_id),
-                    generation_job_id=str(generation_job.generation_job_id),
-                    materialization_close_reason=str(candidate.close_reason),
-                    model_call_count=call_count,
-                    **result_base,
-                )
+            for generation_job in generation_jobs:
+                try:
+                    generate_continuity_chunk(
+                        store_conn,
+                        generation_job.generation_job_id,
+                        rows_provider=rows_provider,
+                        capture_authority=capture_authority,
+                        generate_fn=generate_fn,
+                        request_factory=request_factory,
+                        persona_reader=persona_reader,
+                        persona_text=persona_text,
+                        source_db_path=str(source_db_path),
+                        on_provider_call=count_provider_call,
+                        now=stamp,
+                    )
+                except Exception as exc:
+                    current = next(
+                        (
+                            item for item in load_generation_jobs(
+                                store_conn,
+                                statuses=('failed', 'stale', 'pending', 'generating'),
+                            )
+                            if item.generation_job_id == generation_job.generation_job_id
+                        ),
+                        None,
+                    )
+                    return TargetedColdBridgeResult(
+                        status='failed',
+                        error_code=(
+                            current.error_code
+                            if current is not None and current.error_code
+                            else str(exc)
+                        ),
+                        model_call_count=call_count,
+                        **result_base,
+                    )
             return TargetedColdBridgeResult(
                 status='ready',
-                snapshot_id=str(snapshot.snapshot_id),
-                candidate_id=str(candidate.candidate_id),
-                generation_job_id=str(generation_job.generation_job_id),
-                generated_chunk_id=str(chunk.chunk_id),
-                materialization_close_reason=str(candidate.close_reason),
                 model_call_count=call_count,
                 **result_base,
             )
@@ -882,7 +781,6 @@ def run_targeted_cold_bridge(
         return TargetedColdBridgeResult(
             status='failed',
             error_code=str(exc) or 'context_plan_cold_bridge_failed',
-            source_member_count=len(target_members),
             model_call_count=call_count,
         )
 
