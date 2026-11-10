@@ -83,7 +83,11 @@ _HOT_FIXED_SECTION_KINDS = frozenset({
     'accepted_open_loops',
 })
 _HOT_HISTORICAL_REPRESENTATION_KINDS = frozenset({'raw', 'chunk'})
-_HOT_CONTEXT_PLAN_CACHE_LIMIT = 128
+# The key includes the current user message and every source row, so a normal
+# conversation misses on every turn. Entries are only hit when the very same
+# turn is retried or re-prepared; keep the cache tiny and do not drop inputs
+# from the key to raise the hit rate.
+_HOT_CONTEXT_PLAN_CACHE_LIMIT = 4
 _HOT_CONTEXT_PLAN_CACHE: OrderedDict[
     tuple[str, str], tuple[Any, dict[str, str]]
 ] = OrderedDict()
