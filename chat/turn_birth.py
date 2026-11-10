@@ -89,11 +89,11 @@ def summarize(diagnostic: Any, *, first_content_at: Optional[float] = None) -> O
         origin = _num(diagnostic.get('birth_started_at')) or _num(diagnostic.get('request_received_at'))
         if origin is None:
             return None
-        end = (
-            _num(first_content_at)
-            or _num(diagnostic.get('first_thinking_or_text_at'))
-            or _now()
-        )
+        end = _num(first_content_at)
+        if end is None:
+            end = _num(diagnostic.get('first_thinking_or_text_at'))
+        if end is None:
+            return None
         stamped = [
             dict(p) for p in diagnostic.get('phases') or ()
             if isinstance(p, dict) and _num(p.get('start')) is not None and _num(p.get('end')) is not None

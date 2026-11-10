@@ -7642,10 +7642,9 @@ def _birth_chars(text):
 
 
 def _stream_cc_daily_soft_window(
-    _turn_data, _uc, *, request_reality_context='',
+    _turn_data, _uc, *, request_reality_context='', birth_started_at,
 ):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
-    _birth_started_at = time.time()  # the 出生 clock: request in -> first word out
     import hashlib
     import logging
     from moments_turn import DEFAULT_CONVERSATION_ID
@@ -7900,11 +7899,11 @@ def _stream_cc_daily_soft_window(
                     't': 'memory_recall',
                     'd': _recall_shown,
                 }, ensure_ascii=False) + SSE_END
-            if _birth_shown is None and evt in ('think', 'text', 'self_state', 'tool_use'):
-                # The first word is out: show how this reply was born, step by step.
+            if _birth_shown is None and evt in ('think', 'text'):
+                # Freeze the shared summary only after first thinking/text is recorded.
                 _birth_shown = _turn_birth.summarize(
                     getattr(_daily_plan, 'cold_start_diagnostic', None),
-                ) or False
+                )
                 if _birth_shown:
                     yield 'data: ' + json.dumps({
                         't': 'birth', 'd': _birth_shown,
@@ -8552,6 +8551,7 @@ def _stream_cc_daily_soft_window(
 
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
+    birth_started_at = time.time()
     from flask import Response, stream_with_context
     if _get_provider() == 'claude_code':
         def gen_cc():
@@ -8788,6 +8788,7 @@ def chat_stream():
                         _turn_data,
                         _uc,
                         request_reality_context=request_reality_context,
+                        birth_started_at=birth_started_at,
                     )
                     try:
                         for _chunk in _daily_stream:

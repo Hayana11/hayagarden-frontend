@@ -156,6 +156,21 @@ class TurnTimingTests(unittest.TestCase):
         self.assertEqual(payload['generations'][0]['spawn_reason'], 'process_dead')
         self.assertTrue(payload['generations'][0]['reached_stdin'])
 
+    def test_birth_summary_waits_for_first_thinking_or_text(self):
+        diagnostic = {
+            'request_received_at': 10.0,
+            'birth_started_at': 9.0,
+            'terminal_at': 20.0,
+            'generation_records': [],
+        }
+        before = self._emit(diagnostic)
+        self.assertIsNone(before['birth'])
+
+        diagnostic['first_thinking_or_text_at'] = 12.5
+        after = self._emit(diagnostic)
+        self.assertEqual(after['birth']['total_ms'], 3500)
+        self.assertEqual(after['durations_ms']['birth_ms'], 3500)
+
     def test_turn_without_request_time_is_not_logged(self):
         stream = io.StringIO()
         with mock.patch.object(sys, 'stderr', stream):

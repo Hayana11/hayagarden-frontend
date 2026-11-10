@@ -6,6 +6,7 @@ event goes out once, before the first word, and is kept with the reply.
 """
 from __future__ import annotations
 
+import time
 import types
 import unittest
 from unittest import mock
@@ -70,6 +71,12 @@ class SummarizeTests(unittest.TestCase):
         self.assertIsNone(turn_birth.summarize({'phases': []}))
         self.assertIsNone(turn_birth.summarize(None))
 
+    def test_summary_waits_for_first_thinking_or_text(self):
+        diagnostic = {'birth_started_at': 10.0, 'phases': []}
+        self.assertIsNone(turn_birth.summarize(diagnostic))
+        diagnostic['first_thinking_or_text_at'] = 12.5
+        self.assertEqual(turn_birth.summarize(diagnostic)['total_ms'], 2500)
+
     def test_phase_records_detail_and_never_raises(self):
         diagnostic = {}
         with turn_birth.phase(diagnostic, 'memory', '想起记忆') as box:
@@ -121,8 +128,25 @@ class DetailLabelTests(unittest.TestCase):
 class StreamTests(_Flow):
     """The real /chat/stream Daily flow sends and keeps the birth breakdown."""
 
+    def _timed_daily_stream_patch(self, leading_events=()):
+        original = dr.stream_daily_resident_turn
+
+        def _stream(plan, *args, **kwargs):
+            for event, payload in leading_events:
+                yield event, payload
+            diagnostic = plan.cold_start_diagnostic
+            for event, payload in original(plan, *args, **kwargs):
+                if event in ('think', 'text') and not diagnostic.get('first_thinking_or_text_at'):
+                    diagnostic['first_thinking_or_text_at'] = time.time()
+                yield event, payload
+
+        return mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_stream)
+
     def test_birth_goes_out_before_the_first_word_and_stays_with_the_reply(self):
-        _uid, events = self.turn('想吃希腊菜了')
+        _uid, events = self.turn(
+            '想吃希腊菜了',
+            extra=[self._timed_daily_stream_patch()],
+        )
         kinds = [e.get('t') for e in events]
         self.assertEqual(kinds.count('birth'), 1)
         first_word = min(i for i, k in enumerate(kinds) if k in ('think', 'text'))
@@ -142,9 +166,85 @@ class StreamTests(_Flow):
 
         self.assertEqual(self.cache_info()['birth'], birth)  # history can open it after a reload
 
+    def test_birth_waits_for_early_self_state_and_tool_use(self):
+        import gateway
+
+        early_events = [
+            ('self_state', '先到的状态'),
+            ('tool_use', {'id': 'early-tool', 'name': 'test.read', 'args': {}}),
+            ('tool_result', {'tool_use_id': 'early-tool', 'result': 'ok', 'is_error': False}),
+        ]
+        keep_events = mock.patch(
+            'chat.display_thinking.filter_display_thinking_events',
+            side_effect=lambda events, *_args, **_kwargs: events,
+        )
+        _uid, events = self.turn(
+            '想吃希腊菜了',
+            extra=[self._timed_daily_stream_patch(early_events), keep_events],
+        )
+        kinds = [event.get('t') for event in events]
+        birth_index = kinds.index('birth')
+        first_word = min(i for i, kind in enumerate(kinds) if kind in ('think', 'text'))
+        self.assertGreater(birth_index, kinds.index('self_state'))
+        self.assertGreater(birth_index, kinds.index('tool_use'))
+        self.assertLess(birth_index, first_word)
+        birth = events[birth_index]['d']
+        self.assertEqual(self.cache_info()['birth'], birth)
+
+    def test_birth_origin_is_the_stream_entry_before_turn_lifecycle(self):
+        import gateway
+
+        marks = {}
+
+        def prepare(*_args, **_kwargs):
+            marks['prepare_turn'] = time.time()
+            return {'content': '想吃希腊菜了'}
+
+        def insert(_get_db, _turn_data, user_content, **_kwargs):
+            marks['insert_user_message'] = time.time()
+            rows = self.query(
+                "SELECT id FROM chat_messages WHERE author='hayana' ORDER BY id DESC LIMIT 1"
+            )
+            return {'content': user_content, 'user_message_id': int(rows[0][0])}
+
+        def acquire(*_args, **_kwargs):
+            marks['generation_lock'] = time.time()
+            return ('new', None)
+
+        def activate(turn_data, **_kwargs):
+            marks['activate_turn'] = time.time()
+            return turn_data
+
+        original_daily = gateway._stream_cc_daily_soft_window
+
+        def daily(turn_data, user_content, *, birth_started_at, **kwargs):
+            marks['birth_origin'] = birth_started_at
+            yield from original_daily(
+                turn_data,
+                user_content,
+                birth_started_at=birth_started_at,
+                **kwargs,
+            )
+
+        extra = [
+            self._timed_daily_stream_patch(),
+            mock.patch('moments_turn.prepare_turn', side_effect=prepare),
+            mock.patch('moments_turn.insert_user_message', side_effect=insert),
+            mock.patch.object(gateway, '_gen_acquire_or_wait', side_effect=acquire),
+            mock.patch('moments_turn.activate_turn', side_effect=activate),
+            mock.patch.object(gateway, '_stream_cc_daily_soft_window', side_effect=daily),
+        ]
+        self.turn('想吃希腊菜了', extra=extra)
+        for phase in ('prepare_turn', 'insert_user_message', 'generation_lock', 'activate_turn'):
+            self.assertLessEqual(marks['birth_origin'], marks[phase], phase)
+
     def test_hot_turn_says_the_resident_was_reused(self):
-        self.turn('想吃希腊菜了')
-        _uid, events = self.turn('再说说赫泰拉', created_at='2026-07-27 10:05:00')
+        self.turn('想吃希腊菜了', extra=[self._timed_daily_stream_patch()])
+        _uid, events = self.turn(
+            '再说说赫泰拉',
+            created_at='2026-07-27 10:05:00',
+            extra=[self._timed_daily_stream_patch()],
+        )
         birth = next(e['d'] for e in events if e.get('t') == 'birth')
         self.assertEqual(birth['turn_kind'], 'hot')
         spawn = next(row for row in birth['phases'] if row['key'] == 'spawn')
@@ -152,7 +252,10 @@ class StreamTests(_Flow):
 
     def test_no_breakdown_means_no_event_and_the_reply_is_unaffected(self):
         with mock.patch('chat.turn_birth.summarize', return_value=None):
-            _uid, events = self.turn('想吃希腊菜了')
+            _uid, events = self.turn(
+                '想吃希腊菜了',
+                extra=[self._timed_daily_stream_patch()],
+            )
         self.assertFalse(any(e.get('t') == 'birth' for e in events))
         self.assertTrue(any(e.get('t') in ('think', 'text') for e in events))
         self.assertNotIn('birth', self.cache_info())
