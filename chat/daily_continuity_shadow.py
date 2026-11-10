@@ -30,6 +30,7 @@ from continuity.sources import (
 )
 from continuity.store import (
     ContinuityStoreError,
+    _cached_ready_chunk_proof,
     load_candidate,
     load_ready_chunks,
     load_snapshot,
@@ -436,14 +437,21 @@ def _bindings(
 
     bindings: list[ContextChunkBinding] = []
     for chunk in chunks:
-        candidate = load_candidate(conn, chunk.candidate_id)
-        snapshot = load_snapshot(conn, chunk.snapshot_id)
+        cached_proof = _cached_ready_chunk_proof(conn, chunk)
+        if cached_proof is not None:
+            snapshot, candidate = cached_proof
+            ready_surface_validated = True
+        else:
+            candidate = load_candidate(conn, chunk.candidate_id)
+            snapshot = load_snapshot(conn, chunk.snapshot_id)
+            ready_surface_validated = False
         if candidate is None or snapshot is None:
             raise _ChunkSurfaceUnavailable('ready chunk provenance is unavailable')
         bindings.append(ContextChunkBinding(
             chunk=chunk,
             candidate=candidate,
             snapshot=snapshot,
+            ready_surface_validated=ready_surface_validated,
         ))
     return tuple(bindings)
 

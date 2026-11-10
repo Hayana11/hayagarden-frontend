@@ -165,6 +165,7 @@ class ContextChunkBinding:
     chunk: ContinuityChunk
     candidate: CandidateBlock
     snapshot: SourceSnapshot
+    ready_surface_validated: bool = False
 
 
 def _parse_context_budget_raw(raw: object, *, name: str, positive: bool) -> int:
@@ -1152,22 +1153,28 @@ def build_context_plan(
     )
 
     valid_chunks: list[tuple[ContextRepresentation, set[tuple[Any, ...]]]] = []
+    from continuity.store import strict_revalidate_enabled
+    strict_revalidate = strict_revalidate_enabled()
     for binding in tuple(chunks):
         chunk = binding.chunk
         candidate = binding.candidate
         snapshot = binding.snapshot
         representation_id = f'chunk:{chunk.chunk_id}'
         try:
-            if chunk.status != 'ready':
-                raise ValueError('chunk is not ready')
-            if chunk.snapshot_id != snapshot.snapshot_id:
-                raise ValueError('chunk snapshot identity mismatch')
-            if candidate.snapshot_id != snapshot.snapshot_id:
-                raise ValueError('candidate snapshot identity mismatch')
-            if chunk.candidate_id != candidate.candidate_id:
-                raise ValueError('chunk candidate identity mismatch')
-            if source_hash(snapshot.members) != snapshot.source_hash:
-                raise ValueError('chunk snapshot source hash mismatch')
+            ready_surface_validated = bool(
+                binding.ready_surface_validated and not strict_revalidate
+            )
+            if not ready_surface_validated:
+                if chunk.status != 'ready':
+                    raise ValueError('chunk is not ready')
+                if chunk.snapshot_id != snapshot.snapshot_id:
+                    raise ValueError('chunk snapshot identity mismatch')
+                if candidate.snapshot_id != snapshot.snapshot_id:
+                    raise ValueError('candidate snapshot identity mismatch')
+                if chunk.candidate_id != candidate.candidate_id:
+                    raise ValueError('chunk candidate identity mismatch')
+                if source_hash(snapshot.members) != snapshot.source_hash:
+                    raise ValueError('chunk snapshot source hash mismatch')
 
             seqs = tuple(int(seq) for seq in candidate.source_seqs)
             refs = tuple(str(ref) for ref in candidate.source_refs)
@@ -1175,19 +1182,22 @@ def build_context_plan(
             if not (len(seqs) == len(refs) == len(revisions)) or not seqs:
                 raise ValueError('chunk candidate membership is incomplete')
             snapshot_by_seq = {int(member.seq): member for member in snapshot.members}
-            members: list[SourceMember] = []
-            for seq, ref, revision in zip(seqs, refs, revisions):
-                member = snapshot_by_seq.get(seq)
-                if member is None:
-                    raise ValueError(f'chunk source member seq {seq} is missing')
-                if member.source_ref != ref or member.source_revision != revision:
-                    raise ValueError(f'chunk source membership mismatch for {ref}')
-                members.append(member)
-            snapshot_members = tuple(members)
-            if candidate.source_revision != candidate_source_revision(snapshot_members):
-                raise ValueError('chunk candidate source revision is stale')
-            if any(member.branch_id != candidate.branch_id for member in snapshot_members):
-                raise ValueError('chunk branch identity mismatch')
+            if ready_surface_validated:
+                snapshot_members = tuple(snapshot_by_seq[seq] for seq in seqs)
+            else:
+                members: list[SourceMember] = []
+                for seq, ref, revision in zip(seqs, refs, revisions):
+                    member = snapshot_by_seq.get(seq)
+                    if member is None:
+                        raise ValueError(f'chunk source member seq {seq} is missing')
+                    if member.source_ref != ref or member.source_revision != revision:
+                        raise ValueError(f'chunk source membership mismatch for {ref}')
+                    members.append(member)
+                snapshot_members = tuple(members)
+                if candidate.source_revision != candidate_source_revision(snapshot_members):
+                    raise ValueError('chunk candidate source revision is stale')
+                if any(member.branch_id != candidate.branch_id for member in snapshot_members):
+                    raise ValueError('chunk branch identity mismatch')
             selected_members = _rebind_snapshot_members_to_expected(
                 snapshot_members,
                 expected_by_stable,
@@ -1195,10 +1205,11 @@ def build_context_plan(
             member_keys = {_member_key(member) for member in selected_members}
             if not member_keys.issubset(set(expected_by_key)):
                 raise ValueError('chunk membership is outside expected source coverage')
-            if not chunk.body.strip():
-                raise ValueError('chunk body is missing')
-            if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
-                raise ValueError('chunk body hash mismatch')
+            if not ready_surface_validated:
+                if not chunk.body.strip():
+                    raise ValueError('chunk body is missing')
+                if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
+                    raise ValueError('chunk body hash mismatch')
             representation = _chunk_representation(binding, selected_members)
             valid_chunks.append((representation, member_keys))
         except (TypeError, ValueError, AttributeError) as exc:

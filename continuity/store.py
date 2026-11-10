@@ -10,7 +10,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -65,6 +68,118 @@ GENERATION_JOB_STATUSES = ('pending', 'generating', 'failed', 'stale', 'ready')
 CHUNK_STATUSES = ('ready', 'stale', 'superseded')
 
 READY_SURFACE_STATUSES = ('ready', 'empty', 'unavailable', 'corrupt')
+
+_READY_SURFACE_CACHE_LIMIT = 4096
+_SCHEMA_STATUS_CACHE_LIMIT = 128
+_READY_SURFACE_CACHE: OrderedDict[
+    tuple[str, str, str, str],
+    tuple[ContinuityChunk, SourceSnapshot, CandidateBlock],
+] = OrderedDict()
+_READY_SNAPSHOT_CACHE: OrderedDict[
+    tuple[str, str, str], SourceSnapshot
+] = OrderedDict()
+_SCHEMA_STATUS_CACHE: OrderedDict[
+    tuple[str, int], tuple[str, str | None]
+] = OrderedDict()
+_READY_SURFACE_CACHE_LOCK = threading.RLock()
+
+
+def strict_revalidate_enabled() -> bool:
+    return os.environ.get('CONTINUITY_STRICT_REVALIDATE') == '1'
+
+
+def clear_ready_surface_cache() -> None:
+    """Clear process-local validated ready artifacts and schema results."""
+    with _READY_SURFACE_CACHE_LOCK:
+        _READY_SURFACE_CACHE.clear()
+        _READY_SNAPSHOT_CACHE.clear()
+        _SCHEMA_STATUS_CACHE.clear()
+
+
+def _connection_store_path(conn: sqlite3.Connection) -> str:
+    row = conn.execute('PRAGMA database_list').fetchone()
+    raw_path = str(row[2] or '').strip() if row is not None else ''
+    return str(Path(raw_path).expanduser().resolve()) if raw_path else f':memory:{id(conn)}'
+
+
+def _ready_cache_key(
+    path: str,
+    chunk_id: str,
+    artifact_revision: str,
+    body_hash: str,
+) -> tuple[str, str, str, str]:
+    return (path, chunk_id, artifact_revision, body_hash)
+
+
+def _cache_ready_chunk(
+    path: str,
+    chunk: ContinuityChunk,
+    snapshot: SourceSnapshot,
+    candidate: CandidateBlock,
+) -> None:
+    key = _ready_cache_key(
+        path,
+        str(chunk.chunk_id),
+        str(chunk.artifact_revision),
+        str(chunk.body_hash),
+    )
+    snapshot_key = (path, str(snapshot.snapshot_id), str(snapshot.source_hash))
+    with _READY_SURFACE_CACHE_LOCK:
+        cached_snapshot = _READY_SNAPSHOT_CACHE.get(snapshot_key)
+        if cached_snapshot is not None:
+            _READY_SNAPSHOT_CACHE.move_to_end(snapshot_key)
+            snapshot = cached_snapshot
+        else:
+            _READY_SNAPSHOT_CACHE[snapshot_key] = snapshot
+            while len(_READY_SNAPSHOT_CACHE) > _READY_SURFACE_CACHE_LIMIT:
+                _READY_SNAPSHOT_CACHE.popitem(last=False)
+        _READY_SURFACE_CACHE[key] = (chunk, snapshot, candidate)
+        _READY_SURFACE_CACHE.move_to_end(key)
+        while len(_READY_SURFACE_CACHE) > _READY_SURFACE_CACHE_LIMIT:
+            _READY_SURFACE_CACHE.popitem(last=False)
+
+
+def _cached_ready_chunk_proof(
+    conn: sqlite3.Connection,
+    chunk: ContinuityChunk,
+) -> tuple[SourceSnapshot, CandidateBlock] | None:
+    if strict_revalidate_enabled():
+        return None
+    path = _connection_store_path(conn)
+    key = _ready_cache_key(
+        path,
+        str(chunk.chunk_id),
+        str(chunk.artifact_revision),
+        str(chunk.body_hash),
+    )
+    with _READY_SURFACE_CACHE_LOCK:
+        cached = _READY_SURFACE_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_chunk, snapshot, candidate = cached
+        if cached_chunk != chunk:
+            _READY_SURFACE_CACHE.pop(key, None)
+            return None
+        _READY_SURFACE_CACHE.move_to_end(key)
+        return snapshot, candidate
+
+
+def _prune_ready_surface_cache(
+    path: str,
+    active_keys: set[tuple[str, str, str, str]],
+) -> None:
+    with _READY_SURFACE_CACHE_LOCK:
+        for key in tuple(_READY_SURFACE_CACHE):
+            if key[0] == path and key not in active_keys:
+                _READY_SURFACE_CACHE.pop(key, None)
+        active_snapshots = {
+            (key[0], str(value[1].snapshot_id), str(value[1].source_hash))
+            for key, value in _READY_SURFACE_CACHE.items()
+            if key[0] == path
+        }
+        for key in tuple(_READY_SNAPSHOT_CACHE):
+            if key[0] == path and key not in active_snapshots:
+                _READY_SNAPSHOT_CACHE.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -264,6 +379,27 @@ def _foreign_key_triples(conn: sqlite3.Connection, table: str) -> set[tuple[str,
 
 
 def _schema_contract_status(conn: sqlite3.Connection) -> tuple[str, str | None]:
+    if strict_revalidate_enabled():
+        return _schema_contract_status_uncached(conn)
+    path = _connection_store_path(conn)
+    schema_row = conn.execute('PRAGMA schema_version').fetchone()
+    schema_version = int(schema_row[0]) if schema_row is not None else -1
+    key = (path, schema_version)
+    with _READY_SURFACE_CACHE_LOCK:
+        cached = _SCHEMA_STATUS_CACHE.get(key)
+        if cached is not None:
+            _SCHEMA_STATUS_CACHE.move_to_end(key)
+            return cached
+    status = _schema_contract_status_uncached(conn)
+    with _READY_SURFACE_CACHE_LOCK:
+        _SCHEMA_STATUS_CACHE[key] = status
+        _SCHEMA_STATUS_CACHE.move_to_end(key)
+        while len(_SCHEMA_STATUS_CACHE) > _SCHEMA_STATUS_CACHE_LIMIT:
+            _SCHEMA_STATUS_CACHE.popitem(last=False)
+    return status
+
+
+def _schema_contract_status_uncached(conn: sqlite3.Connection) -> tuple[str, str | None]:
     """Return the strict surface status without attempting schema repair."""
     names = {
         str(row[0])
@@ -1419,7 +1555,10 @@ def _corrupt(code: str) -> None:
     raise ContinuityStoreConflict(code)
 
 
-def _validate_ready_chunk(conn: sqlite3.Connection, chunk: ContinuityChunk) -> None:
+def _validate_ready_chunk(
+    conn: sqlite3.Connection,
+    chunk: ContinuityChunk,
+) -> tuple[SourceSnapshot, CandidateBlock]:
     """Validate one complete, internally consistent ready artifact."""
     if chunk.status != 'ready':
         _corrupt('chunk_not_ready')
@@ -1547,9 +1686,13 @@ def _validate_ready_chunk(conn: sqlite3.Connection, chunk: ContinuityChunk) -> N
     )
     if chunk.artifact_revision != artifact_revision or chunk.chunk_id != f'chunk:{artifact_revision}':
         _corrupt('artifact_revision_mismatch')
+    return snapshot, candidate
 
 
 def _read_ready_surface_connection(conn: sqlite3.Connection) -> ContinuityReadySurface:
+    store_path = _connection_store_path(conn)
+    if strict_revalidate_enabled():
+        _prune_ready_surface_cache(store_path, set())
     orphaned_ready_job = conn.execute(
         "SELECT 1 FROM continuity_generation_jobs AS job "
         "WHERE job.status='ready' AND NOT EXISTS ("
@@ -1559,25 +1702,58 @@ def _read_ready_surface_connection(conn: sqlite3.Connection) -> ContinuityReadyS
     if orphaned_ready_job is not None:
         _corrupt('ready_generation_job_without_chunk')
     rows = conn.execute(
-        "SELECT chunk_id FROM continuity_chunks WHERE status='ready' ORDER BY chunk_id ASC"
+        "SELECT chunk_id, artifact_revision, body_hash, generation_job_id, candidate_id "
+        "FROM continuity_chunks WHERE status='ready' ORDER BY chunk_id ASC"
     ).fetchall()
     if not rows:
+        _prune_ready_surface_cache(store_path, set())
         return ContinuityReadySurface(status='empty')
     chunks: list[ContinuityChunk] = []
     generation_jobs: set[str] = set()
     candidates: set[str] = set()
+    active_keys: set[tuple[str, str, str, str]] = set()
     for row in rows:
-        chunk = load_chunk(conn, str(row[0]))
-        if chunk is None:
-            _corrupt('ready_chunk_disappeared')
-        if chunk.generation_job_id in generation_jobs:
+        chunk_id = str(row[0])
+        artifact_revision = str(row[1])
+        body_hash = str(row[2])
+        generation_job_id = str(row[3])
+        candidate_id = str(row[4])
+        if generation_job_id in generation_jobs:
             _corrupt('multiple_ready_chunks_for_generation_job')
-        if chunk.candidate_id in candidates:
+        if candidate_id in candidates:
             _corrupt('competing_ready_chunks_for_candidate')
-        _validate_ready_chunk(conn, chunk)
-        generation_jobs.add(chunk.generation_job_id)
-        candidates.add(chunk.candidate_id)
+        generation_jobs.add(generation_job_id)
+        candidates.add(candidate_id)
+        cache_key = _ready_cache_key(
+            store_path,
+            chunk_id,
+            artifact_revision,
+            body_hash,
+        )
+        cached = None
+        if not strict_revalidate_enabled():
+            with _READY_SURFACE_CACHE_LOCK:
+                cached = _READY_SURFACE_CACHE.get(cache_key)
+                if cached is not None and (
+                    cached[0].generation_job_id != generation_job_id
+                    or cached[0].candidate_id != candidate_id
+                ):
+                    _READY_SURFACE_CACHE.pop(cache_key, None)
+                    cached = None
+                elif cached is not None:
+                    _READY_SURFACE_CACHE.move_to_end(cache_key)
+        if cached is not None:
+            chunk, _snapshot, _candidate = cached
+        else:
+            chunk = load_chunk(conn, chunk_id)
+            if chunk is None:
+                _corrupt('ready_chunk_disappeared')
+            snapshot, candidate = _validate_ready_chunk(conn, chunk)
+            if not strict_revalidate_enabled():
+                _cache_ready_chunk(store_path, chunk, snapshot, candidate)
+        active_keys.add(cache_key)
         chunks.append(chunk)
+    _prune_ready_surface_cache(store_path, active_keys)
     return ContinuityReadySurface(status='ready', artifacts=tuple(chunks))
 
 
