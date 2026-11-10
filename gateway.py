@@ -7829,7 +7829,7 @@ def _stream_cc_daily_soft_window(
             _prepared['plan']._turn_flight_recorder = _turn_data.get('_turn_flight_recorder')
             _birth_record = getattr(_prepared['plan'], 'cold_start_diagnostic', None)
             if isinstance(_birth_record, dict):
-                _birth_record['birth_started_at'] = round(_birth_started_at, 6)
+                _birth_record['birth_started_at'] = round(birth_started_at, 6)
                 _turn_birth.record_phase(
                     _birth_record, 'persona', '载入人设',
                     persona_started_at, persona_ended_at,
