@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
-import { RealityPromptPreviewCard } from '../components/RealityPromptPreviewCard';
 import { HttpError } from '../lib/http';
 import { getCodexModels, getGroupStatus, setCodexEffort, setCodexModel, type AgentStatus, type CodexModelState } from '../lib/groupChat';
 import {
@@ -761,8 +760,6 @@ export function SettingsScreen() {
           </dl>
           <p>主站往返仅测网页到 VPS，不代表中转站延迟 · 聊天与下方「模型测试」均走此配置</p>
         </section>
-
-        <RealityPromptPreviewCard />
 
         <SectionLabel aside={<Link to="/usage" className="config-section-link">额度与日历 ›</Link>}>OFFICIAL · 官方端点</SectionLabel>
         <section className={`config-card config-endpoint${provider === 'claude_code' ? ' current' : ''}`}>
