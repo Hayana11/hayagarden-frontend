@@ -5609,6 +5609,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             captured['scope'] = canonical_hot_source_scope
             return context_plan, {}
@@ -6238,6 +6239,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             order.append('build')
             self.assertIsNotNone(getattr(plan_arg, 'hot_receipt_frozen', None))
@@ -6891,6 +6893,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
             allow_invalid_for_cold_bridge=False,
+            **_kwargs,
         ):
             captured.update({
                 'plan': plan,
@@ -7204,6 +7207,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
             allow_invalid_for_cold_bridge=False,
+            **_kwargs,
         ):
             captured['mode'] = mode
             captured['allow_invalid_for_cold_bridge'] = allow_invalid_for_cold_bridge
@@ -7326,6 +7330,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             mode='hot',
             capacity_budget_static_system=None,
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             captured['mode'] = mode
             captured['resident'] = resident
@@ -8923,6 +8928,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             def _build(
                 plan, *, resident, static_system, mode='hot',
                 allow_invalid_for_cold_bridge=False,
+                **_kwargs,
             ):
                 captured['mode'] = mode
                 captured['allow_invalid'] = allow_invalid_for_cold_bridge
@@ -8979,6 +8985,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             def _reject_fixed_overflow(
                 plan, *, resident, static_system, mode='hot',
                 allow_invalid_for_cold_bridge=False,
+                **_kwargs,
             ):
                 self.assertEqual(mode, 'cold')
                 self.assertTrue(allow_invalid_for_cold_bridge)

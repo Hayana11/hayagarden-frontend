@@ -308,7 +308,9 @@ def substitute_dayblock_bindings(
         if day is not None and day in replace_days:
             replaced_counts[day] = replaced_counts.get(day, 0) + 1
             replaced_tokens[day] = replaced_tokens.get(day, 0) + int(
-                estimate_tokens_heuristic_cjk1_ascii4_v1(binding.chunk.body)
+                binding.chunk.output_token_estimate
+                if binding.ready_surface_validated
+                else estimate_tokens_heuristic_cjk1_ascii4_v1(binding.chunk.body)
             )
             continue
         kept.append(binding)

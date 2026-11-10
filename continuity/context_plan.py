@@ -165,6 +165,7 @@ class ContextChunkBinding:
     chunk: ContinuityChunk
     candidate: CandidateBlock
     snapshot: SourceSnapshot
+    ready_surface_validated: bool = False
 
 
 def _parse_context_budget_raw(raw: object, *, name: str, positive: bool) -> int:
@@ -682,6 +683,8 @@ def _raw_representation(members: Sequence[SourceMember]) -> ContextRepresentatio
 def _chunk_representation(
     binding: ContextChunkBinding,
     members: Sequence[SourceMember],
+    *,
+    ready_surface_validated: bool = False,
 ) -> ContextRepresentation:
     chunk = binding.chunk
     candidate = binding.candidate
@@ -704,7 +707,11 @@ def _chunk_representation(
         source_refs=tuple(member.source_ref for member in ordered),
         source_revisions=tuple(member.source_revision for member in ordered),
         source_hash=member_hash,
-        estimated_tokens=int(estimate_tokens_heuristic_cjk1_ascii4_v1(chunk.body)),
+        estimated_tokens=(
+            int(chunk.output_token_estimate)
+            if ready_surface_validated
+            else int(estimate_tokens_heuristic_cjk1_ascii4_v1(chunk.body))
+        ),
         chunk_id=str(chunk.chunk_id),
         candidate_id=str(candidate.candidate_id),
         snapshot_id=str(snapshot.snapshot_id),
@@ -1152,22 +1159,28 @@ def build_context_plan(
     )
 
     valid_chunks: list[tuple[ContextRepresentation, set[tuple[Any, ...]]]] = []
+    from continuity.store import strict_revalidate_enabled
+    strict_revalidate = strict_revalidate_enabled()
     for binding in tuple(chunks):
         chunk = binding.chunk
         candidate = binding.candidate
         snapshot = binding.snapshot
         representation_id = f'chunk:{chunk.chunk_id}'
         try:
-            if chunk.status != 'ready':
-                raise ValueError('chunk is not ready')
-            if chunk.snapshot_id != snapshot.snapshot_id:
-                raise ValueError('chunk snapshot identity mismatch')
-            if candidate.snapshot_id != snapshot.snapshot_id:
-                raise ValueError('candidate snapshot identity mismatch')
-            if chunk.candidate_id != candidate.candidate_id:
-                raise ValueError('chunk candidate identity mismatch')
-            if source_hash(snapshot.members) != snapshot.source_hash:
-                raise ValueError('chunk snapshot source hash mismatch')
+            ready_surface_validated = bool(
+                binding.ready_surface_validated and not strict_revalidate
+            )
+            if not ready_surface_validated:
+                if chunk.status != 'ready':
+                    raise ValueError('chunk is not ready')
+                if chunk.snapshot_id != snapshot.snapshot_id:
+                    raise ValueError('chunk snapshot identity mismatch')
+                if candidate.snapshot_id != snapshot.snapshot_id:
+                    raise ValueError('candidate snapshot identity mismatch')
+                if chunk.candidate_id != candidate.candidate_id:
+                    raise ValueError('chunk candidate identity mismatch')
+                if source_hash(snapshot.members) != snapshot.source_hash:
+                    raise ValueError('chunk snapshot source hash mismatch')
 
             seqs = tuple(int(seq) for seq in candidate.source_seqs)
             refs = tuple(str(ref) for ref in candidate.source_refs)
@@ -1175,19 +1188,22 @@ def build_context_plan(
             if not (len(seqs) == len(refs) == len(revisions)) or not seqs:
                 raise ValueError('chunk candidate membership is incomplete')
             snapshot_by_seq = {int(member.seq): member for member in snapshot.members}
-            members: list[SourceMember] = []
-            for seq, ref, revision in zip(seqs, refs, revisions):
-                member = snapshot_by_seq.get(seq)
-                if member is None:
-                    raise ValueError(f'chunk source member seq {seq} is missing')
-                if member.source_ref != ref or member.source_revision != revision:
-                    raise ValueError(f'chunk source membership mismatch for {ref}')
-                members.append(member)
-            snapshot_members = tuple(members)
-            if candidate.source_revision != candidate_source_revision(snapshot_members):
-                raise ValueError('chunk candidate source revision is stale')
-            if any(member.branch_id != candidate.branch_id for member in snapshot_members):
-                raise ValueError('chunk branch identity mismatch')
+            if ready_surface_validated:
+                snapshot_members = tuple(snapshot_by_seq[seq] for seq in seqs)
+            else:
+                members: list[SourceMember] = []
+                for seq, ref, revision in zip(seqs, refs, revisions):
+                    member = snapshot_by_seq.get(seq)
+                    if member is None:
+                        raise ValueError(f'chunk source member seq {seq} is missing')
+                    if member.source_ref != ref or member.source_revision != revision:
+                        raise ValueError(f'chunk source membership mismatch for {ref}')
+                    members.append(member)
+                snapshot_members = tuple(members)
+                if candidate.source_revision != candidate_source_revision(snapshot_members):
+                    raise ValueError('chunk candidate source revision is stale')
+                if any(member.branch_id != candidate.branch_id for member in snapshot_members):
+                    raise ValueError('chunk branch identity mismatch')
             selected_members = _rebind_snapshot_members_to_expected(
                 snapshot_members,
                 expected_by_stable,
@@ -1195,11 +1211,16 @@ def build_context_plan(
             member_keys = {_member_key(member) for member in selected_members}
             if not member_keys.issubset(set(expected_by_key)):
                 raise ValueError('chunk membership is outside expected source coverage')
-            if not chunk.body.strip():
-                raise ValueError('chunk body is missing')
-            if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
-                raise ValueError('chunk body hash mismatch')
-            representation = _chunk_representation(binding, selected_members)
+            if not ready_surface_validated:
+                if not chunk.body.strip():
+                    raise ValueError('chunk body is missing')
+                if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
+                    raise ValueError('chunk body hash mismatch')
+            representation = _chunk_representation(
+                binding,
+                selected_members,
+                ready_surface_validated=ready_surface_validated,
+            )
             valid_chunks.append((representation, member_keys))
         except (TypeError, ValueError, AttributeError) as exc:
             exclusions.append(_exclusion(
@@ -1209,30 +1230,42 @@ def build_context_plan(
             ))
 
     conflicting: set[int] = set()
-    for left_index, (left, left_keys) in enumerate(valid_chunks):
-        for right_index in range(left_index + 1, len(valid_chunks)):
-            right, right_keys = valid_chunks[right_index]
-            overlap = bool(left_keys & right_keys)
-            if not overlap:
-                overlap = any(
-                    _member_overlap(left_member, right_member)
-                    for left_member in left.source_members
-                    for right_member in right.source_members
-                )
-            if overlap:
-                conflicting.update((left_index, right_index))
-                exclusions.extend((
-                    _exclusion(
-                        'chunk_overlap',
-                        'overlapping chunk provenance is ambiguous',
-                        representation_id=left.representation_id,
-                    ),
-                    _exclusion(
-                        'chunk_overlap',
-                        'overlapping chunk provenance is ambiguous',
-                        representation_id=right.representation_id,
-                    ),
-                ))
+    conflict_pairs: set[tuple[int, int]] = set()
+    owners_by_member_key: dict[tuple[Any, ...], list[int]] = {}
+    owners_by_source_ref: dict[str, list[tuple[int, SourceMember]]] = {}
+    for chunk_index, (representation, member_keys) in enumerate(valid_chunks):
+        for key in member_keys:
+            for previous_index in owners_by_member_key.get(key, ()):
+                conflict_pairs.add((previous_index, chunk_index))
+            owners_by_member_key.setdefault(key, []).append(chunk_index)
+        for member in representation.source_members:
+            for previous_index, previous_member in owners_by_source_ref.get(
+                str(member.source_ref), ()
+            ):
+                if (
+                    previous_index != chunk_index
+                    and _member_overlap(member, previous_member)
+                ):
+                    conflict_pairs.add((previous_index, chunk_index))
+            owners_by_source_ref.setdefault(
+                str(member.source_ref), []
+            ).append((chunk_index, member))
+    for left_index, right_index in sorted(conflict_pairs):
+        left = valid_chunks[left_index][0]
+        right = valid_chunks[right_index][0]
+        conflicting.update((left_index, right_index))
+        exclusions.extend((
+            _exclusion(
+                'chunk_overlap',
+                'overlapping chunk provenance is ambiguous',
+                representation_id=left.representation_id,
+            ),
+            _exclusion(
+                'chunk_overlap',
+                'overlapping chunk provenance is ambiguous',
+                representation_id=right.representation_id,
+            ),
+        ))
 
     recent_raw_keys, required_recent_keys = _align_recent_raw_boundary(
         expected,

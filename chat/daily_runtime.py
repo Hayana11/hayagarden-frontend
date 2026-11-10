@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
@@ -82,6 +83,97 @@ _HOT_FIXED_SECTION_KINDS = frozenset({
     'accepted_open_loops',
 })
 _HOT_HISTORICAL_REPRESENTATION_KINDS = frozenset({'raw', 'chunk'})
+# The key includes the current user message and every source row, so a normal
+# conversation misses on every turn. Entries are only hit when the very same
+# turn is retried or re-prepared; keep the cache tiny and do not drop inputs
+# from the key to raise the hit rate.
+_HOT_CONTEXT_PLAN_CACHE_LIMIT = 4
+_HOT_CONTEXT_PLAN_CACHE: OrderedDict[
+    tuple[str, str], tuple[Any, dict[str, str]]
+] = OrderedDict()
+_HOT_CONTEXT_PLAN_CACHE_LOCK = threading.RLock()
+
+
+def _clear_hot_context_plan_cache_for_tests() -> None:
+    with _HOT_CONTEXT_PLAN_CACHE_LOCK:
+        _HOT_CONTEXT_PLAN_CACHE.clear()
+
+
+def _hot_context_plan_input_key(
+    *,
+    ready_surface_fingerprint: Any,
+    canonical_hot_source_scope: Any,
+    source_rows_identity: Any,
+    budget_policy_version: Any,
+    policy_input: Any,
+    policy_identity: Any,
+    fixed_sections_identity: Any,
+    static_system_hash: Any,
+    mode: Any,
+    receipt_identity: Any,
+) -> str | None:
+    """Hash every deterministic input that can change a hot desired plan."""
+    try:
+        payload = {
+            'ready_surface': ready_surface_fingerprint,
+            'canonical_hot_source_scope': canonical_hot_source_scope,
+            'source_rows': source_rows_identity,
+            'budget_policy_version': budget_policy_version,
+            'policy_input': policy_input,
+            'policy_identity': policy_identity,
+            'fixed_sections': fixed_sections_identity,
+            'static_system_hash': static_system_hash,
+            'mode': mode,
+            'receipt': receipt_identity,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def _hot_source_rows_identity(source_rows: Any) -> tuple[tuple[int, str], ...] | None:
+    try:
+        history_rows, current_row = source_rows
+        rows = (*tuple(history_rows), current_row)
+        identities = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return None
+            message_id = int(row.get('id'))
+            if message_id <= 0:
+                return None
+            row_content = json.dumps(
+                dict(row), ensure_ascii=False, sort_keys=True,
+                separators=(',', ':'),
+            )
+            identities.append((message_id, hashlib.sha256(
+                row_content.encode('utf-8')
+            ).hexdigest()))
+        return tuple(identities)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _hot_receipt_identity(frozen: Any) -> tuple[Any, ...] | None:
+    if not isinstance(frozen, dict):
+        return None
+    try:
+        return tuple(
+            (
+                _receipt_member_source_identity(member),
+                str(getattr(member, 'representation_kind', '') or ''),
+                str(getattr(member, 'representation_id', '') or ''),
+            )
+            for member in tuple(frozen.get('members') or ())
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 class DailyRuntimeError(Exception):
@@ -1388,7 +1480,13 @@ _HOT_DECISION_LABELS = {
 }
 
 
-def _turn_timing_mark(plan: Any, field: str, *, decision: Any = None) -> None:
+def _turn_timing_mark(
+    plan: Any,
+    field: str,
+    *,
+    decision: Any = None,
+    detail: str | None = None,
+) -> None:
     """Stamp a pre-provider phase on the turn's timing record (observational only)."""
     try:
         diagnostic = getattr(plan, 'cold_start_diagnostic', None)
@@ -1403,7 +1501,12 @@ def _turn_timing_mark(plan: Any, field: str, *, decision: Any = None) -> None:
             turn_birth.record_phase(
                 diagnostic, key, label,
                 diagnostic.get(step + '_start_at'), diagnostic[field],
-                _HOT_DECISION_LABELS.get(str(decision)) if decision is not None else None,
+                (
+                    str(detail)
+                    if detail is not None
+                    else _HOT_DECISION_LABELS.get(str(decision))
+                    if decision is not None else None
+                ),
             )
     except Exception:
         pass
@@ -1657,21 +1760,30 @@ def _build_production_context_plan(
     capacity_budget_static_system: str | None = None,
     canonical_hot_source_scope: tuple[tuple[Any, ...], ...] | None = None,
     allow_invalid_for_cold_bridge: bool = False,
+    _prepared_context_inputs: dict[str, Any] | None = None,
+    _prepared_inputs_out: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
-    policy, policy_version = _context_plan_policy(
-        mode=mode,
-        static_system=(
-            capacity_budget_static_system
-            if capacity_budget_static_system is not None
-            else static_system
-        ),
-        pending_user_text=str(getattr(plan, 'user_content', '') or ''),
-        dynamic_state_text=str(_accepted_state_text(plan.assembly) or ''),
-    )
+    prepared = _prepared_context_inputs if isinstance(_prepared_context_inputs, dict) else {}
+    if 'policy' in prepared and 'policy_version' in prepared:
+        policy = prepared['policy']
+        policy_version = prepared['policy_version']
+    else:
+        policy, policy_version = _context_plan_policy(
+            mode=mode,
+            static_system=(
+                capacity_budget_static_system
+                if capacity_budget_static_system is not None
+                else static_system
+            ),
+            pending_user_text=str(getattr(plan, 'user_content', '') or ''),
+            dynamic_state_text=str(_accepted_state_text(plan.assembly) or ''),
+        )
     store_path = _production_continuity_store_path(plan)
-    surface = read_ready_surface(store_path)
+    surface = prepared.get('ready_surface')
+    if surface is None:
+        surface = read_ready_surface(store_path)
     if surface.status == 'unavailable':
         raise DailyRuntimeError(
             'continuity store unavailable',
@@ -1698,14 +1810,35 @@ def _build_production_context_plan(
         for chunk in artifacts
     )
     from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
-    fixed_sections = _build_continuity_shadow_fixed_sections(
-        plan=plan,
-        resident=resident,
-        static_system=static_system,
-        require_full_state_snapshot=True,
-    )
-    dayblock_box: dict[str, Any] = {}
-    binding_transform = _dayblock_binding_transform(plan, mode=mode, box=dayblock_box)
+    fixed_sections = prepared.get('fixed_sections')
+    if fixed_sections is None:
+        fixed_sections = _build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=resident,
+            static_system=static_system,
+            require_full_state_snapshot=True,
+        )
+    if isinstance(_prepared_inputs_out, dict):
+        _prepared_inputs_out.update({
+            'policy': policy,
+            'policy_version': policy_version,
+            'fixed_sections': fixed_sections,
+        })
+    if 'dayblock_box' in prepared and 'binding_transform' in prepared:
+        dayblock_box = prepared['dayblock_box']
+        binding_transform = prepared['binding_transform']
+    else:
+        dayblock_box = {}
+        binding_transform = _dayblock_binding_transform(
+            plan,
+            mode=mode,
+            box=dayblock_box,
+        )
+    if isinstance(_prepared_inputs_out, dict):
+        _prepared_inputs_out.update({
+            'dayblock_box': dayblock_box,
+            'binding_transform': binding_transform,
+        })
     result = build_daily_continuity_shadow_plan(
         binding_transform=binding_transform,
         source_db_path=store_path,
@@ -1739,6 +1872,22 @@ def _build_production_context_plan(
                 and str(mode or 'hot').strip().lower() == 'capacity'
             )
             else None
+        ),
+        **(
+            {
+                'prepared_source_rows': prepared['source_rows'],
+                'prepared_source_projection': prepared['source_projection'],
+            }
+            if 'source_rows' in prepared and 'source_projection' in prepared
+            else (
+                {'prepared_source_rows': prepared['source_rows']}
+                if 'source_rows' in prepared else {}
+            )
+        ),
+        **(
+            {'prepared_inputs_out': _prepared_inputs_out}
+            if isinstance(_prepared_inputs_out, dict)
+            else {}
         ),
     )
     if result.plan is None:
@@ -1852,6 +2001,7 @@ def _conditionally_seal_cold_bridge(
     *,
     first_plan: Any,
     first_chunk_bodies: dict[str, str],
+    first_build_inputs: dict[str, Any] | None = None,
     resident: Any,
     static_system: str,
 ) -> tuple[Any, dict[str, str]]:
@@ -1940,11 +2090,16 @@ def _conditionally_seal_cold_bridge(
             error_code=error_code,
             retryable=True,
         )
+    rebuild_kwargs = {
+        'resident': resident,
+        'static_system': static_system,
+        'mode': 'cold',
+    }
+    if isinstance(first_build_inputs, dict) and first_build_inputs:
+        rebuild_kwargs['_prepared_context_inputs'] = first_build_inputs
     rebuilt_plan, rebuilt_chunk_bodies = _build_production_context_plan(
         plan,
-        resident=resident,
-        static_system=static_system,
-        mode='cold',
+        **rebuild_kwargs,
     )
     if not _selected_exact_cold_bridge(
         rebuilt_plan,
@@ -3678,14 +3833,132 @@ def _prepare_hot_context_plan(
             getattr(plan, 'hot_scope_diagnostic', None) or {}
         )
         raise error
+    context_plan = None
+    chunk_bodies: dict[str, str] = {}
+    prepared_hot_inputs = None
+    cache_key = None
+    cache_hit = False
     try:
-        context_plan, chunk_bodies = _build_production_context_plan(
-            plan,
-            resident=resident,
-            static_system=static_system,
-            mode='hot',
-            canonical_hot_source_scope=canonical_hot_source_scope,
-        )
+        from continuity import store as continuity_store
+
+        # DayBlock substitution has an additional live input surface. Until it
+        # has its own immutable identity, enabled runs retain the full build.
+        if (
+            not continuity_store.strict_revalidate_enabled()
+            and not config_store.get_bool(DAYBLOCK_CONTEXT_FLAG, False)
+        ):
+            from chat import daily_continuity_shadow as shadow
+
+            store_path = _production_continuity_store_path(plan)
+            ready_surface = continuity_store.read_ready_surface(store_path)
+            if ready_surface.status in {'ready', 'empty'}:
+                mode = 'hot'
+                dynamic_state_text = str(_accepted_state_text(plan.assembly) or '')
+                pending_user_text = str(getattr(plan, 'user_content', '') or '')
+                policy, policy_version = _context_plan_policy(
+                    mode=mode,
+                    static_system=static_system,
+                    pending_user_text=pending_user_text,
+                    dynamic_state_text=dynamic_state_text,
+                )
+                fixed_sections = _build_continuity_shadow_fixed_sections(
+                    plan=plan,
+                    resident=resident,
+                    static_system=static_system,
+                    require_full_state_snapshot=True,
+                )
+                source_conn = shadow._read_only_connection(store_path)
+                try:
+                    shadow._check_source_schema(source_conn)
+                    source_rows = shadow._source_rows(
+                        source_conn,
+                        int(plan.user_message_id),
+                    )
+                finally:
+                    source_conn.close()
+
+                source_rows_identity = _hot_source_rows_identity(source_rows)
+                policy_identity = tuple(
+                    (item.name, getattr(policy, item.name))
+                    for item in fields(policy)
+                )
+                receipt_identity = (
+                    _hot_receipt_identity(frozen),
+                    bool(frozen.get('receipt_members_complete')),
+                    bool(frozen.get('membership_valid')),
+                    str(frozen.get('receipt_read_error') or ''),
+                )
+                cache_input_key = _hot_context_plan_input_key(
+                    ready_surface_fingerprint=tuple(sorted(
+                        (
+                            str(chunk.chunk_id),
+                            str(chunk.artifact_revision),
+                        )
+                        for chunk in tuple(ready_surface.artifacts or ())
+                    )),
+                    canonical_hot_source_scope=canonical_hot_source_scope,
+                    source_rows_identity=source_rows_identity,
+                    budget_policy_version=policy_version,
+                    policy_input={
+                        'mode': mode,
+                        'static_system': static_system,
+                        'pending_user_text': pending_user_text,
+                        'dynamic_state_text': dynamic_state_text,
+                    },
+                    policy_identity=policy_identity,
+                    fixed_sections_identity=_shadow_fixed_section_fingerprints(
+                        fixed_sections
+                    ),
+                    static_system_hash=_sha256_text(static_system),
+                    mode=mode,
+                    receipt_identity=receipt_identity,
+                ) if source_rows_identity is not None else None
+                if cache_input_key is not None:
+                    cache_key = (str(plan.resident_key), cache_input_key)
+                    with _HOT_CONTEXT_PLAN_CACHE_LOCK:
+                        cached = _HOT_CONTEXT_PLAN_CACHE.get(cache_key)
+                        if cached is not None:
+                            _HOT_CONTEXT_PLAN_CACHE.move_to_end(cache_key)
+                            context_plan, cached_bodies = cached
+                            chunk_bodies = dict(cached_bodies)
+                            cache_hit = True
+                    if not cache_hit:
+                        prepared_hot_inputs = {
+                            'policy': policy,
+                            'policy_version': policy_version,
+                            'ready_surface': ready_surface,
+                            'fixed_sections': fixed_sections,
+                            'source_rows': source_rows,
+                        }
+    except Exception:
+        # A key that cannot be computed cheaply and deterministically disables
+        # reuse for this turn; the canonical builder remains authoritative.
+        prepared_hot_inputs = None
+        cache_key = None
+
+    try:
+        if not cache_hit:
+            build_kwargs = {
+                'resident': resident,
+                'static_system': static_system,
+                'mode': 'hot',
+                'canonical_hot_source_scope': canonical_hot_source_scope,
+            }
+            if prepared_hot_inputs is not None:
+                build_kwargs['_prepared_context_inputs'] = prepared_hot_inputs
+            context_plan, chunk_bodies = _build_production_context_plan(
+                plan,
+                **build_kwargs,
+            )
+            if cache_key is not None:
+                with _HOT_CONTEXT_PLAN_CACHE_LOCK:
+                    _HOT_CONTEXT_PLAN_CACHE[cache_key] = (
+                        context_plan,
+                        dict(chunk_bodies),
+                    )
+                    _HOT_CONTEXT_PLAN_CACHE.move_to_end(cache_key)
+                    while len(_HOT_CONTEXT_PLAN_CACHE) > _HOT_CONTEXT_PLAN_CACHE_LIMIT:
+                        _HOT_CONTEXT_PLAN_CACHE.popitem(last=False)
     except DailyRuntimeError as exc:
         _set_hot_decision(plan, 'BLOCKED', str(exc.error_code))
         raise
@@ -3696,6 +3969,11 @@ def _prepare_hot_context_plan(
             error_code='context_plan_hot_blocked',
             retryable=False,
         ) from exc
+    diagnostic = getattr(plan, 'cold_start_diagnostic', None)
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+        plan.cold_start_diagnostic = diagnostic
+    diagnostic['hot_plan_cache'] = 'hit' if cache_hit else 'miss'
     plan.hot_desired_plan = context_plan
     plan.hot_desired_chunk_bodies = dict(chunk_bodies)
     plan.manifest.update({
@@ -5156,17 +5434,20 @@ def _assemble_plan(
             static_system,
         )
         with turn_birth.phase(turn_timing, 'chunks', '载入压缩块') as timing_box:
+            first_build_inputs: dict[str, Any] = {}
             first_plan, first_chunk_bodies = _build_production_context_plan(
                 daily_plan,
                 resident=resident,
                 static_system=effective_static_system,
                 mode='cold',
                 allow_invalid_for_cold_bridge=True,
+                _prepared_inputs_out=first_build_inputs,
             )
             context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
                 daily_plan,
                 first_plan=first_plan,
                 first_chunk_bodies=first_chunk_bodies,
+                first_build_inputs=first_build_inputs,
                 resident=resident,
                 static_system=effective_static_system,
             )
@@ -8422,7 +8703,20 @@ def ensure_resident_and_stream(
                 heartbeat.stop()
                 _release_lease(plan)
                 raise
-            _turn_timing_mark(plan, 'hot_context_plan_end_at', decision=hot_decision)
+            _turn_timing_mark(
+                plan,
+                'hot_context_plan_end_at',
+                decision=hot_decision,
+                detail=(
+                    '通过 · 复用'
+                    if (
+                        hot_decision == 'NO_OP'
+                        and isinstance(plan.cold_start_diagnostic, dict)
+                        and plan.cold_start_diagnostic.get('hot_plan_cache') == 'hit'
+                    )
+                    else None
+                ),
+            )
             if hot_decision == 'BLOCKED':
                 heartbeat.stop()
                 _release_lease(plan)
