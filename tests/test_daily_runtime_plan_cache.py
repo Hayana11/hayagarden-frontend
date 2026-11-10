@@ -61,7 +61,11 @@ def test_hot_plan_cache_hit_reuses_plan_but_still_reconciles(monkeypatch):
         dr, '_hot_canonical_source_scope',
         lambda *a, **k: (('message:1', 'hash-a'),),
     )
-    monkeypatch.setattr(dr.config_store, 'get_bool', lambda *a, **k: False)
+    # Another test module may have left a config_store stub without get_bool;
+    # raising=False creates it for this test only and monkeypatch restores it.
+    monkeypatch.setattr(
+        dr.config_store, 'get_bool', lambda *a, **k: False, raising=False,
+    )
     monkeypatch.setattr(store, 'strict_revalidate_enabled', lambda: False)
     monkeypatch.setattr(
         store, 'read_ready_surface',
