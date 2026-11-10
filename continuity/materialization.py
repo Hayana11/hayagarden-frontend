@@ -17,8 +17,7 @@ from continuity.coverage import source_hash
 from continuity.sealing import CandidateBlock
 from continuity.sources import (
     canonical_tool_outcome,
-    derive_autonomous_events,
-    derive_completed_turns,
+    derive_turns_and_events,
 )
 from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
@@ -85,8 +84,7 @@ def _rows_by_id(rows: Iterable[Any]) -> dict[int, Any]:
 
 
 def _current_members(rows: tuple[Any, ...]) -> dict[str, SourceMember]:
-    turns = derive_completed_turns(rows)
-    events = derive_autonomous_events(rows)
+    turns, events = derive_turns_and_events(rows)
     members: list[SourceMember] = []
     # build_source_members is deliberately imported lazily so this module's
     # public responsibility remains materialization, not segmentation.
