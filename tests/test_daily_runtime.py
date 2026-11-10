@@ -11053,6 +11053,88 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             db_path='test-continuity.db',
         )
 
+    def test_rebuilt_plan_aggregates_chunk_member_coverage_in_canonical_order(self):
+        first = self._member()
+        second = self._member()
+        second.seq = first.seq + 1
+        second.source_ref = 'turn:122:123'
+        second.source_revision = 'revision-next'
+        second.content_hash = 'content-next'
+
+        def chunk(members):
+            return types.SimpleNamespace(kind='chunk', source_members=tuple(members))
+
+        self.assertTrue(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first,)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(valid=True, representations=(chunk((first,)),)),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first, second)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first,)), chunk((first,)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((second,)), chunk((first,))),
+            ),
+            bridge_members=(first, second),
+        ))
+
+    def test_current_user_in_bridge_fails_before_targeted_producer(self):
+        runtime_plan = self._runtime_plan()
+        current = self._member()
+        current.source_ref = 'turn:999:1000'
+        first = types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:first',
+            plan_hash='hash:first',
+            representations=(),
+            source_members=(current,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(current,),
+            estimated_tokens=current.logical_size,
+            remaining_budget=0,
+            error_code=None,
+        )
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr, '_run_targeted_cold_bridge',
+        ) as producer:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={},
+                    resident=None,
+                    static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_cold_bridge_current_forbidden',
+        )
+        producer.assert_not_called()
+
     def test_required_bridge_runs_one_targeted_generation_and_rebuilds(self):
         runtime_plan = self._runtime_plan()
         first = types.SimpleNamespace(
@@ -11079,9 +11161,7 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             active_settings_revision_id='settings-active',
             target_logical_size=16000,
             max_completed_turns=30,
-            materialization_close_reason='end_of_snapshot',
             model_call_count=1,
-            generated_chunk_id='new',
         )
         calls = []
 
@@ -11151,7 +11231,6 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
         result = types.SimpleNamespace(
             status='ready',
             model_call_count=1,
-            generated_chunk_id='rebuilt',
         )
 
         def build(_plan, *, resident, static_system, mode='hot'):
@@ -11217,7 +11296,6 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
         result = types.SimpleNamespace(
             status='ready',
             model_call_count=1,
-            generated_chunk_id='targeted',
         )
 
         def build(_plan, *, resident, static_system, mode='hot'):

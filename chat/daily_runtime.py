@@ -1824,7 +1824,6 @@ def _selected_exact_cold_bridge(
     context_plan: Any,
     *,
     bridge_members: tuple[Any, ...],
-    chunk_id: str,
 ) -> bool:
     if not bool(getattr(context_plan, 'valid', False)):
         return False
@@ -1832,25 +1831,20 @@ def _selected_exact_cold_bridge(
         _cold_bridge_member_identity(member)
         for member in bridge_members
     )
-    matching = []
-    seen: set[tuple[Any, ...]] = set()
+    if not target or len(set(target)) != len(target):
+        return False
+    target_set = set(target)
+    covered = []
     for representation in tuple(
         getattr(context_plan, 'representations', ()) or ()
     ):
-        members = tuple(getattr(representation, 'source_members', ()) or ())
-        for member in members:
+        if str(getattr(representation, 'kind', '') or '') != 'chunk':
+            continue
+        for member in tuple(getattr(representation, 'source_members', ()) or ()):
             identity = _cold_bridge_member_identity(member)
-            if identity in seen:
-                return False
-            seen.add(identity)
-        if (
-            str(getattr(representation, 'kind', '') or '') == 'chunk'
-            and str(getattr(representation, 'chunk_id', '') or '') == str(chunk_id)
-            and tuple(_cold_bridge_member_identity(member) for member in members)
-            == target
-        ):
-            matching.append(representation)
-    return len(matching) == 1
+            if identity in target_set:
+                covered.append(identity)
+    return tuple(covered) == target
 
 
 def _conditionally_seal_cold_bridge(
@@ -1932,14 +1926,8 @@ def _conditionally_seal_cold_bridge(
         'context_plan_cold_bridge_target_turns': (
             getattr(result, 'max_completed_turns', None)
         ),
-        'context_plan_cold_bridge_materialization_close_reason': (
-            getattr(result, 'materialization_close_reason', None)
-        ),
         'context_plan_cold_bridge_generation_calls': int(
             getattr(result, 'model_call_count', 0) or 0
-        ),
-        'context_plan_cold_bridge_chunk_id': (
-            getattr(result, 'generated_chunk_id', None)
         ),
     })
     if str(getattr(result, 'status', '') or '') != 'ready':
@@ -1952,13 +1940,6 @@ def _conditionally_seal_cold_bridge(
             error_code=error_code,
             retryable=True,
         )
-    chunk_id = str(getattr(result, 'generated_chunk_id', '') or '')
-    if not chunk_id:
-        raise DailyRuntimeError(
-            'targeted cold bridge did not return a READY chunk',
-            error_code='context_plan_cold_bridge_ready_missing',
-            retryable=False,
-        )
     rebuilt_plan, rebuilt_chunk_bodies = _build_production_context_plan(
         plan,
         resident=resident,
@@ -1968,7 +1949,6 @@ def _conditionally_seal_cold_bridge(
     if not _selected_exact_cold_bridge(
         rebuilt_plan,
         bridge_members=bridge_members,
-        chunk_id=chunk_id,
     ):
         raise DailyRuntimeError(
             'rebuilt ContextPlan did not select the targeted cold bridge',
