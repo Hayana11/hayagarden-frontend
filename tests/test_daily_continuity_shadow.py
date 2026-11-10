@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -619,7 +620,31 @@ class DailyContinuityShadowTests(unittest.TestCase):
         first = self._run()
         second = self._run()
         self.assertEqual(first.plan.plan_hash, second.plan.plan_hash)
-        self.assertNotIn('chat.daily_runtime', sys.modules)
+        code = '''import sys
+from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
+from continuity.context_plan import ContextBudgetPolicy
+result = build_daily_continuity_shadow_plan(
+    source_db_path=sys.argv[1],
+    shadow_store_path=sys.argv[2],
+    current_user_message_id=5,
+    budget_policy=ContextBudgetPolicy(token_budget=1000, recent_raw_target=1),
+)
+assert result.status == 'ready'
+assert 'chat.daily_runtime' not in sys.modules
+'''
+        subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                code,
+                str(self.source_path),
+                str(self.store_path),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 if __name__ == '__main__':

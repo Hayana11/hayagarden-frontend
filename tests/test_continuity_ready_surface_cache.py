@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import pickle
 import sqlite3
-import types
-from unittest import mock
 
 import pytest
 
-from continuity import context_plan, store
-from chat import daily_runtime as dr
+from continuity import context_plan, sources, store
 from continuity.chunk_generation import (
     GENERATOR_POLICY_VERSION,
     MEASUREMENT_SEMANTICS,
@@ -28,10 +27,10 @@ from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v
 def clear_process_cache(monkeypatch):
     monkeypatch.delenv('CONTINUITY_STRICT_REVALIDATE', raising=False)
     store.clear_ready_surface_cache()
-    dr._clear_hot_context_plan_cache_for_tests()
+    sources.clear_source_derivation_cache()
     yield
     store.clear_ready_surface_cache()
-    dr._clear_hot_context_plan_cache_for_tests()
+    sources.clear_source_derivation_cache()
 
 
 @pytest.fixture
@@ -307,109 +306,164 @@ def test_strict_mode_keeps_context_plan_snapshot_hash_validation(
     assert calls.count(len(ready_store['snapshot'].members)) == 2
 
 
-def _hot_cache_key_inputs():
-    return {
-        'ready_surface_fingerprint': (('chunk:a', 'rev-a'),),
-        'canonical_hot_source_scope': (('message:1', 'hash-a'),),
-        'source_rows_identity': ((1, 'row-hash-a'),),
-        'budget_policy_version': 'budget-v1',
-        'policy_input': {
-            'mode': 'hot', 'static_system': 'system-a',
-            'pending_user_text': 'question-a', 'dynamic_state_text': 'state-a',
+def test_validated_chunk_reuses_its_verified_output_token_estimate(
+    ready_store, monkeypatch,
+):
+    ready_store['publish'](0)
+    surface = store.read_ready_surface(ready_store['path'])
+    artifact = surface.artifacts[0]
+    validated = ({
+        'chunk_id': artifact.chunk_id,
+        'artifact_revision': artifact.artifact_revision,
+        'body_hash': artifact.body_hash,
+    },)
+    conn = store.open_continuity_read_only(ready_store['path'])
+    try:
+        bindings = __import__(
+            'chat.daily_continuity_shadow', fromlist=['_bindings']
+        )._bindings(conn, validated_ready_artifacts=validated)
+    finally:
+        conn.close()
+
+    def unexpected_recount(_body):
+        raise AssertionError('validated chunk body token estimate was recounted')
+
+    monkeypatch.setattr(
+        context_plan,
+        'estimate_tokens_heuristic_cjk1_ascii4_v1',
+        unexpected_recount,
+    )
+    plan = context_plan.build_context_plan(
+        ready_store['snapshot'].members,
+        raw_members=ready_store['snapshot'].members,
+        chunks=bindings,
+        budget_policy=ContextBudgetPolicy(token_budget=100_000),
+    )
+
+    chunk_representation = next(
+        item for item in plan.representations if item.kind == 'chunk'
+    )
+    assert chunk_representation.estimated_tokens == artifact.output_token_estimate
+
+
+def _source_derivation_rows():
+    return [
+        {
+            'id': 1, 'author': 'hayana', 'content': 'first question',
+            'thinking': '', 'source_kind': 'chat',
+            'created_at': '2026-09-08 10:00:00', 'tool_calls': '[]',
+            'branches': '[]', 'branch_idx': 0, 'cache_info': '{}',
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
         },
-        'policy_identity': (('token_budget', 100),),
-        'fixed_sections_identity': (('invariant_system', 'system:a'),),
-        'static_system_hash': 'static-hash-a',
-        'mode': 'hot',
-        'receipt_identity': (('message:1', 'raw', 'raw:1'),),
-    }
+        {
+            'id': 2, 'author': 'assistant', 'content': 'first answer',
+            'thinking': '', 'source_kind': 'chat',
+            'created_at': '2026-09-08 10:01:00',
+            'tool_calls': '[{"name":"lookup","args":{"q":"a"},"result":"ok"}]',
+            'branches': '[]', 'branch_idx': 0, 'cache_info': '{}',
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
+        },
+        {
+            'id': 3, 'author': 'assistant', 'content': 'wake note',
+            'thinking': '', 'source_kind': 'wake',
+            'created_at': '2026-09-08 10:02:00', 'tool_calls': '[]',
+            'branches': '[]', 'branch_idx': 0,
+            'cache_info': json.dumps({
+                'wake_mode': 'normal', 'canonical_chat_history': True,
+                'unified_chat_resident': True, 'b3_authority': True,
+                'source': 'wake', 'provider': 'claude_code',
+            }),
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
+        },
+    ]
 
 
-def test_hot_plan_key_changes_when_any_input_identity_changes():
-    base = _hot_cache_key_inputs()
-    original = dr._hot_context_plan_input_key(**base)
-    assert original
-    for name, value in base.items():
-        changed = dict(base)
-        changed[name] = ('changed', value)
-        assert dr._hot_context_plan_input_key(**changed) != original, name
+def test_source_row_derivations_reuse_only_changed_rows_and_match_full_bytes(
+    monkeypatch,
+):
+    rows = _source_derivation_rows()
+    sources.clear_source_derivation_cache()
+    original_compute = sources._compute_source_row_facts
+    computed_ids = []
 
+    def counted(row, **kwargs):
+        computed_ids.append(int(row['id']))
+        return original_compute(row, **kwargs)
 
-def test_hot_plan_cache_hit_reuses_plan_but_still_reconciles(monkeypatch):
-    plan = types.SimpleNamespace(
-        resident_key='resident-1',
-        db_path='cache-test.db',
-        user_message_id=9,
-        user_content='question',
-        assembly={'state_snapshot': {}},
-        manifest={},
-        cold_start_diagnostic={},
-        hot_receipt_frozen=None,
+    monkeypatch.setattr(sources, '_compute_source_row_facts', counted)
+    baseline_turns = sources.derive_completed_turns(rows)
+    baseline_events = sources.derive_autonomous_events(rows)
+    assert len(baseline_turns) == 1
+    assert len(baseline_events) == 1
+
+    updated_rows = [dict(row) for row in rows]
+    updated_rows[1]['content'] = 'edited answer'
+    updated_rows.extend([
+        {
+            'id': 4, 'author': 'hayana', 'content': 'second question',
+            'thinking': '', 'source_kind': 'chat',
+            'created_at': '2026-09-08 10:03:00', 'tool_calls': '[]',
+            'branches': '[]', 'branch_idx': 0, 'cache_info': '{}',
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
+        },
+        {
+            'id': 5, 'author': 'assistant', 'content': 'second answer',
+            'thinking': '', 'source_kind': 'chat',
+            'created_at': '2026-09-08 10:04:00', 'tool_calls': '[]',
+            'branches': '[]', 'branch_idx': 0, 'cache_info': '{}',
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
+        },
+        {
+            'id': 6, 'author': 'assistant', 'content': 'second wake note',
+            'thinking': '', 'source_kind': 'wake',
+            'created_at': '2026-09-08 10:05:00', 'tool_calls': '[]',
+            'branches': '[]', 'branch_idx': 0,
+            'cache_info': json.dumps({
+                'wake_mode': 'normal', 'canonical_chat_history': True,
+                'unified_chat_resident': True, 'b3_authority': True,
+                'source': 'wake', 'provider': 'claude_code',
+            }),
+            'attachments': '[]', 'image_url': '', 'file_url': '',
+            'file_name': '',
+        },
+    ])
+    computed_ids.clear()
+    incremental_turns = sources.derive_completed_turns(updated_rows)
+    incremental_events = sources.derive_autonomous_events(updated_rows)
+    incremental = (
+        incremental_turns,
+        incremental_events,
+        sources.build_source_members(incremental_turns, incremental_events),
     )
-    frozen = {
-        'receipt': object(),
-        'members': (),
-        'receipt_members_complete': True,
-        'membership_valid': True,
-        'receipt_read_error': None,
-    }
-    context = types.SimpleNamespace(
-        plan_id='plan:one', plan_hash='a' * 64, source_hash='b' * 64,
-        valid=True, budget_status='fits',
-    )
-    budget = ContextBudgetPolicy(token_budget=100)
-    source_rows = ((), {'id': 9, 'author': 'hayana', 'content': 'question'})
-    source_conn = mock.Mock()
-    monkeypatch.setattr(dr, '_freeze_hot_receipt', lambda *a, **k: frozen)
-    monkeypatch.setattr(
-        dr, '_hot_canonical_source_scope',
-        lambda *a, **k: (('message:1', 'hash-a'),),
-    )
-    monkeypatch.setattr(dr.config_store, 'get_bool', lambda *a, **k: False)
-    monkeypatch.setattr(store, 'strict_revalidate_enabled', lambda: False)
-    monkeypatch.setattr(
-        store, 'read_ready_surface',
-        lambda *a, **k: types.SimpleNamespace(status='ready', artifacts=()),
-    )
-    monkeypatch.setattr(
-        dr, '_context_plan_policy',
-        lambda **kwargs: (budget, 'budget-v1'),
-    )
-    monkeypatch.setattr(
-        dr, '_build_continuity_shadow_fixed_sections', lambda **kwargs: (),
-    )
-    shadow = __import__('chat.daily_continuity_shadow', fromlist=['_source_rows'])
-    monkeypatch.setattr(shadow, '_read_only_connection', lambda *a, **k: source_conn)
-    monkeypatch.setattr(shadow, '_check_source_schema', lambda *a, **k: None)
-    monkeypatch.setattr(shadow, '_source_rows', lambda *a, **k: source_rows)
-    build = mock.Mock(return_value=(context, {'chunk:a': 'body'}))
-    reconcile = mock.Mock(return_value='NO_OP')
-    monkeypatch.setattr(dr, '_build_production_context_plan', build)
-    monkeypatch.setattr(dr, '_reconcile_hot_context_plan', reconcile)
+    assert computed_ids == [2, 4, 5, 6]
 
-    assert dr._prepare_hot_context_plan(
-        plan, resident=object(), static_system='SYSTEM',
-    ) == 'NO_OP'
-    assert plan.cold_start_diagnostic['hot_plan_cache'] == 'miss'
-    assert dr._prepare_hot_context_plan(
-        plan, resident=object(), static_system='SYSTEM',
-    ) == 'NO_OP'
-
-    assert plan.cold_start_diagnostic['hot_plan_cache'] == 'hit'
-    assert build.call_count == 1
-    assert reconcile.call_count == 2
-    assert plan.hot_desired_plan is context
-    assert plan.hot_desired_chunk_bodies == {'chunk:a': 'body'}
-    assert source_conn.close.call_count == 2
+    monkeypatch.setenv('CONTINUITY_STRICT_REVALIDATE', '1')
+    full_turns = sources.derive_completed_turns(updated_rows)
+    full_events = sources.derive_autonomous_events(updated_rows)
+    full = (full_turns, full_events, sources.build_source_members(full_turns, full_events))
+    assert pickle.dumps(incremental, protocol=5) == pickle.dumps(full, protocol=5)
 
 
-def test_hot_plan_reuse_birth_detail_is_visible():
-    diagnostic = {'hot_context_plan_start_at': 1.0}
-    plan = types.SimpleNamespace(cold_start_diagnostic=diagnostic)
-    dr._turn_timing_mark(
-        plan,
-        'hot_context_plan_end_at',
-        decision='NO_OP',
-        detail='通过 · 复用',
-    )
-    assert diagnostic['phases'][-1]['detail'] == '通过 · 复用'
+def test_strict_revalidation_bypasses_source_derivation_cache(monkeypatch):
+    rows = _source_derivation_rows()
+    sources.clear_source_derivation_cache()
+    sources.derive_completed_turns(rows)
+    calls = []
+    original = sources._compute_source_row_facts
+
+    def counted(row, **kwargs):
+        calls.append(int(row['id']))
+        return original(row, **kwargs)
+
+    monkeypatch.setattr(sources, '_compute_source_row_facts', counted)
+    sources.derive_completed_turns(rows)
+    assert calls == []
+
+    monkeypatch.setenv('CONTINUITY_STRICT_REVALIDATE', '1')
+    sources.derive_completed_turns(rows)
+    assert calls == [1, 2, 3]

@@ -474,6 +474,11 @@ def build_daily_continuity_shadow_plan(
         [Sequence[SourceMember], tuple[ContextChunkBinding, ...]],
         tuple[ContextChunkBinding, ...],
     ] | None = None,
+    prepared_source_rows: tuple[
+        Sequence[Mapping[str, object]], Mapping[str, object]
+    ] | None = None,
+    prepared_source_projection: tuple[object, object, Sequence[SourceMember]] | None = None,
+    prepared_inputs_out: dict[str, object] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -509,28 +514,40 @@ def build_daily_continuity_shadow_plan(
         if any(getattr(section, 'kind', None) == 'current_request' for section in accepted):
             return _blocked('invalid_current_request')
 
-        try:
-            source_conn = _read_only_connection(source_db_path)
-        except (FileNotFoundError, OSError, sqlite3.Error):
-            return _blocked('source_rows_unavailable')
-        try:
-            _check_source_schema(source_conn)
-            history_rows, current_row = _source_rows(source_conn, current_user_message_id)
-        except LookupError:
-            return _blocked('invalid_current_request')
-        except _SourceScopeUnavailable:
-            return _blocked('source_scope_unavailable')
-        except (OSError, sqlite3.Error, TypeError, ValueError):
-            return _blocked('source_rows_unavailable')
-        finally:
-            source_conn.close()
+        if prepared_source_rows is not None:
+            history_rows, current_row = prepared_source_rows
+        else:
+            try:
+                source_conn = _read_only_connection(source_db_path)
+            except (FileNotFoundError, OSError, sqlite3.Error):
+                return _blocked('source_rows_unavailable')
+            try:
+                _check_source_schema(source_conn)
+                history_rows, current_row = _source_rows(source_conn, current_user_message_id)
+            except LookupError:
+                return _blocked('invalid_current_request')
+            except _SourceScopeUnavailable:
+                return _blocked('source_scope_unavailable')
+            except (OSError, sqlite3.Error, TypeError, ValueError):
+                return _blocked('source_rows_unavailable')
+            finally:
+                source_conn.close()
+        if isinstance(prepared_inputs_out, dict):
+            prepared_inputs_out['source_rows'] = (history_rows, current_row)
 
-        try:
-            turns = derive_completed_turns(history_rows)
-            events = derive_autonomous_events(history_rows)
-            expected_members = build_source_members(turns, events)
-        except (TypeError, ValueError):
-            return _blocked('source_rows_unavailable')
+        if prepared_source_projection is not None:
+            turns, events, expected_members = prepared_source_projection
+        else:
+            try:
+                turns = derive_completed_turns(history_rows)
+                events = derive_autonomous_events(history_rows)
+                expected_members = build_source_members(turns, events)
+            except (TypeError, ValueError):
+                return _blocked('source_rows_unavailable')
+            if isinstance(prepared_inputs_out, dict):
+                prepared_inputs_out['source_projection'] = (
+                    turns, events, tuple(expected_members),
+                )
         if source_member_scope is not None:
             try:
                 expected_members = _restrict_expected_members(

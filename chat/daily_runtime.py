@@ -1756,13 +1756,15 @@ def _build_production_context_plan(
     capacity_budget_static_system: str | None = None,
     canonical_hot_source_scope: tuple[tuple[Any, ...], ...] | None = None,
     allow_invalid_for_cold_bridge: bool = False,
-    _prepared_hot_inputs: dict[str, Any] | None = None,
+    _prepared_context_inputs: dict[str, Any] | None = None,
+    _prepared_inputs_out: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
-    if isinstance(_prepared_hot_inputs, dict):
-        policy = _prepared_hot_inputs['policy']
-        policy_version = _prepared_hot_inputs['policy_version']
+    prepared = _prepared_context_inputs if isinstance(_prepared_context_inputs, dict) else {}
+    if 'policy' in prepared and 'policy_version' in prepared:
+        policy = prepared['policy']
+        policy_version = prepared['policy_version']
     else:
         policy, policy_version = _context_plan_policy(
             mode=mode,
@@ -1775,11 +1777,9 @@ def _build_production_context_plan(
             dynamic_state_text=str(_accepted_state_text(plan.assembly) or ''),
         )
     store_path = _production_continuity_store_path(plan)
-    surface = (
-        _prepared_hot_inputs['ready_surface']
-        if isinstance(_prepared_hot_inputs, dict)
-        else read_ready_surface(store_path)
-    )
+    surface = prepared.get('ready_surface')
+    if surface is None:
+        surface = read_ready_surface(store_path)
     if surface.status == 'unavailable':
         raise DailyRuntimeError(
             'continuity store unavailable',
@@ -1806,18 +1806,35 @@ def _build_production_context_plan(
         for chunk in artifacts
     )
     from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
-    fixed_sections = (
-        _prepared_hot_inputs['fixed_sections']
-        if isinstance(_prepared_hot_inputs, dict)
-        else _build_continuity_shadow_fixed_sections(
+    fixed_sections = prepared.get('fixed_sections')
+    if fixed_sections is None:
+        fixed_sections = _build_continuity_shadow_fixed_sections(
             plan=plan,
             resident=resident,
             static_system=static_system,
             require_full_state_snapshot=True,
         )
-    )
-    dayblock_box: dict[str, Any] = {}
-    binding_transform = _dayblock_binding_transform(plan, mode=mode, box=dayblock_box)
+    if isinstance(_prepared_inputs_out, dict):
+        _prepared_inputs_out.update({
+            'policy': policy,
+            'policy_version': policy_version,
+            'fixed_sections': fixed_sections,
+        })
+    if 'dayblock_box' in prepared and 'binding_transform' in prepared:
+        dayblock_box = prepared['dayblock_box']
+        binding_transform = prepared['binding_transform']
+    else:
+        dayblock_box = {}
+        binding_transform = _dayblock_binding_transform(
+            plan,
+            mode=mode,
+            box=dayblock_box,
+        )
+    if isinstance(_prepared_inputs_out, dict):
+        _prepared_inputs_out.update({
+            'dayblock_box': dayblock_box,
+            'binding_transform': binding_transform,
+        })
     result = build_daily_continuity_shadow_plan(
         binding_transform=binding_transform,
         source_db_path=store_path,
@@ -1853,8 +1870,19 @@ def _build_production_context_plan(
             else None
         ),
         **(
-            {'prepared_source_rows': _prepared_hot_inputs['source_rows']}
-            if isinstance(_prepared_hot_inputs, dict)
+            {
+                'prepared_source_rows': prepared['source_rows'],
+                'prepared_source_projection': prepared['source_projection'],
+            }
+            if 'source_rows' in prepared and 'source_projection' in prepared
+            else (
+                {'prepared_source_rows': prepared['source_rows']}
+                if 'source_rows' in prepared else {}
+            )
+        ),
+        **(
+            {'prepared_inputs_out': _prepared_inputs_out}
+            if isinstance(_prepared_inputs_out, dict)
             else {}
         ),
     )
@@ -1969,6 +1997,7 @@ def _conditionally_seal_cold_bridge(
     *,
     first_plan: Any,
     first_chunk_bodies: dict[str, str],
+    first_build_inputs: dict[str, Any] | None = None,
     resident: Any,
     static_system: str,
 ) -> tuple[Any, dict[str, str]]:
@@ -2057,11 +2086,16 @@ def _conditionally_seal_cold_bridge(
             error_code=error_code,
             retryable=True,
         )
+    rebuild_kwargs = {
+        'resident': resident,
+        'static_system': static_system,
+        'mode': 'cold',
+    }
+    if isinstance(first_build_inputs, dict) and first_build_inputs:
+        rebuild_kwargs['_prepared_context_inputs'] = first_build_inputs
     rebuilt_plan, rebuilt_chunk_bodies = _build_production_context_plan(
         plan,
-        resident=resident,
-        static_system=static_system,
-        mode='cold',
+        **rebuild_kwargs,
     )
     if not _selected_exact_cold_bridge(
         rebuilt_plan,
@@ -3907,7 +3941,7 @@ def _prepare_hot_context_plan(
                 'canonical_hot_source_scope': canonical_hot_source_scope,
             }
             if prepared_hot_inputs is not None:
-                build_kwargs['_prepared_hot_inputs'] = prepared_hot_inputs
+                build_kwargs['_prepared_context_inputs'] = prepared_hot_inputs
             context_plan, chunk_bodies = _build_production_context_plan(
                 plan,
                 **build_kwargs,
@@ -5396,17 +5430,20 @@ def _assemble_plan(
             static_system,
         )
         with turn_birth.phase(turn_timing, 'chunks', '载入压缩块') as timing_box:
+            first_build_inputs: dict[str, Any] = {}
             first_plan, first_chunk_bodies = _build_production_context_plan(
                 daily_plan,
                 resident=resident,
                 static_system=effective_static_system,
                 mode='cold',
                 allow_invalid_for_cold_bridge=True,
+                _prepared_inputs_out=first_build_inputs,
             )
             context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
                 daily_plan,
                 first_plan=first_plan,
                 first_chunk_bodies=first_chunk_bodies,
+                first_build_inputs=first_build_inputs,
                 resident=resident,
                 static_system=effective_static_system,
             )
