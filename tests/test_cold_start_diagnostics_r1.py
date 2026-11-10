@@ -163,8 +163,7 @@ class TurnTimingTests(unittest.TestCase):
             'terminal_at': 20.0,
             'generation_records': [],
         }
-        before = self._emit(diagnostic)
-        self.assertIsNone(before['birth'])
+        self.assertIsNone(cc_resident._birth_summary(diagnostic))
 
         diagnostic['first_thinking_or_text_at'] = 12.5
         after = self._emit(diagnostic)
