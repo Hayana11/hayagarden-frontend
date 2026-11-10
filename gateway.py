@@ -7642,7 +7642,7 @@ def _birth_chars(text):
 
 
 def _stream_cc_daily_soft_window(
-    _turn_data, _uc, *, request_reality_context='', birth_started_at,
+    _turn_data, _uc, *, request_reality_context='', birth_started_at=None,
 ):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
     import hashlib
@@ -7829,7 +7829,8 @@ def _stream_cc_daily_soft_window(
             _prepared['plan']._turn_flight_recorder = _turn_data.get('_turn_flight_recorder')
             _birth_record = getattr(_prepared['plan'], 'cold_start_diagnostic', None)
             if isinstance(_birth_record, dict):
-                _birth_record['birth_started_at'] = round(birth_started_at, 6)
+                if birth_started_at is not None:
+                    _birth_record['birth_started_at'] = round(birth_started_at, 6)
                 _turn_birth.record_phase(
                     _birth_record, 'persona', '载入人设',
                     persona_started_at, persona_ended_at,
