@@ -41,8 +41,7 @@ from continuity.store import (
 from continuity.sources import (
     POLICY_VERSION as SOURCE_POLICY_VERSION,
     build_source_members,
-    derive_autonomous_events,
-    derive_completed_turns,
+    derive_turns_and_events,
 )
 
 
@@ -363,8 +362,7 @@ def run_continuity_producer(
             chat_id=chat_id,
             window_identity_reader=reader,
         )
-        turns = derive_completed_turns(rows, chat_id=str(identity['chat_id']))
-        events = derive_autonomous_events(rows, chat_id=str(identity['chat_id']))
+        turns, events = derive_turns_and_events(rows, chat_id=str(identity['chat_id']))
         members = build_source_members(turns, events)
         source_member_count = len(members)
 
