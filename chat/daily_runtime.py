@@ -23,6 +23,7 @@ import config_store
 from chat import daily_context as dc
 from chat.display_segments import has_save_markers, strip_save_markers
 from chat import daily_history as dh
+from chat import turn_birth
 from chat import context_window as cw
 from chat.attachment_contract import (
     AttachmentValidationError,
@@ -1317,6 +1318,95 @@ def _context_plan_consumer_enabled() -> bool:
         ) or '').strip() == '1'
     except Exception:
         return False
+
+
+_TURN_KIND_LABELS = {
+    'hot': '热回合', 'cold': '冷启动', 'respawn': '重生', 'capacity_swap': '容量切换',
+}
+
+
+def _history_timing_detail(assembly: Any) -> Optional[str]:
+    """'今天 24 条 · 延续 6 条 · 交接' for the 出生 panel; sizes only, no text."""
+    try:
+        today = carry = 0
+        chars = 0
+        handoff = False
+        for layer in (assembly or {}).get('layers') or ():
+            kind = layer.get('kind')
+            messages = layer.get('messages') or ()
+            chars += sum(len(str(m.get('content') or '')) for m in messages)
+            if kind == 'current_day_history':
+                today += len(messages)
+            elif kind == 'carryover':
+                carry += len(messages)
+            elif kind == 'day_handoff':
+                handoff = True
+                chars += len(str(layer.get('text') or ''))
+        parts = ['今天 %d 条' % today]
+        if carry:
+            parts.append('延续 %d 条' % carry)
+        if handoff:
+            parts.append('交接')
+        parts.append(_chars_label(chars))
+        return ' · '.join(parts)
+    except Exception:
+        return None
+
+
+def _memory_timing_detail(recall: Any) -> Optional[str]:
+    try:
+        recall = recall or {}
+        if recall.get('decision') == 'surfaced' and recall.get('mode') == 'on':
+            return '浮现 1 条'
+        if recall.get('mode') in (None, 'off'):
+            return '未开启'
+        return '没有浮现'
+    except Exception:
+        return None
+
+
+def _chunks_timing_detail(chunk_bodies: Any) -> Optional[str]:
+    try:
+        bodies = dict(chunk_bodies or {})
+        chars = sum(len(str(v or '')) for v in bodies.values())
+        return '%d 块 · %s' % (len(bodies), _chars_label(chars))
+    except Exception:
+        return None
+
+
+def _chars_label(chars: int) -> str:
+    return '%.1fk 字' % (chars / 1000.0) if chars >= 1000 else '%d 字' % chars
+
+
+# Pre-provider steps stamped by start/end fields; the end stamp also records the row.
+_TIMED_STEPS = {
+    'capacity_swap': ('capacity', '容量切换'),
+    'hot_context_plan': ('proof', '上下文核对'),
+}
+_HOT_DECISION_LABELS = {
+    'NO_OP': '通过', 'RESPAWN': '需要重生', 'BLOCKED': '拦下', 'EXCEPTION': '出错',
+}
+
+
+def _turn_timing_mark(plan: Any, field: str, *, decision: Any = None) -> None:
+    """Stamp a pre-provider phase on the turn's timing record (observational only)."""
+    try:
+        diagnostic = getattr(plan, 'cold_start_diagnostic', None)
+        if not isinstance(diagnostic, dict) or diagnostic.get(field):
+            return
+        diagnostic[field] = round(time.time(), 6)
+        if decision is not None:
+            diagnostic['hot_context_plan_decision'] = str(decision)[:40]
+        step = field[:-len('_end_at')] if field.endswith('_end_at') else None
+        if step in _TIMED_STEPS:
+            key, label = _TIMED_STEPS[step]
+            turn_birth.record_phase(
+                diagnostic, key, label,
+                diagnostic.get(step + '_start_at'), diagnostic[field],
+                _HOT_DECISION_LABELS.get(str(decision)) if decision is not None else None,
+            )
+    except Exception:
+        pass
 
 
 def _context_plan_policy(
@@ -4925,6 +5015,7 @@ def _assemble_plan(
     user_image_url: str = '',
     user_attachments: Optional[list[dict[str, str]]] = None,
     feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
+    turn_timing: Optional[dict[str, Any]] = None,
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
@@ -4953,21 +5044,23 @@ def _assemble_plan(
     if feedback_snapshot is None:
         feedback_snapshot = _peek_feedback_snapshot()
     feedback_lines, feedback_ids = feedback_snapshot
-    assembly = dh.build_daily_window_context(
-        chat_id=chat_id,
-        daily_context=refreshed,
-        current_user_message_id=int(user_message_id),
-        static_system=static_system,
-        is_cold=is_cold,
-        is_respawn=is_respawn,
-        last_state_snapshot=last_state,
-        inject_handoff=bool(cold_like and not context_plan_consumer),
-        inject_carryover=bool(cold_like and not context_plan_consumer),
-        db_path=db_path,
-        history_token_budget=history_token_budget,
-        provider_claude_session_id=provider_sid,
-        **({'history_override': []} if context_plan_consumer else {}),
-    )
+    with turn_birth.phase(turn_timing, 'history', '载入最近对话') as timing_box:
+        assembly = dh.build_daily_window_context(
+            chat_id=chat_id,
+            daily_context=refreshed,
+            current_user_message_id=int(user_message_id),
+            static_system=static_system,
+            is_cold=is_cold,
+            is_respawn=is_respawn,
+            last_state_snapshot=last_state,
+            inject_handoff=bool(cold_like and not context_plan_consumer),
+            inject_carryover=bool(cold_like and not context_plan_consumer),
+            db_path=db_path,
+            history_token_budget=history_token_budget,
+            provider_claude_session_id=provider_sid,
+            **({'history_override': []} if context_plan_consumer else {}),
+        )
+        timing_box['detail'] = _history_timing_detail(assembly)
     manifest = _build_manifest_base(
         plan_fields={
             'request_id': req_id,
@@ -4993,13 +5086,15 @@ def _assemble_plan(
     task_feedback = _format_task_feedback(feedback_lines)
     if task_feedback:
         assembly['task_feedback'] = task_feedback
-    memory_recall = _surface_memory_for_turn(
-        user_message_id=int(user_message_id),
-        user_content=user_content,
-        assembly=assembly,
-        static_system=static_system,
-        db_path=db_path,
-    )
+    with turn_birth.phase(turn_timing, 'memory', '想起记忆') as timing_box:
+        memory_recall = _surface_memory_for_turn(
+            user_message_id=int(user_message_id),
+            user_content=user_content,
+            assembly=assembly,
+            static_system=static_system,
+            db_path=db_path,
+        )
+        timing_box['detail'] = _memory_timing_detail(memory_recall)
     _apply_memory_recall(assembly, memory_recall)
     manifest['auto_recall_injected'] = bool(assembly.get('memory_recall'))
     manifest['memory_recall_mode'] = memory_recall.get('mode')
@@ -5060,20 +5155,22 @@ def _assemble_plan(
             daily_plan,
             static_system,
         )
-        first_plan, first_chunk_bodies = _build_production_context_plan(
-            daily_plan,
-            resident=resident,
-            static_system=effective_static_system,
-            mode='cold',
-            allow_invalid_for_cold_bridge=True,
-        )
-        context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
-            daily_plan,
-            first_plan=first_plan,
-            first_chunk_bodies=first_chunk_bodies,
-            resident=resident,
-            static_system=effective_static_system,
-        )
+        with turn_birth.phase(turn_timing, 'chunks', '载入压缩块') as timing_box:
+            first_plan, first_chunk_bodies = _build_production_context_plan(
+                daily_plan,
+                resident=resident,
+                static_system=effective_static_system,
+                mode='cold',
+                allow_invalid_for_cold_bridge=True,
+            )
+            context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
+                daily_plan,
+                first_plan=first_plan,
+                first_chunk_bodies=first_chunk_bodies,
+                resident=resident,
+                static_system=effective_static_system,
+            )
+            timing_box['detail'] = _chunks_timing_detail(chunk_bodies)
         daily_plan.continuity_plan = context_plan
         daily_plan.continuity_chunk_bodies = dict(chunk_bodies)
         daily_plan.assembly = _project_context_plan_history(
@@ -5321,6 +5418,11 @@ def prepare_daily_turn(
             is_respawn = _cold_reprepare
             turn_kind = 'respawn' if is_respawn else ('hot' if not is_cold else 'cold')
 
+        turn_birth.record_phase(
+            cold_start_diagnostic, 'claim', '认领会话',
+            cold_start_diagnostic.get('request_received_at'), time.time(),
+            _TURN_KIND_LABELS.get(turn_kind),
+        )
         plan = _assemble_plan(
             req_id=req_id,
             owner=owner,
@@ -5348,8 +5450,10 @@ def prepare_daily_turn(
             origin_local_day=origin_day,
             turn_started_at=turn_started_at,
             feedback_snapshot=feedback_snapshot,
+            turn_timing=cold_start_diagnostic,
         )
         plan.cold_start_diagnostic = cold_start_diagnostic
+        cold_start_diagnostic['turn_kind'] = turn_kind
         cold_start_diagnostic['plan_ready_at'] = round(time.time(), 6)
         verify_epoch_token(plan)
         return plan
@@ -8205,6 +8309,7 @@ def ensure_resident_and_stream(
 
             if door.get('capacity_swap'):
                 # Capacity-only path: same context_id/epoch, generation +1, SYSTEM_SUFFIX_V1.
+                _turn_timing_mark(plan, 'capacity_swap_start_at')
                 swap = _attempt_capacity_swap_before_stdin(
                     plan,
                     resident=resident,
@@ -8212,6 +8317,7 @@ def ensure_resident_and_stream(
                     env=env,
                     trigger_reason=str(door.get('reason') or ''),
                 )
+                _turn_timing_mark(plan, 'capacity_swap_end_at')
                 if swap.get('ok'):
                     effective_system = str(swap.get('effective_system') or effective_system)
                     yield from ensure_resident_and_stream(
@@ -8304,6 +8410,7 @@ def ensure_resident_and_stream(
             # Capacity has already had first refusal above.  Only now may a
             # normal-hot store/budget read decide whether this turn is NO_OP,
             # RESPAWN, or BLOCKED.
+            _turn_timing_mark(plan, 'hot_context_plan_start_at')
             try:
                 hot_decision = _prepare_hot_context_plan(
                     plan,
@@ -8311,9 +8418,11 @@ def ensure_resident_and_stream(
                     static_system=effective_system,
                 )
             except Exception:
+                _turn_timing_mark(plan, 'hot_context_plan_end_at', decision='EXCEPTION')
                 heartbeat.stop()
                 _release_lease(plan)
                 raise
+            _turn_timing_mark(plan, 'hot_context_plan_end_at', decision=hot_decision)
             if hot_decision == 'BLOCKED':
                 heartbeat.stop()
                 _release_lease(plan)
@@ -8358,8 +8467,14 @@ def ensure_resident_and_stream(
                 )
                 return
 
+        spawn_started_at = time.time()
         actual_cold = bool(
             resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
+        )
+        turn_birth.record_phase(
+            getattr(plan, 'cold_start_diagnostic', None),
+            'spawn', '启动 Claude' if actual_cold else '确认常驻进程',
+            spawn_started_at, time.time(), '新进程' if actual_cold else None,
         )
         if isinstance(diagnostic, dict):
             diagnostic['generation_claimed_at'] = round(time.time(), 6)

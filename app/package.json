@@ -26,6 +26,7 @@
     "test:chat-overdefense": "vite-node scripts/test-chat-overdefense.mjs",
     "test:chat-terminal-contract": "vite-node scripts/test-chat-terminal-contract.mjs",
     "test:chat-markdown": "vite-node scripts/test-chat-markdown.mjs",
+    "test:chat-birth-panel": "vite-node scripts/test-chat-birth-panel.mjs",
     "test:chat-live-timeline": "vite-node scripts/test-chat-live-timeline.mjs",
     "test:chat-memory-recall": "vite-node scripts/test-chat-memory-recall.mjs",
     "test:memory-review": "vite-node scripts/test-memory-review.mjs",

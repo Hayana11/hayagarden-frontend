@@ -51,6 +51,40 @@ export interface ChatUsage {
   respawnReason?: string;
   /** Memories injected into this turn's prompt (persisted with the reply). */
   memoryRecall?: MemoryRecall;
+  /** How this reply was born: each step before its first word (persisted with the reply). */
+  birth?: BirthTiming;
+}
+
+export interface BirthPhase {
+  key: string;
+  label: string;
+  ms: number;
+  detail?: string;
+}
+
+/** The 出生 breakdown: request in -> first word out, in order. */
+export interface BirthTiming {
+  totalMs: number;
+  turnKind?: string;
+  phases: BirthPhase[];
+}
+
+export function normalizeBirth(raw: unknown): BirthTiming | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as { total_ms?: unknown; totalMs?: unknown; turn_kind?: unknown; turnKind?: unknown; phases?: unknown };
+  const phases = (Array.isArray(value.phases) ? value.phases : [])
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => ({
+      key: String(item.key ?? ''),
+      label: String(item.label ?? ''),
+      ms: Math.max(0, Number(item.ms ?? 0) || 0),
+      detail: item.detail == null || item.detail === '' ? undefined : String(item.detail),
+    }))
+    .filter((item) => item.label);
+  const totalMs = Math.max(0, Number(value.total_ms ?? value.totalMs ?? 0) || 0);
+  if (!phases.length || totalMs <= 0) return null;
+  const turnKind = String(value.turn_kind ?? value.turnKind ?? '').trim();
+  return { totalMs, turnKind: turnKind || undefined, phases };
 }
 
 export interface MemoryRecallItem {
@@ -446,6 +480,7 @@ export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefin
     residentTurnCount: Number(raw.resident_turn_count ?? raw.residentTurnCount ?? 0) || undefined,
     respawnReason: String(raw.respawn_reason ?? raw.respawnReason ?? '').trim() || undefined,
     memoryRecall: normalizeMemoryRecall(raw.memory_recall ?? raw.memoryRecall) ?? undefined,
+    birth: normalizeBirth(raw.birth) ?? undefined,
   };
 }
 
@@ -463,6 +498,7 @@ export interface StreamHandlers {
   onTurnFinal?: (canonicalSha256: string) => void;
   onTurnReconcile?: (projection: CanonicalLiveProjection) => void;
   onMemoryRecall?: (recall: MemoryRecall) => void;
+  onBirth?: (birth: BirthTiming) => void;
 }
 
 export interface StreamResult {
@@ -620,6 +656,11 @@ export async function streamChatReply(
           case 'memory_recall': {
             const recall = normalizeMemoryRecall(ev.d);
             if (recall) handlers.onMemoryRecall?.(recall);
+            break;
+          }
+          case 'birth': {
+            const birth = normalizeBirth(ev.d);
+            if (birth) handlers.onBirth?.(birth);
             break;
           }
           case 'usage':

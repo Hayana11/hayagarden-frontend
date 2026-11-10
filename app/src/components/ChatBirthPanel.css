@@ -1,0 +1,103 @@
+/* 出生 panel: Chrome78-safe (grid gap only, no flex gap / inset / clamp). */
+.chat-birth {
+  width: 100%;
+  max-width: 420px;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+.chat-birth-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: 1px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-birth-head > * + * {
+  margin-left: 6px;
+}
+
+.chat-birth-head:focus-visible {
+  outline: 1px solid var(--rose);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.chat-birth-mark {
+  color: var(--rose);
+}
+
+.chat-birth-total {
+  font-style: italic;
+  font-size: 14px;
+  letter-spacing: 0;
+  color: var(--ink2);
+}
+
+.chat-birth-meta {
+  color: var(--ghost);
+}
+
+.chat-birth-caret {
+  display: inline-block;
+  transition: transform 0.18s ease;
+}
+
+.chat-birth-caret.is-open {
+  transform: rotate(90deg);
+}
+
+.chat-birth-rows {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--card2);
+  display: grid;
+  row-gap: 7px;
+}
+
+.chat-birth-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: baseline;
+  color: var(--ink2);
+  letter-spacing: 0.5px;
+}
+
+.chat-birth-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-birth-detail {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0;
+}
+
+.chat-birth-ms {
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-birth-row.is-slowest .chat-birth-ms,
+.chat-birth-row.is-slowest .chat-birth-label {
+  color: var(--rose);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-birth-caret {
+    transition: none;
+  }
+}
