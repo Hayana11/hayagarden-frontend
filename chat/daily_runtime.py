@@ -3696,6 +3696,27 @@ def _set_hot_decision(plan: DailyTurnPlan, decision: str, reason: str) -> None:
     })
 
 
+_HOT_LIVE_DRIFT_RESPAWN_REASONS = frozenset({
+    'live_binding_missing_or_mismatched',
+    'live_binding_context_mismatch',
+    'live_binding_process_generation_missing',
+    'resident_not_alive',
+    'live_session_identity_missing',
+    'binding_process_generation_mismatch',
+    'binding_session_identity_missing',
+    'binding_session_identity_mismatch',
+    'frozen_session_identity_mismatch',
+    'frozen_process_generation_mismatch',
+    'live_model_identity_missing',
+    'live_model_identity_mismatch',
+    'live_provider_identity_mismatch',
+    'live_system_identity_missing',
+    'live_system_identity_mismatch',
+    'live_persona_identity_mismatch',
+    'live_tool_surface_identity_missing',
+})
+
+
 def _prepare_hot_context_plan(
     plan: DailyTurnPlan,
     *,
@@ -3719,6 +3740,22 @@ def _prepare_hot_context_plan(
                 plan,
                 'RESPAWN',
                 str(scope_diagnostic.get('reason') or 'native_tail_missing'),
+            )
+            return 'RESPAWN'
+        if (
+            isinstance(scope_diagnostic, dict)
+            and scope_diagnostic.get('stage') == 'live_identity'
+            and scope_diagnostic.get('decision') == 'RESPAWN'
+            and scope_diagnostic.get('reason') in _HOT_LIVE_DRIFT_RESPAWN_REASONS
+        ):
+            # The live resident no longer matches this turn (system prompt,
+            # persona, model, session or binding changed).  That is a normal
+            # respawn, not an unprovable scope: let the caller rebuild it.
+            # Session-registry reasons stay fail-closed below.
+            _set_hot_decision(
+                plan,
+                'RESPAWN',
+                str(scope_diagnostic.get('reason') or 'live_identity_mismatch'),
             )
             return 'RESPAWN'
         _set_hot_decision(plan, 'BLOCKED', 'hot_source_scope_unproven')

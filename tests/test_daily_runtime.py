@@ -6365,6 +6365,54 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         build.assert_not_called()
 
+    def test_prepare_hot_respawns_when_live_identity_requests_respawn(self):
+        for reason in (
+            'live_system_identity_mismatch',
+            'live_persona_identity_mismatch',
+            'resident_not_alive',
+        ):
+            with self.subTest(reason=reason):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_live_identity_decision',
+                    return_value=('RESPAWN', reason, None),
+                ), mock.patch.object(
+                    dr,
+                    '_build_production_context_plan',
+                ) as build:
+                    decision = dr._prepare_hot_context_plan(
+                        plan, resident=object(), static_system='STATIC',
+                    )
+                self.assertEqual(decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision_reason, reason)
+                self.assertEqual(plan.hot_scope_diagnostic['stage'], 'live_identity')
+                build.assert_not_called()
+
+    def test_prepare_hot_keeps_live_identity_blocked_as_error(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('BLOCKED', 'epoch_invalid', None),
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_hot_source_scope_unavailable',
+        )
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+
     def test_prepare_hot_keeps_ambiguous_and_untrusted_receipts_blocked(self):
         plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
         plan.user_message_id = 3
