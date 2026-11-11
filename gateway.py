@@ -7855,6 +7855,11 @@ def _stream_cc_daily_soft_window(
         _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
             _CC_RESIDENT, expected_key=k,
         )
+        # Same cadence as the pre-prepare keepalive: the runtime keeps the stream
+        # alive through the hot-context check, the spawn and the stdin write.
+        # (A plain attribute, not a dataclass field: reprepare copies fields back
+        # from the replacement plan and would reset it.)
+        _daily_plan._presend_heartbeat_sec = DAILY_PRESEND_KEEPALIVE_SEC
         # Gateway-only provider copy: preserve Daily's image-only sentinel so
         # the runtime can build the existing multimodal vision payload.
         prepare_daily_display_thinking_plan(

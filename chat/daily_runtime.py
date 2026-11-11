@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import socket
 import sqlite3
@@ -9382,17 +9383,123 @@ def _attach_daily_provider_budget_observation(
         return usage
 
 
+# Cadence of the transport heartbeat between the first SSE byte and the first
+# provider content event. gateway passes its own DAILY_PRESEND_KEEPALIVE_SEC (one
+# source of truth, patchable in tests); this default only serves direct callers.
+# It must stay well under proxy idle cuts (~40s seen on the phone path).
+DAILY_PRESEND_HEARTBEAT_SEC = 5.0
+
+
+def _iter_with_presend_heartbeat(
+    source: Iterator[tuple[str, Any]],
+    *,
+    interval: float,
+) -> Iterator[tuple[str, Any]]:
+    """Yield ``source``'s events, plus ``('heartbeat', None)`` while it is blocked.
+
+    One worker thread advances ``source`` for its whole life - and is the only
+    thread that ever closes it - while this generator asks it for the next event
+    and waits. Until the first event other than a heartbeat (the first provider
+    content or terminal event) the wait is bounded by ``interval``: each time it
+    times out a heartbeat is yielded. That covers the whole silent stretch of a
+    cold or loaded turn - the hot-context check, ``resident.ensure_alive``
+    (starting Claude) and the blocking ``stdin`` write - without touching any of
+    those steps: each still runs exactly once and in the same order, an exception
+    it raises surfaces here unchanged, and the source never hops between threads.
+    After the first content event the wait is unbounded, as direct iteration was.
+
+    Same contract as the gateway's ``_call_with_sse_keepalive``: if the consumer
+    leaves while a step is in flight, the worker finishes that step first (a
+    stdin write cannot be interrupted and its bookkeeping must complete) and only
+    then is the source closed, so its cleanup sees the real outcome. A step is
+    never abandoned or repeated.
+    """
+    iterator = iter(source)
+    commands: queue.SimpleQueue = queue.SimpleQueue()
+    results: queue.SimpleQueue = queue.SimpleQueue()
+
+    def _worker() -> None:
+        while True:
+            if commands.get() == 'close':
+                try:
+                    close = getattr(iterator, 'close', None)
+                    if callable(close):
+                        close()
+                    results.put(('closed', None))
+                except BaseException as exc:
+                    results.put(('error', exc))
+                return
+            try:
+                results.put(('item', next(iterator)))
+            except StopIteration:
+                results.put(('stop', None))
+                return
+            except BaseException as exc:  # re-raised on the consumer's thread
+                results.put(('error', exc))
+                return
+
+    threading.Thread(target=_worker, name='daily-stream-pump', daemon=True).start()
+    in_flight = False   # a 'next' was requested and its result not yet taken
+    presend = True      # no non-heartbeat event seen yet
+    try:
+        while True:
+            commands.put('next')
+            in_flight = True
+            while True:
+                try:
+                    kind, value = results.get(timeout=interval if presend else None)
+                    break
+                except queue.Empty:
+                    yield 'heartbeat', None
+            in_flight = False
+            if kind == 'stop':
+                return
+            if kind == 'error':
+                raise value
+            if presend and value[0] != 'heartbeat':
+                presend = False
+            yield value
+    except GeneratorExit:
+        # Only reachable at a yield, so the worker is alive unless the step we are
+        # waiting for turns out to be its last (source exhausted or raised).
+        worker_alive = True
+        if in_flight:
+            kind, _value = results.get()
+            worker_alive = kind == 'item'
+        if worker_alive:
+            commands.put('close')
+            results.get()
+        raise
+
+
+def _presend_heartbeat_interval(plan: Any, explicit: Optional[float]) -> float:
+    """Explicit argument, else the cadence gateway put on the plan, else the default.
+
+    Only real numbers count, so a stand-in plan object can never switch it on or
+    off by accident; a value <= 0 disables the pump.
+    """
+    for candidate in (explicit, getattr(plan, '_presend_heartbeat_sec', None)):
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            return float(candidate)
+    return DAILY_PRESEND_HEARTBEAT_SEC
+
+
 def stream_daily_resident_turn(
     plan: DailyTurnPlan,
     *,
     resident: Any,
     env: dict[str, str],
     static_system: str,
+    presend_heartbeat_sec: Optional[float] = None,
 ) -> Iterator[tuple[str, Any]]:
+    interval = _presend_heartbeat_interval(plan, presend_heartbeat_sec)
     try:
-        for event, payload in ensure_resident_and_stream(
+        events: Iterator[tuple[str, Any]] = ensure_resident_and_stream(
             plan, resident=resident, env=env, static_system=static_system,
-        ):
+        )
+        if interval > 0:
+            events = _iter_with_presend_heartbeat(events, interval=interval)
+        for event, payload in events:
             if event == 'done':
                 if (
                     isinstance(payload, tuple)
