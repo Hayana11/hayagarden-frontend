@@ -27,7 +27,7 @@ from continuity.sealing import (
     seal_snapshot,
 )
 from continuity.sources import POLICY_VERSION as SOURCE_POLICY_VERSION
-from continuity.sources import build_source_members, derive_autonomous_events, derive_completed_turns
+from continuity.sources import build_source_members, derive_turns_and_events
 from continuity.store import (
     load_candidate,
     load_claimed_source_revisions,
@@ -610,8 +610,7 @@ def get_current(
                 policy=policy,
             )
         members = build_source_members(
-            derive_completed_turns(rows, chat_id=str(identity['chat_id'])),
-            derive_autonomous_events(rows, chat_id=str(identity['chat_id'])),
+            *derive_turns_and_events(rows, chat_id=str(identity['chat_id'])),
         )
         if _has_table(conn, 'continuity_source_members'):
             claimed = load_claimed_source_revisions(

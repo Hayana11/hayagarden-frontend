@@ -23,8 +23,7 @@ from continuity.context_plan import (
 )
 from continuity.sources import (
     build_source_members,
-    derive_autonomous_events,
-    derive_completed_turns,
+    derive_turns_and_events,
     evidence_ref,
     is_formal_user_source_row,
 )
@@ -539,8 +538,7 @@ def build_daily_continuity_shadow_plan(
             turns, events, expected_members = prepared_source_projection
         else:
             try:
-                turns = derive_completed_turns(history_rows)
-                events = derive_autonomous_events(history_rows)
+                turns, events = derive_turns_and_events(history_rows)
                 expected_members = build_source_members(turns, events)
             except (TypeError, ValueError):
                 return _blocked('source_rows_unavailable')

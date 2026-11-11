@@ -12,7 +12,7 @@ import os
 import threading
 from collections.abc import Iterable, Mapping
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chat.attachment_contract import persisted_chat_attachments
@@ -39,9 +39,41 @@ _USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
 _ASSISTANT_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
 _SOURCE_DERIVATION_CACHE_LIMIT = 8192
 _SOURCE_DERIVATION_CACHE: OrderedDict[
-    tuple[int, str], '_CachedSourceRow'
+    tuple[Any, ...], '_CachedSourceRow'
 ] = OrderedDict()
 _SOURCE_DERIVATION_CACHE_LOCK = threading.RLock()
+
+# Every raw column read, directly or transitively, while deriving a source row:
+#   _row_payload / _row_payload_json: id, author, content, source_kind,
+#     tool_calls, branches, branch_idx, cache_info, created_at, and
+#     _attachments -> attachments, file_url, file_name, image_url
+#   is_formal_chat_message / _is_legacy_workspace_job (chat.daily_context):
+#     author, source_kind, tool_calls, id, content, image_url, attachments,
+#     file_url, file_name
+#   _canonical_normal_wake / _explicitly_incomplete: source_kind, author,
+#     cache_info, content
+#   _tool_outcome_refs / _active_branch_identity: tool_calls, id, branches,
+#     branch_idx
+# The lookup key is these raw values compared exactly, so a hit never needs
+# JSON parsing, canonical serialization or hashing. A column added to any of
+# those readers must be added here, otherwise a change to it would hit a stale
+# derivation (tests/test_continuity_source_derivation_key.py covers every column).
+_SOURCE_ROW_KEY_COLUMNS = (
+    'id',
+    'author',
+    'content',
+    'source_kind',
+    'tool_calls',
+    'branches',
+    'branch_idx',
+    'cache_info',
+    'attachments',
+    'file_url',
+    'file_name',
+    'image_url',
+    'created_at',
+)
+_MISSING_COLUMN = object()
 
 
 @dataclass(frozen=True)
@@ -57,6 +89,9 @@ class _CachedSourceRow:
     tool_refs: tuple[EvidenceRef, ...] | None = None
     branch_id: str | None = None
     payload_json: str = ''
+    # The exact-value lookup key this entry is stored under (None when the row
+    # is not cacheable). Not part of equality or repr: it holds raw row text.
+    cache_key: tuple[Any, ...] | None = field(default=None, repr=False, compare=False)
 
 
 def clear_source_derivation_cache() -> None:
@@ -306,6 +341,15 @@ def _turn_revision(
     }))
 
 
+_DerivedRows = tuple[tuple[Any, '_CachedSourceRow'], ...]
+
+
+def _derive_source_rows(rows: Iterable[Any]) -> _DerivedRows:
+    """Derive every row once, ordered by id; shared by turns and events."""
+    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    return tuple((row, _source_row_derivation(row)) for row in ordered)
+
+
 def derive_completed_turns(
     rows: Iterable[Any],
     *,
@@ -317,7 +361,35 @@ def derive_completed_turns(
     V1 fails closed: exactly one formal assistant before the next formal user is
     required, and explicit partial-rescue rows are never completed turns.
     """
-    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    return _completed_turns_from_derived(
+        _derive_source_rows(rows), identity_id=identity_id, chat_id=chat_id,
+    )
+
+
+def derive_turns_and_events(
+    rows: Iterable[Any],
+    *,
+    identity_id: str = IDENTITY_ID,
+    chat_id: str = CHAT_ID,
+) -> tuple[tuple[CanonicalTurn, ...], tuple[AutonomousEvent, ...]]:
+    """derive_completed_turns + derive_autonomous_events over one row derivation."""
+    derived_rows = _derive_source_rows(rows)
+    return (
+        _completed_turns_from_derived(
+            derived_rows, identity_id=identity_id, chat_id=chat_id,
+        ),
+        _autonomous_events_from_derived(
+            derived_rows, identity_id=identity_id, chat_id=chat_id,
+        ),
+    )
+
+
+def _completed_turns_from_derived(
+    derived_rows: _DerivedRows,
+    *,
+    identity_id: str,
+    chat_id: str,
+) -> tuple[CanonicalTurn, ...]:
     completed: list[CanonicalTurn] = []
     current_user: tuple[Any, _CachedSourceRow] | None = None
     assistants: list[tuple[Any, _CachedSourceRow]] = []
@@ -367,8 +439,7 @@ def derive_completed_turns(
         current_user = None
         assistants = []
 
-    for row in ordered:
-        derived = _source_row_derivation(row)
+    for row, derived in derived_rows:
         if derived.formal_user:
             flush()
             current_user = (row, derived)
@@ -412,24 +483,47 @@ def _compute_source_row_facts(
     )
 
 
+def _source_row_cache_key(row: Any) -> tuple[Any, ...] | None:
+    """Exact raw-column identity of a row, or None when it cannot be a dict key.
+
+    Strings are used as-is; any other value is tagged with its type so that
+    values that compare equal but serialize differently (True/1/1.0) never
+    share an entry. A column the row does not carry is a distinct sentinel.
+    """
+    values = []
+    for column in _SOURCE_ROW_KEY_COLUMNS:
+        value = _value(row, column, _MISSING_COLUMN)
+        values.append(
+            value if value.__class__ is str else (value.__class__, value)
+        )
+    key = (int(_value(row, 'id', 0) or 0), tuple(values))
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
 def _source_row_derivation(row: Any) -> _CachedSourceRow:
-    payload_json = _row_payload_json(row)
-    content_hash = _sha256_text(payload_json)
-    message_id = int(_value(row, 'id', 0) or 0)
-    key = (message_id, content_hash)
     strict = _strict_source_revalidate_enabled()
-    if not strict:
+    key = None if strict else _source_row_cache_key(row)
+    if key is not None:
         with _SOURCE_DERIVATION_CACHE_LOCK:
             cached = _SOURCE_DERIVATION_CACHE.get(key)
             if cached is not None:
                 _SOURCE_DERIVATION_CACHE.move_to_end(key)
                 return cached
-    derived = _compute_source_row_facts(
-        row,
-        content_hash=content_hash,
-        payload_json=payload_json,
+    # Miss (or strict/uncacheable): only now parse, serialize and hash.
+    payload_json = _row_payload_json(row)
+    derived = replace(
+        _compute_source_row_facts(
+            row,
+            content_hash=_sha256_text(payload_json),
+            payload_json=payload_json,
+        ),
+        cache_key=key,
     )
-    if not strict:
+    if key is not None:
         cached_value = replace(derived, payload_json='')
         with _SOURCE_DERIVATION_CACHE_LOCK:
             existing = _SOURCE_DERIVATION_CACHE.get(key)
@@ -480,8 +574,8 @@ def _ensure_source_row_evidence(
         ),
         payload_json='',
     )
-    if not _strict_source_revalidate_enabled():
-        key = (derived.message_id, derived.content_hash)
+    key = derived.cache_key
+    if key is not None and not _strict_source_revalidate_enabled():
         with _SOURCE_DERIVATION_CACHE_LOCK:
             current = _SOURCE_DERIVATION_CACHE.get(key)
             if current is not None:
@@ -503,9 +597,19 @@ def derive_autonomous_events(
     identity_id: str = IDENTITY_ID,
     chat_id: str = CHAT_ID,
 ) -> tuple[AutonomousEvent, ...]:
+    return _autonomous_events_from_derived(
+        _derive_source_rows(rows), identity_id=identity_id, chat_id=chat_id,
+    )
+
+
+def _autonomous_events_from_derived(
+    derived_rows: _DerivedRows,
+    *,
+    identity_id: str,
+    chat_id: str,
+) -> tuple[AutonomousEvent, ...]:
     events: list[AutonomousEvent] = []
-    for row in sorted(rows, key=lambda item: int(_value(item, 'id', 0) or 0)):
-        derived = _source_row_derivation(row)
+    for row, derived in derived_rows:
         if not derived.canonical_wake:
             continue
         derived = _ensure_source_row_evidence(row, derived)
