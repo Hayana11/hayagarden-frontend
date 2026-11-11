@@ -105,6 +105,17 @@ def _migrate_chat_columns():
     conn.commit()
     conn.close()
     ensure_chat_messages_source_kind_logged(DB_PATH, connect_fn=lambda p: __import__('sqlite3').connect(p))
+    # Needs source_kind, so it runs after the column exists. Failure only costs speed.
+    try:
+        from chat.daily_schema import ensure_chat_messages_scan_indexes
+        _idx_conn = __import__('sqlite3').connect(DB_PATH, timeout=30)
+        try:
+            ensure_chat_messages_scan_indexes(_idx_conn)
+        finally:
+            _idx_conn.close()
+    except Exception as exc:
+        __import__('logging').getLogger(__name__).warning(
+            'chat_messages scan indexes not created: %s', exc)
 
 
 def _register_continuity_schema():

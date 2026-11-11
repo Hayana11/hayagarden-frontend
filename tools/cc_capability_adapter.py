@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -28,6 +30,7 @@ from tools.memory_kernel_switch import kernel_owned_brain_writes
 from tools.ombre_native_surface import OFFICIAL_HOOK_PATH, UPSTREAM_BRAIN_ALLOW_RULE
 from tools.capability_state import (
     CapabilityStateError,
+    CapabilityStateReader,
     RUNTIME_STATE_DENY,
     RUNTIME_STATE_INHERIT,
     RUNTIME_STATE_OFF,
@@ -473,14 +476,97 @@ def short_intent_instructions() -> str:
     )
 
 
+# The external MCP catalog is rebuilt by opening the production graph (key and
+# DB ownership checks, key read, a SQLite connection, every registry's schema
+# probe) which is far more work than the answer is worth when nothing changed.
+# It is cached in-process under a token over every input it reads. Any change
+# to the token, or a write recent enough that file timestamps cannot yet be
+# trusted, recomputes it. Only non-empty catalogs are stored: an empty one is
+# indistinguishable here from a failed read (list_external_surface fails closed
+# to []), and a transient failure must never be pinned.
+_EXTERNAL_CATALOG_RACY_NS = 2_000_000_000
+_EXTERNAL_CATALOG_PARENT_DIR = "/var/lib/hayagarden"  # validated by the production graph
+_external_catalog_cache: tuple[Any, Any] | None = None
+_external_catalog_lock = threading.Lock()
+
+
+def clear_external_catalog_cache() -> None:
+    global _external_catalog_cache
+    with _external_catalog_lock:
+        _external_catalog_cache = None
+
+
+def _stat_signature(path: str) -> tuple[Any, ...] | None:
+    """Identity and content-change signature of one path; None if unknowable."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return ("missing",)
+    except OSError:
+        return None
+    return (
+        "stat", st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _external_catalog_token() -> tuple[tuple[Any, ...], int] | None:
+    """(token over all catalog inputs, newest mtime/ctime in ns) or None."""
+    try:
+        from tools import external_mcp_production as production
+        db = str(production.EXTERNAL_MCP_DB_PATH)
+        key = str(production.EXTERNAL_MCP_KEY_FILE)
+    except Exception:
+        return None
+    watched = (
+        db, db + "-wal", db + "-journal", key,
+        os.path.dirname(db), _EXTERNAL_CATALOG_PARENT_DIR,
+    )
+    signatures = []
+    newest = 0
+    for path in watched:
+        signature = _stat_signature(path)
+        if signature is None:
+            return None
+        signatures.append((path, signature))
+        if signature[0] == "stat":
+            newest = max(newest, signature[8], signature[9])
+    # SQLite's own change detector: the file change counter lives in the
+    # 100-byte header (offset 24) and moves on every committed write.
+    try:
+        with open(db, "rb") as handle:
+            header = handle.read(100)
+    except FileNotFoundError:
+        header = b""
+    except OSError:
+        return None
+    return (tuple(signatures), header), newest
+
+
 def _external_surface_catalog() -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+    global _external_catalog_cache
+    inputs = _external_catalog_token()
+    if inputs is not None:
+        with _external_catalog_lock:
+            cached = _external_catalog_cache
+        if cached is not None and cached[0] == inputs[0]:
+            return deepcopy(cached[1])
     try:
         from tools.external_mcp_surface import current_external_tools, list_external_surface
         catalog = list_external_surface()
         visible = tuple(current_external_tools(catalog))
-        return catalog, visible
     except Exception:
         return [], ()
+    if inputs is not None and catalog:
+        token, newest = inputs
+        age = time.time_ns() - newest
+        # The token was taken before the build, so a write during the build can
+        # only make the next lookup miss. A recent (or future) timestamp may
+        # not distinguish two writes: do not store.
+        if _EXTERNAL_CATALOG_RACY_NS <= age:
+            with _external_catalog_lock:
+                _external_catalog_cache = (token, deepcopy((catalog, visible)))
+    return catalog, visible
 
 
 def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
@@ -533,7 +619,11 @@ def _surface_snapshot() -> dict[str, Any]:
     )
     visible_states = {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON}
     try:
-        states = {cid: read_capability_state(cid) for cid in all_capability_ids}
+        state_reader = CapabilityStateReader()
+        states = {
+            cid: read_capability_state(cid, reader=state_reader)
+            for cid in all_capability_ids
+        }
         if any(state not in {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON, RUNTIME_STATE_OFF, RUNTIME_STATE_DENY} for state in states.values()):
             raise CapabilityStateError("runtime capability state is invalid")
         status = "OK"
