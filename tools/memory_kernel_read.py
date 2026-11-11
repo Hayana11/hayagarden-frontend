@@ -54,9 +54,40 @@ def posts_db_of(conn: sqlite3.Connection) -> Path | None:
     return None
 
 
-def norm(text: Any) -> str:
-    folded = unicodedata.normalize("NFKC", re.sub(r"\[\[|\]\]", "", str(text or ""))).lower()
+def _norm_uncached(text: str) -> str:
+    folded = unicodedata.normalize("NFKC", re.sub(r"\[\[|\]\]", "", text)).lower()
     return "".join(ch for ch in folded if ch.isalnum())
+
+
+# norm() is a pure function of its text, and every recall re-normalises every
+# non-memory post (non_memory_norms) plus every candidate memory (dedupe), mostly
+# the same texts as the previous recall. Results are memoised under the exact text,
+# so a changed post is a different key and is recomputed; nothing here decides
+# whether a post changed. Bounded: FIFO eviction, and very long texts bypass it.
+_NORM_MEMO: dict[str, str] = {}
+_NORM_MEMO_LOCK = threading.Lock()
+_NORM_MEMO_MAX_ENTRIES = 20_000
+_NORM_MEMO_MAX_TEXT_CHARS = 20_000
+
+
+def norm(text: Any) -> str:
+    text = str(text or "")
+    if len(text) > _NORM_MEMO_MAX_TEXT_CHARS:
+        return _norm_uncached(text)
+    cached = _NORM_MEMO.get(text)
+    if cached is not None:
+        return cached
+    value = _norm_uncached(text)
+    with _NORM_MEMO_LOCK:
+        if len(_NORM_MEMO) >= _NORM_MEMO_MAX_ENTRIES:
+            del _NORM_MEMO[next(iter(_NORM_MEMO))]
+        _NORM_MEMO[text] = value
+    return value
+
+
+def clear_norm_memo() -> None:
+    with _NORM_MEMO_LOCK:
+        _NORM_MEMO.clear()
 
 
 def _tags(value: Any) -> list[str]:
