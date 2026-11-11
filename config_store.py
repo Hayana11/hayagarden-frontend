@@ -13,6 +13,8 @@ config_store.py
 """
 import os
 import sqlite3
+import threading
+import time
 
 DB_PATH = os.getenv('HAYAGARDEN_CONFIG_DB_PATH', '/opt/frontend/memories.db')
 ENV_PATH = os.getenv('HAYAGARDEN_ENV_PATH', '/opt/frontend/.env')
@@ -111,27 +113,143 @@ def _init_table():
 _init_table()
 
 
+# ---- .env fallback ------------------------------------------------------------
+# The legacy .env value is only consulted when the DB has no row for a key, which
+# for most keys is every call. Re-reading the file each time is pure waste while it
+# is unchanged, so its parsed content is cached under the file's identity and
+# change signature (dev, ino, size, mtime_ns, ctime_ns; ctime cannot be forged).
+# A file modified within the last _ENV_RACY_NS may not yet have distinguishable
+# timestamps, so it is re-read every call until it is older than that.
+_ENV_RACY_NS = 2_000_000_000
+_env_cache = None  # (signature, {NAME: value})
+_env_cache_lock = threading.Lock()
+
+
+def _env_values():
+    """{NAME: value} as the per-key scan used to find them (last assignment wins).
+
+    A line counts for NAME when, stripped, it starts with ``NAME=`` - i.e. NAME
+    is the text before the first ``=`` - and the value is what follows, stripped.
+    An unreadable file yields what was parsed before the failure, as before.
+    """
+    global _env_cache
+    try:
+        st = os.stat(ENV_PATH)
+    except Exception:
+        return {}
+    signature = (
+        ENV_PATH, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+    with _env_cache_lock:
+        cached = _env_cache
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    values = {}
+    complete = True
+    try:
+        with open(ENV_PATH) as handle:
+            for ln in handle:
+                name, separator, rest = ln.strip().partition('=')
+                if separator:
+                    values[name] = rest.strip()
+    except Exception:
+        complete = False
+    # The signature was taken before reading, so a write during the read can only
+    # make the next lookup miss.
+    if complete and time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) >= _ENV_RACY_NS:
+        with _env_cache_lock:
+            _env_cache = (signature, values)
+    return values
+
+
 def _read_env_fallback(key):
     env_key = _ENV_FALLBACK_KEYS.get(key)
     if not env_key:
         return None
-    result = None
+    return _env_values().get(env_key)
+
+
+# ---- DB reads -------------------------------------------------------------------
+# get() must reflect a write the moment it is committed (no TTL, no value cache),
+# so every call still runs its own SELECT. Only the connection is reused: one
+# per thread, query-only, in autocommit with its cursor closed after each read so
+# it never holds a read transaction between calls. It is replaced whenever the
+# thing it points at could differ - another path, another file (dev/ino), or
+# another process after fork - and any failure other than a lock timeout is
+# answered by the one-shot connection path, exactly as before.
+_CONNECT_TIMEOUT = 3
+_thread_state = threading.local()
+_forked_orphans = []  # connections inherited across fork() are never closed
+
+
+def _discard_thread_connection():
+    held = getattr(_thread_state, 'held', None)
+    _thread_state.held = None
+    if held is None:
+        return
+    (pid, _identity), conn = held
+    if pid != os.getpid():
+        _forked_orphans.append(conn)
+        return
     try:
-        for ln in open(ENV_PATH):
-            ln = ln.strip()
-            if ln.startswith(env_key + '='):
-                result = ln.split('=', 1)[1].strip()  # 后出现的行覆盖前面的，与其余 .env 解析处一致
+        conn.close()
     except Exception:
         pass
-    return result
+
+
+def _thread_connection():
+    try:
+        st = os.stat(DB_PATH)
+    except OSError:
+        _discard_thread_connection()
+        return None  # missing file: the one-shot path behaves exactly as before
+    token = (os.getpid(), (DB_PATH, st.st_dev, st.st_ino))
+    held = getattr(_thread_state, 'held', None)
+    if held is not None and held[0] == token:
+        return held[1]
+    _discard_thread_connection()
+    conn = sqlite3.connect(DB_PATH, timeout=_CONNECT_TIMEOUT)
+    try:
+        conn.execute('PRAGMA query_only = ON')
+    except Exception:
+        conn.close()
+        raise
+    _thread_state.held = (token, conn)
+    return conn
+
+
+def _select_row_one_shot(key):
+    conn = sqlite3.connect(DB_PATH, timeout=_CONNECT_TIMEOUT)
+    try:
+        return conn.execute('SELECT value FROM runtime_config WHERE key=?', (key,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _select_row(key):
+    try:
+        conn = _thread_connection()
+        if conn is None:
+            return _select_row_one_shot(key)
+        cursor = conn.execute('SELECT value FROM runtime_config WHERE key=?', (key,))
+        try:
+            return cursor.fetchone()
+        finally:
+            cursor.close()
+    except sqlite3.OperationalError as exc:
+        _discard_thread_connection()
+        message = str(exc).lower()
+        if 'locked' in message or 'busy' in message:
+            raise  # the same timeout the one-shot path would have waited out
+    except Exception:
+        _discard_thread_connection()
+    return _select_row_one_shot(key)
 
 
 def get(key, default=None):
     """读运行时配置。DB 有值 > .env 迁移期兜底 > default 参数 > 内置默认值。"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=3)
-        row = conn.execute('SELECT value FROM runtime_config WHERE key=?', (key,)).fetchone()
-        conn.close()
+        row = _select_row(key)
         if row is not None:
             return row[0]
     except Exception:
