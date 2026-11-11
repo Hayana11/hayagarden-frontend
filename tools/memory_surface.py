@@ -241,6 +241,19 @@ def query_text(text: str) -> str:
     return _PASTED.sub(" ", str(text or ""))[:QUERY_CHARS]
 
 
+def _chat_frequency_sql(
+    conn: sqlite3.Connection, words: list[str], args: tuple[int, int],
+) -> tuple[dict[str, int], int]:
+    recent = "SELECT id, content FROM chat_messages WHERE id != ? ORDER BY id DESC LIMIT ?"
+    total = int(conn.execute(f"SELECT COUNT(*) FROM ({recent})", args).fetchone()[0] or 0)
+    out = {}
+    for word in words:
+        out[word] = int(conn.execute(
+            f"SELECT COUNT(*) FROM ({recent}) WHERE instr(lower(content), ?) > 0", (*args, word),
+        ).fetchone()[0] or 0)
+    return out, total
+
+
 def chat_frequency(
     conn: sqlite3.Connection, words: list[str], *, exclude_message_id: int,
     window: int = CHAT_DF_WINDOW,
@@ -249,16 +262,36 @@ def chat_frequency(
 
     The message being answered is already stored when Daily decides; counting it
     would make every word she just said look seen at least once.
+
+    The window is read once and every word is counted in Python, on the raw
+    UTF-8 bytes SQLite stores: bytes.lower() lowers ASCII letters only, which is
+    what SQLite's lower() does, and a byte substring search is what instr() does.
+    The SQL form scanned the window once per word. Content whose SQLite semantics
+    are not plain text matching (non-text storage classes, NUL bytes) and non-str
+    or NUL-bearing words are answered by that SQL form, so the result is the same
+    for every input.
     """
-    recent = "SELECT id, content FROM chat_messages WHERE id != ? ORDER BY id DESC LIMIT ?"
     args = (int(exclude_message_id), int(window))
-    total = int(conn.execute(f"SELECT COUNT(*) FROM ({recent})", args).fetchone()[0] or 0)
+    rows = conn.execute(
+        "SELECT typeof(content), CAST(content AS BLOB) FROM chat_messages "
+        "WHERE id != ? ORDER BY id DESC LIMIT ?", args,
+    ).fetchall()
+    if (
+        any(row[0] not in ("text", "null") or (row[1] is not None and b"\x00" in row[1])
+            for row in rows)
+        or any(type(word) is not str or "\x00" in word for word in words)
+    ):
+        return _chat_frequency_sql(conn, words, args)
+    try:
+        needles = {word: word.encode("utf-8") for word in words}
+    except UnicodeError:  # e.g. a lone surrogate: let SQLite raise exactly as before
+        return _chat_frequency_sql(conn, words, args)
+    lowered = [row[1].lower() for row in rows if row[1] is not None]
     out = {}
     for word in words:
-        out[word] = int(conn.execute(
-            f"SELECT COUNT(*) FROM ({recent}) WHERE instr(lower(content), ?) > 0", (*args, word),
-        ).fetchone()[0] or 0)
-    return out, total
+        needle = needles[word]
+        out[word] = sum(1 for text in lowered if needle in text)
+    return out, len(rows)
 
 
 def entry_gate(text: str) -> Optional[str]:
