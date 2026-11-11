@@ -39,10 +39,18 @@ from continuity.store import (
 ShadowStatus = Literal['ready', 'blocked', 'failed']
 ChunkSurface = Literal['ready', 'empty', 'unavailable']
 
+# Columns the continuity source derivation reads. ``thinking`` is deliberately
+# absent: provider-visible evidence never includes it (see continuity.sources),
+# and it is the largest column of an assistant row.
 _SOURCE_COLUMNS = (
-    'id, author, content, thinking, created_at, tool_calls, branches, branch_idx, '
+    'id, author, content, created_at, tool_calls, branches, branch_idx, '
     'cache_info, source_kind, attachments, image_url, file_url, file_name'
 )
+# The schema contract is unchanged: chat_messages must still carry ``thinking``
+# even though no continuity reader selects it.
+_REQUIRED_SOURCE_SCHEMA_COLUMNS = frozenset(
+    item.strip() for item in _SOURCE_COLUMNS.split(',')
+) | {'thinking'}
 
 _SOURCE_TABLE = 'chat_messages'
 _MESSAGE_CONTEXT_TABLE = 'daily_message_contexts'
@@ -228,7 +236,7 @@ def _check_source_schema(conn: sqlite3.Connection) -> None:
         str(row[1])
         for row in conn.execute(f'PRAGMA table_info({_SOURCE_TABLE})').fetchall()
     }
-    required = frozenset(item.strip() for item in _SOURCE_COLUMNS.split(','))
+    required = _REQUIRED_SOURCE_SCHEMA_COLUMNS
     missing = required - columns
     if missing:
         raise sqlite3.OperationalError(
