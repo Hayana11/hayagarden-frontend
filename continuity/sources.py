@@ -57,7 +57,7 @@ _SOURCE_DERIVATION_CACHE_LOCK = threading.RLock()
 # The lookup key is these raw values compared exactly, so a hit never needs
 # JSON parsing, canonical serialization or hashing. A column added to any of
 # those readers must be added here, otherwise a change to it would hit a stale
-# derivation (tests/test_continuity_ready_surface_cache.py covers every column).
+# derivation (tests/test_continuity_source_derivation_key.py covers every column).
 _SOURCE_ROW_KEY_COLUMNS = (
     'id',
     'author',
