@@ -96,6 +96,8 @@ _DEFAULTS = {
     'HIDDEN_FLOW_OBSERVABILITY_ENABLED': '0',
     'HIDDEN_FLOW_OBSERVABILITY_MAX_EVENTS_PER_MINUTE': '120',
     'HIDDEN_FLOW_OBSERVABILITY_RETENTION_DAYS': '7',
+    # Read-only start-up warm-up of the Continuity / memory caches (continuity.prewarm).
+    'CONTINUITY_PREWARM_ENABLED': '1',
 }
 
 

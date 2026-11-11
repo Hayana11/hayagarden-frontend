@@ -12302,5 +12302,15 @@ app.register_blueprint(
 )
 
 
+# Warm the process-local Continuity / memory caches shortly after a gunicorn worker
+# starts, so the first hot turn after a deploy does not pay for them. Read-only, one
+# daemon thread, one run per process; a no-op for tests, scripts and `python gateway.py`.
+try:
+    from continuity import prewarm as _continuity_prewarm
+    _continuity_prewarm.start(db_path=DB_PATH)
+except Exception:
+    logging.getLogger('gateway').warning('[PREWARM] could not be started', exc_info=True)
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5051, debug=False)
