@@ -3044,7 +3044,9 @@ def _hot_live_identity_decision(
     if live_provider and expected_provider and live_provider != expected_provider:
         return 'RESPAWN', 'live_provider_identity_mismatch', None
     expected_system_hash = str(
-        plan.manifest.get('static_system_sha256') or ''
+        plan.manifest.get('effective_static_system_sha256')
+        or plan.manifest.get('static_system_sha256')
+        or ''
     ).strip()
     live_system = str(
         getattr(resident, 'system_text', None)
@@ -8388,6 +8390,12 @@ def ensure_resident_and_stream(
         # Generation/session door-lock: before ensure_alive (spawn) and stdin.
         door = peek_registered_respawn_decision(plan, resident, static_system)
         effective_system = str(door.get('effective_system') or static_system)
+        # A capacity_swap generation runs with SYSTEM_SUFFIX_V1 appended, so
+        # the live identity check must compare against this effective text,
+        # not the pre-suffix static_system_sha256.
+        plan.manifest['effective_static_system_sha256'] = _sha256_text(
+            effective_system
+        )
         if door.get('requires_respawn'):
             heartbeat.stop()
             if _registry_reprep_depth >= 1:

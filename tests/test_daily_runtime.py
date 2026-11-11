@@ -11515,3 +11515,56 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HotLiveSystemIdentityCapacitySuffixTests(unittest.TestCase):
+    """After a capacity swap the live resident runs base + SYSTEM_SUFFIX_V1."""
+
+    def _decide(self, manifest):
+        from chat.capacity_swap_runtime import with_capacity_boundary_suffix
+
+        base = 'STATIC SYSTEM'
+        resident = types.SimpleNamespace(
+            generation=7,
+            session_id='session-7',
+            system_text=with_capacity_boundary_suffix(base),
+        )
+        plan = types.SimpleNamespace(
+            manifest=dict(manifest),
+            context_id=1,
+            resident_generation=7,
+            db_path=None,
+            tool_profile='other',
+        )
+        binding = types.SimpleNamespace(
+            context_id=1, process_generation=7, claude_session_id='session-7',
+        )
+        with mock.patch.object(dr, 'is_epoch_token_current', return_value=True), \
+                mock.patch.object(dr, 'get_local_binding', return_value=binding), \
+                mock.patch.object(dr, '_binding_matches_plan', return_value=True), \
+                mock.patch.object(dr, '_resident_is_alive', return_value=True), \
+                mock.patch.object(dr, 'get_context_claude_session', return_value=None):
+            decision, reason, _registry = dr._hot_live_identity_decision(
+                plan, resident=resident, frozen={},
+            )
+        return base, decision, reason
+
+    def test_pre_suffix_hash_alone_reports_system_mismatch(self):
+        base = 'STATIC SYSTEM'
+        _base, decision, reason = self._decide(
+            {'static_system_sha256': dr._sha256_text(base)},
+        )
+        self.assertEqual((decision, reason), ('RESPAWN', 'live_system_identity_mismatch'))
+
+    def test_effective_hash_accepts_capacity_suffixed_resident(self):
+        from chat.capacity_swap_runtime import with_capacity_boundary_suffix
+
+        base = 'STATIC SYSTEM'
+        _base, _decision, reason = self._decide({
+            'static_system_sha256': dr._sha256_text(base),
+            'effective_static_system_sha256': dr._sha256_text(
+                with_capacity_boundary_suffix(base),
+            ),
+        })
+        self.assertNotEqual(reason, 'live_system_identity_mismatch')
+        self.assertEqual(reason, 'session_registry_missing')
