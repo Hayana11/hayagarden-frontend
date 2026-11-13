@@ -9314,6 +9314,8 @@ def chat_stream():
             _wake_claim_ids = []
             think_acc, text_acc, tool_calls_acc = [], [], []
             display_segments = DisplaySegmentAccumulator()
+            _relay_context_identity = None
+            _relay_context_meta = None
 
             def _clean_text(raw):
                 t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
@@ -9333,6 +9335,8 @@ def chat_stream():
                     elapsed_sec=round(max(0.0, time.monotonic() - stream_started_at), 3),
                     cache_supported=cache_supported,
                 )
+                if _relay_context_meta:
+                    _ci_payload['context_plan'] = dict(_relay_context_meta)
                 if api_rounds:
                     _ci_payload['v'] = 2
                     _ci_payload['provider'] = 'api_relay'
@@ -9366,6 +9370,16 @@ def chat_stream():
                     side_effects=_turn_data.get('_staged_side_effects'),
                 )
                 # Candidate durable ≠ active assistant durable.
+                if assistant_id is not None and not _rewrite_id and _relay_context_identity:
+                    try:
+                        from chat.relay_context_plan import bind_assistant as _bind_relay_context_assistant
+                        _bind_relay_context_assistant(
+                            message_id=int(assistant_id),
+                            identity=_relay_context_identity,
+                            db_path=DB_PATH,
+                        )
+                    except Exception:
+                        logging.getLogger('gateway').exception('relay ContextPlan assistant bind failed')
                 if not _rewrite_id:
                     consume_wake_ids(get_db, _wake_claim_ids)
                     _write_session_memo(_uc, _pc, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
@@ -9407,7 +9421,23 @@ def chat_stream():
                         dynamic_context = '\n\n'.join(
                             p for p in (dynamic_context, _relay_os_text) if p and str(p).strip()
                         )
-                messages = build_messages(rewrite_id=_rewrite_id or None)
+                if not _rewrite_id:
+                    from chat import relay_context_plan as _relay_context_plan
+                    if _relay_context_plan.enabled():
+                        messages, _relay_context_identity, _relay_context_meta = (
+                            _relay_context_plan.build_messages(
+                                user_message_id=int(_turn_data.get('user_message_id') or 0),
+                                db_path=DB_PATH,
+                                system=system,
+                                static_dir=STATIC_DIR,
+                                read_file_fn=_read_upload_file_body,
+                                img_block_fn=img_block,
+                            )
+                        )
+                    else:
+                        messages = build_messages()
+                else:
+                    messages = build_messages(rewrite_id=_rewrite_id)
                 _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
                 if _recall:
                     yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
@@ -9735,6 +9765,16 @@ def chat_stream():
 
                             side_effects=_turn_data.get('_staged_side_effects'),
                         )
+                        if assistant_id is not None and not _rewrite_id and _relay_context_identity:
+                            try:
+                                from chat.relay_context_plan import bind_assistant as _bind_relay_context_assistant
+                                _bind_relay_context_assistant(
+                                    message_id=int(assistant_id),
+                                    identity=_relay_context_identity,
+                                    db_path=DB_PATH,
+                                )
+                            except Exception:
+                                logging.getLogger('gateway').exception('relay ContextPlan assistant bind failed')
                         if assistant_id is not None:
                             try:
                                 from moments_persistence import after_assistant_persisted

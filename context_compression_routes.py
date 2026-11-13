@@ -112,9 +112,24 @@ def _provider_registry() -> dict[str, Any]:
         'id': 'default', 'label': 'Claude Code 默认模型', 'enabled': runtime_enabled,
         'disabled_reason': None if runtime_enabled else 'Claude Code runtime 不可用',
     })
+    relay_models = []
+    try:
+        from relay.manager import resolve_active_relay_model_identity
+        relay_model = str(resolve_active_relay_model_identity() or '').strip()
+        if relay_model:
+            relay_models.append({
+                'id': relay_model, 'label': relay_model, 'enabled': True,
+                'disabled_reason': None,
+            })
+    except Exception:
+        relay_model = ''
+    relay_enabled = bool(relay_models)
     return {'providers': [
         {'id': 'claude_code', 'label': 'Claude', 'enabled': runtime_enabled,
          'disabled_reason': None if runtime_enabled else 'Claude Code runtime 不可用', 'models': models},
+        {'id': 'api_relay', 'label': 'API Relay', 'enabled': relay_enabled,
+         'disabled_reason': None if relay_enabled else '当前 API Relay 模型不可用',
+         'models': relay_models},
         {'id': 'gpt', 'label': 'GPT', 'enabled': False,
          'disabled_reason': '暂未接入连续压缩任务', 'models': []},
         {'id': 'deepseek', 'label': 'DeepSeek', 'enabled': False,
@@ -267,24 +282,37 @@ def create_context_compression_blueprint(
             return _json_error('invalid_settings', 400)
         provider = str(payload.get('provider') or '').strip().lower()
         model = str(payload.get('model') or '').strip()
-        if provider != 'claude_code':
+        if provider not in ('claude_code', 'api_relay'):
             return _json_error('compression_provider_unavailable', 400)
-        if model == 'default':
-            provider_entry = next(
-                (row for row in _provider_registry()['providers'] if row['id'] == provider), None
-            )
-            default_entry = next(
-                (row for row in (provider_entry or {}).get('models', ()) if row['id'] == 'default'), None
-            )
-            if not provider_entry or not provider_entry['enabled'] or not default_entry or not default_entry['enabled']:
-                return _json_error('compression_model_unavailable', 400)
+        frozen_model_identity = ''
+        if provider == 'claude_code':
+            if model == 'default':
+                provider_entry = next(
+                    (row for row in _provider_registry()['providers'] if row['id'] == provider), None
+                )
+                default_entry = next(
+                    (row for row in (provider_entry or {}).get('models', ()) if row['id'] == 'default'), None
+                )
+                if not provider_entry or not provider_entry['enabled'] or not default_entry or not default_entry['enabled']:
+                    return _json_error('compression_model_unavailable', 400)
+                frozen_model_identity = 'default'
+            else:
+                from chat.cc_model import cc_model_runtime_compatibility, is_allowed_cc_model
+                if not is_allowed_cc_model(model) or not re.fullmatch(r'claude-[a-z0-9]+(?:-[a-z0-9]+)*', model):
+                    return _json_error('compression_model_invalid', 400)
+                compatible, _requirement = cc_model_runtime_compatibility(model)
+                if not compatible:
+                    return _json_error('compression_model_unavailable', 400)
+                frozen_model_identity = 'explicit:' + model
         else:
-            from chat.cc_model import cc_model_runtime_compatibility, is_allowed_cc_model
-            if not is_allowed_cc_model(model) or not re.fullmatch(r'claude-[a-z0-9]+(?:-[a-z0-9]+)*', model):
-                return _json_error('compression_model_invalid', 400)
-            compatible, _requirement = cc_model_runtime_compatibility(model)
-            if not compatible:
+            try:
+                from relay.manager import resolve_active_relay_model_identity
+                active_relay_model = str(resolve_active_relay_model_identity() or '').strip()
+            except Exception:
+                active_relay_model = ''
+            if not active_relay_model or model != active_relay_model:
                 return _json_error('compression_model_unavailable', 400)
+            frozen_model_identity = active_relay_model
         from continuity.settings import save_revision, sealing_policy_for_revision
         try:
             authority = _load_settings_authority(db_path)
@@ -310,7 +338,7 @@ def create_context_compression_blueprint(
             write.execute('PRAGMA busy_timeout=10000')
             try:
                 frozen_payload = dict(payload)
-                frozen_payload['model_identity'] = 'default' if model == 'default' else 'explicit:' + model
+                frozen_payload['model_identity'] = frozen_model_identity
                 save_revision(
                     write, frozen_payload,
                     current_block=block,
