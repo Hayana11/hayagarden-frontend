@@ -66,6 +66,7 @@ def _init_chat_messages(db_path: str):
             image_url TEXT DEFAULT '',
             cache_info TEXT DEFAULT '',
             choices TEXT DEFAULT '',
+            display_segments TEXT DEFAULT '',
             source_kind TEXT NOT NULL DEFAULT 'chat',
             created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         )'''
@@ -959,7 +960,7 @@ class GatewayFlagOffGoldenTests(unittest.TestCase):
         conn = sqlite3.connect(':memory:')
         conn.execute(
             'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
-            'thinking TEXT, tool_calls TEXT, cache_info TEXT, choices TEXT)'
+            'thinking TEXT, tool_calls TEXT, cache_info TEXT, choices TEXT, display_segments TEXT)'
         )
         patches = [
             mock.patch.object(config_store, 'get_bool', return_value=False),
@@ -969,6 +970,9 @@ class GatewayFlagOffGoldenTests(unittest.TestCase):
             mock.patch.object(gateway, '_stream_cc_daily_soft_window', side_effect=_daily_stream),
             mock.patch.object(gateway, '_CC_RESIDENT', _LegacyResident()),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch('gateway._gen_release'),
             mock.patch('gateway.build_messages', return_value=[]),
@@ -1774,6 +1778,9 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             mock.patch('chat.daily_context.enabled', return_value=True),
             mock.patch.object(gateway, 'DB_PATH', db),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch.object(gateway, '_gen_release', side_effect=_track_gen_release),
             mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
@@ -1796,6 +1803,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway.get_db', return_value=sqlite3.connect(db)),
         ]
         if stream_impl is not None:
@@ -1904,7 +1912,9 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                      'persona': 'P', 'full_system': 'STATIC',
                  }), \
                  mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real), \
-                 mock.patch.object(gateway, '_CC_RESIDENT', resident):
+                 mock.patch.object(gateway, '_CC_RESIDENT', resident), \
+                 mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False), \
+                 mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False):
                 gen = gateway._stream_cc_daily_soft_window({'user_message_id': uid}, 'gen-close')
                 _ = next(gen)
                 gen.close()
@@ -2042,6 +2052,9 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
             mock.patch('chat.daily_context.enabled', return_value=True),
             mock.patch.object(gateway, 'DB_PATH', db),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
             mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
@@ -2069,6 +2082,7 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway.get_db', return_value=sqlite3.connect(db)),
         ]
         return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
@@ -2277,6 +2291,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(config_store, 'get_bool', return_value=True),
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
                 mock.patch(
                     'chat.system_builder.build_cc_daily_static_parts',
                     return_value={'persona': 'P', 'full_system': 'STATIC'},
@@ -2378,6 +2394,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(config_store, 'get_bool', return_value=True),
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
                 mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
@@ -2463,6 +2481,9 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
                 mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+                mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
                 mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
                 mock.patch.object(gateway, '_gen_release', side_effect=_track_gen_release),
                 mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),

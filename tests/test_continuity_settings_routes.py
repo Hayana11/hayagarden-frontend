@@ -39,6 +39,7 @@ class ContinuitySettingsRouteTests(unittest.TestCase):
         self.client = self.app.test_client()
         self.patches = [
             patch("chat.cc_model.get_cc_model_catalog", return_value=CATALOG),
+            patch("relay.manager.resolve_active_relay_model_identity", return_value="claude-opus-5-5"),
             patch("continuity.settings._persona_from_runtime", return_value=PERSONA),
             # Existing success-path tests model an authenticated same-origin owner.
             patch("context_compression_routes.require_owner", return_value=None),
@@ -175,7 +176,46 @@ class ContinuitySettingsRouteTests(unittest.TestCase):
         ])
         self.assertTrue(claude["models"][1]["enabled"])
         self.assertFalse(claude["models"][2]["enabled"])
-        self.assertNotIn("api_relay", [row["id"] for row in registry["providers"]])
+        relay = next(row for row in registry["providers"] if row["id"] == "api_relay")
+        self.assertTrue(relay["enabled"])
+        self.assertEqual([row["id"] for row in relay["models"]], ["claude-opus-5-5"])
+
+
+    def test_unknown_api_relay_model_is_disabled_and_cannot_be_saved(self):
+        from context_compression_routes import _provider_registry
+
+        with patch("relay.manager.resolve_active_relay_model_identity", return_value="unknown"):
+            registry = _provider_registry()
+            relay = next(row for row in registry["providers"] if row["id"] == "api_relay")
+            self.assertFalse(relay["enabled"])
+            self.assertEqual(relay["models"], [])
+
+            before = self._revision_count()
+            response = self.client.post("/dash/__continuity/settings", json={
+                "length": 16000, "turns": 30, "provider": "api_relay",
+                "model": "unknown", "prompt": "relay compression prompt",
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "compression_model_unavailable")
+        self.assertEqual(self._revision_count(), before)
+
+    def test_save_api_relay_uses_exact_active_relay_model_identity(self):
+        current = {
+            "available": True, "source_count": 1, "source_refs": ["turn:1"],
+            "source_revisions": ["rev:1"], "context_id": 7,
+            "context_epoch": 3, "materialization_error": None,
+        }
+        with patch("context_compression_routes.get_current", return_value=current):
+            response = self.client.post("/dash/__continuity/settings", json={
+                "length": 16000, "turns": 30, "provider": "api_relay",
+                "model": "claude-opus-5-5", "prompt": "relay compression prompt",
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        authority = self._authority()
+        self.assertEqual(authority["pending_revision"]["provider"], "api_relay")
+        self.assertEqual(
+            authority["pending_revision"]["model_identity"], "claude-opus-5-5"
+        )
 
     def test_save_with_open_source_tail_keeps_current_active_and_sets_pending(self):
         current = {

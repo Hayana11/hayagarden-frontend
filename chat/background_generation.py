@@ -20,8 +20,7 @@ if TYPE_CHECKING:
 class BackgroundGenerationRequest:
     system_text: str
     prompt_text: str
-    # Best-effort output budget: Relay applies it as a hard max_tokens ceiling;
-    # the pinned Claude Code CLI has no equivalent hard output-token flag.
+    # Best-effort output budget; the pinned Claude Code CLI has no hard output-token flag.
     max_tokens_hint: int
     timeout_sec: float
     task_kind: str = ''
@@ -98,29 +97,39 @@ def _generate_claude_code(
     authority: GenerationAuthoritySnapshot,
     *,
     token_getter: Callable[[], str] | None,
+    relay_factory: Callable[[], Any] | None,
 ) -> BackgroundGenerationResult:
-    if token_getter is None:
-        raise BackgroundGenerationError('cc_background_token_getter_required')
-    try:
-        token = str(token_getter() or '').strip()
-    except Exception as exc:
-        raise BackgroundGenerationError('cc_background_token_unavailable') from exc
-    if not token:
-        raise BackgroundGenerationError('cc_background_token_unavailable')
-
+    from chat.cc_auth import CCProviderEnvError, build_cc_provider_env
     from chat.cc_model import cc_model_args_from_identity, cc_model_from_identity
     from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, repo_root, require_managed_claude_runtime
 
-    try:
-        expected_model = cc_model_from_identity(authority.model_identity)
-        model_args = cc_model_args_from_identity(authority.model_identity)
-    except ValueError as exc:
-        raise BackgroundGenerationError('cc_background_invalid_model_identity') from exc
+    if authority.provider == 'api_relay':
+        expected_model = str(authority.model_identity or '').strip()
+        if expected_model.startswith('explicit:'):
+            expected_model = expected_model[len('explicit:'):].strip()
+        if not expected_model or expected_model.lower() == 'unknown':
+            raise BackgroundGenerationError('api_relay_model_unavailable')
+        model_args = ['--model', expected_model]
+    else:
+        try:
+            expected_model = cc_model_from_identity(authority.model_identity)
+            model_args = cc_model_args_from_identity(authority.model_identity)
+        except ValueError as exc:
+            raise BackgroundGenerationError('cc_background_invalid_model_identity') from exc
 
+    try:
+        env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=token_getter,
+            relay_factory=relay_factory,
+        )
+    except CCProviderEnvError as exc:
+        raise BackgroundGenerationError(str(exc)) from exc
+
+    env.pop('HAYAGARDEN_CC_PROVIDER', None)
+    env.pop('HAYAGARDEN_CC_PROVIDER_IDENTITY', None)
     root = repo_root()
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = token
-    env.pop('ANTHROPIC_API_KEY', None)
     try:
         runtime_version = require_managed_claude_runtime(
             env=env,
@@ -177,56 +186,10 @@ def _generate_claude_code(
         usage['actual_init_model'] = terminal.init_model
     return BackgroundGenerationResult(
         text=(terminal.result_text or terminal.delta_text).strip(),
-        provider='claude_code',
+        provider=authority.provider,
         model_identity=authority.model_identity,
         actual_executor='claude_code_background_oneshot',
         usage=usage or None,
-    )
-
-
-def _generate_api_relay(
-    request: BackgroundGenerationRequest,
-    authority: GenerationAuthoritySnapshot,
-    *,
-    relay_factory: Callable[[], Any] | None,
-) -> BackgroundGenerationResult:
-    model = str(authority.model_identity or '').strip()
-    if not model or model == 'unknown':
-        raise BackgroundGenerationError('relay_background_unknown_model')
-    if relay_factory is None:
-        from relay.manager import RelayManager
-        relay_factory = RelayManager
-    try:
-        manager = relay_factory()
-        response = manager.call(
-            {
-                'model': model,
-                'max_tokens': int(request.max_tokens_hint),
-                'system': request.system_text,
-                'messages': [{'role': 'user', 'content': request.prompt_text}],
-            },
-            timeout=float(request.timeout_sec),
-            use_ws_model=False,
-        )
-    except Exception as exc:
-        raise BackgroundGenerationError('relay_background_failed:%s' % exc) from exc
-    if not isinstance(response, dict):
-        raise BackgroundGenerationError('relay_background_invalid_response')
-    response_model = str(response.get('model') or '').strip()
-    if response_model and response_model != model:
-        raise BackgroundGenerationError('relay_background_model_mismatch')
-    try:
-        text = str(manager.extract_text(response) or '')
-    except Exception as exc:
-        raise BackgroundGenerationError('relay_background_text_extract_failed') from exc
-    raw_usage = response.get('usage')
-    usage = dict(raw_usage) if isinstance(raw_usage, dict) else None
-    return BackgroundGenerationResult(
-        text=text,
-        provider='api_relay',
-        model_identity=authority.model_identity,
-        actual_executor='api_relay_background',
-        usage=usage,
     )
 
 
@@ -238,8 +201,11 @@ def generate_background(
     relay_factory: Callable[[], Any] | None = None,
 ) -> BackgroundGenerationResult:
     """Generate from the explicitly supplied frozen authority only."""
-    if authority.provider == 'claude_code':
-        return _generate_claude_code(request, authority, token_getter=cc_token_getter)
-    if authority.provider == 'api_relay':
-        return _generate_api_relay(request, authority, relay_factory=relay_factory)
-    raise BackgroundGenerationError('background_unknown_provider:%s' % authority.provider)
+    if authority.provider not in ('claude_code', 'api_relay'):
+        raise BackgroundGenerationError('background_unknown_provider:%s' % authority.provider)
+    return _generate_claude_code(
+        request,
+        authority,
+        token_getter=cc_token_getter,
+        relay_factory=relay_factory,
+    )

@@ -36,9 +36,11 @@ REQUEST = BackgroundGenerationRequest(
 
 
 class FakeRelayManager:
-    def __init__(self, response=None, error=None):
+    def __init__(self, response=None, error=None, api_url='https://relay.example/v1/messages', api_key='fake-relay-key'):
         self.response = response or {'content': [{'type': 'text', 'text': 'relay output'}]}
         self.error = error
+        self.api_url = api_url
+        self.api_key = api_key
         self.calls = []
 
     def call(self, payload, **kwargs):
@@ -231,61 +233,66 @@ class BackgroundGenerationTests(unittest.TestCase):
         for isolated_from in ('CLAUDE.md', 'skills', 'plugins', 'hooks', 'mcp-config', 'agents'):
             self.assertNotIn(isolated_from, source)
 
-    def test_relay_uses_frozen_model_and_transparent_payload(self):
-        manager = FakeRelayManager({'model': 'model-A', 'content': [{'type': 'text', 'text': 'ok'}]})
-        generate_background(
-            REQUEST,
-            GenerationAuthoritySnapshot('api_relay', 'model-A'),
-            relay_factory=lambda: manager,
-        )
-        payload, kwargs = manager.calls[0]
-        self.assertEqual(payload, {
-            'model': 'model-A',
-            'max_tokens': 321,
-            'system': 'SYSTEM-X',
-            'messages': [{'role': 'user', 'content': 'PROMPT-Y'}],
-        })
-        self.assertEqual(kwargs, {'timeout': 12.0, 'use_ws_model': False})
-
-    def test_relay_unknown_model_fails_before_manager_creation(self):
-        factory = mock.Mock()
-        with self.assertRaisesRegex(BackgroundGenerationError, 'unknown_model'):
-            generate_background(
+    def test_api_relay_runs_managed_cc_with_frozen_gateway_environment(self):
+        manager = FakeRelayManager()
+        stdout = '\n'.join((
+            '{"type":"system","subtype":"init","model":"model-A"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"cc gateway output","usage":{"input_tokens":2}}',
+        ))
+        token_getter = mock.Mock(return_value='subscription-token-must-not-be-used')
+        with self._cc_runtime(), self._cc_run(stdout) as run:
+            result = generate_background(
                 REQUEST,
-                GenerationAuthoritySnapshot('api_relay', 'unknown'),
-                relay_factory=factory,
-            )
-        factory.assert_not_called()
-
-    def test_relay_failure_never_calls_cc(self):
-        token_getter = mock.Mock(return_value='fake-token')
-        manager = FakeRelayManager(error=RuntimeError('relay down'))
-        with self.assertRaisesRegex(BackgroundGenerationError, 'relay_background_failed'):
-            generate_background(
-                REQUEST,
-                GenerationAuthoritySnapshot('api_relay', 'model-A'),
-                relay_factory=lambda: manager,
+                GenerationAuthoritySnapshot('api_relay', 'explicit:model-A'),
                 cc_token_getter=token_getter,
-            )
-        token_getter.assert_not_called()
-
-    def test_relay_response_model_mismatch_fails_closed(self):
-        manager = FakeRelayManager({'model': 'model-B', 'content': []})
-        with self.assertRaisesRegex(BackgroundGenerationError, 'model_mismatch'):
-            generate_background(
-                REQUEST,
-                GenerationAuthoritySnapshot('api_relay', 'model-A'),
                 relay_factory=lambda: manager,
             )
-
-    def test_relay_provenance_uses_snapshot_not_response(self):
-        manager = FakeRelayManager({'content': [{'type': 'text', 'text': 'ok'}], 'usage': {'output_tokens': 2}})
-        authority = GenerationAuthoritySnapshot('api_relay', 'model-A')
-        result = generate_background(REQUEST, authority, relay_factory=lambda: manager)
+        argv = run.call_args.args[0]
+        env = run.call_args.kwargs['env']
+        self.assertIn('-p', argv)
+        self.assertEqual(argv[argv.index('--model') + 1], 'model-A')
+        self.assertEqual(env['ANTHROPIC_BASE_URL'], 'https://relay.example')
+        self.assertEqual(env['ANTHROPIC_AUTH_TOKEN'], 'fake-relay-key')
+        self.assertEqual(env['ANTHROPIC_MODEL'], 'model-A')
+        self.assertEqual(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
+        self.assertEqual(env['CLAUDE_CODE_ATTRIBUTION_HEADER'], '0')
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', env)
+        self.assertNotIn('ANTHROPIC_API_KEY', env)
+        self.assertNotIn('HAYAGARDEN_CC_PROVIDER_IDENTITY', env)
+        self.assertNotIn('HAYAGARDEN_CC_PROVIDER', env)
         self.assertEqual(result.provider, 'api_relay')
-        self.assertEqual(result.model_identity, 'model-A')
-        self.assertEqual(result.actual_executor, 'api_relay_background')
-        self.assertEqual(result.usage, {'output_tokens': 2})
+        self.assertEqual(result.model_identity, 'explicit:model-A')
+        self.assertEqual(result.actual_executor, 'claude_code_background_oneshot')
+        self.assertEqual(result.text, 'cc gateway output')
+        token_getter.assert_not_called()
+        self.assertEqual(manager.calls, [])
+
+    def test_api_relay_unknown_model_fails_before_gateway_or_spawn(self):
+        factory = mock.Mock()
+        with mock.patch('chat.background_generation.subprocess.run') as run:
+            with self.assertRaisesRegex(BackgroundGenerationError, 'api_relay_model_unavailable'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('api_relay', 'unknown'),
+                    relay_factory=factory,
+                )
+        factory.assert_not_called()
+        run.assert_not_called()
+
+    def test_api_relay_model_mismatch_fails_closed(self):
+        manager = FakeRelayManager()
+        stdout = '\n'.join((
+            '{"type":"system","subtype":"init","model":"model-B"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"text"}',
+        ))
+        with self._cc_runtime(), self._cc_run(stdout):
+            with self.assertRaisesRegex(BackgroundGenerationError, 'model_mismatch'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('api_relay', 'model-A'),
+                    relay_factory=lambda: manager,
+                )
+        self.assertEqual(manager.calls, [])
 
     def test_old_cc_snapshot_survives_config_change(self):
         values = {'CHAT_PROVIDER': 'claude_code', 'CC_CHAT_MODEL': 'claude-opus-5'}
@@ -298,14 +305,23 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5')
 
     def test_old_relay_snapshot_survives_config_change(self):
-        manager = FakeRelayManager({'model': 'model-A', 'content': []})
+        manager = FakeRelayManager()
         values = {'CHAT_PROVIDER': 'api_relay'}
-        with mock.patch.object(config_store, 'get', side_effect=lambda key, default=None: values.get(key, default)), \
-                mock.patch('relay.manager.resolve_active_relay_model_identity', return_value='model-A'):
+        stdout = '\n'.join((
+            '{"type":"system","subtype":"init","model":"model-A"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"ok"}',
+        ))
+        with (
+            mock.patch.object(config_store, 'get', side_effect=lambda key, default=None: values.get(key, default)),
+            mock.patch('relay.manager.resolve_active_relay_model_identity', return_value='model-A'),
+            self._cc_runtime(),
+            self._cc_run(stdout) as run,
+        ):
             authority = capture_generation_authority()
             values.update({'CHAT_PROVIDER': 'claude_code', 'MODEL': 'model-B'})
             generate_background(REQUEST, authority, relay_factory=lambda: manager)
-        self.assertEqual(manager.calls[0][0]['model'], 'model-A')
+        self.assertEqual(run.call_args.kwargs['env']['ANTHROPIC_MODEL'], 'model-A')
+        self.assertEqual(manager.calls, [])
 
     def test_unknown_provider_fails_closed(self):
         with self.assertRaisesRegex(BackgroundGenerationError, 'unknown_provider'):

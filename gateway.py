@@ -4563,8 +4563,9 @@ def _cc_prepare(system, messages):
     prepended to the user prompt — they change every turn anyway, so
     keeping them out of the system prompt prevents cache invalidation.
     """
-    if not CC_TOKEN:
-        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
+    from chat.provider_router import capture_generation_authority
+    from chat.cc_auth import build_cc_provider_env
+    authority = capture_generation_authority()
     os.makedirs(CC_CWD, exist_ok=True)
     save_instr = (NL + NL
         + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
@@ -4604,9 +4605,11 @@ def _cc_prepare(system, messages):
             break
     _recall_blk, _ = _recall_memories(_last_user) if _last_user else ('', [])
     prompt = _recall_blk + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '') + prompt_body
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    env.pop('ANTHROPIC_API_KEY', None)
+    env = build_cc_provider_env(
+        authority.provider,
+        authority.model_identity,
+        token_getter=lambda: CC_TOKEN,
+    )
     return full_system, prompt, env
 
 CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
@@ -4665,6 +4668,23 @@ _CC_RESIDENT = _SwappableResident(
         formal_chat_continuity=True,
     )
 )
+
+
+def _retire_cc_resident_for_provider_change(provider_env):
+    resident = _CC_RESIDENT.get()
+    provider = str(provider_env.get('HAYAGARDEN_CC_PROVIDER') or 'claude_code')
+    identity = str(provider_env.get('HAYAGARDEN_CC_PROVIDER_IDENTITY') or '')
+    if (
+        identity
+        and getattr(resident, '_cc_provider_identity', None) == identity
+        and getattr(resident, '_cc_provider', 'claude_code') == provider
+    ):
+        return False
+    from chat import daily_runtime
+    daily_runtime.close_local_resident_if_bound(resident, expected_key=None)
+    resident._cc_provider = provider
+    resident._cc_provider_identity = identity or None
+    return True
 
 
 @app.route('/internal/cc-resident/history-rewrite', methods=['POST'])
@@ -4882,7 +4902,7 @@ def _cc_resident_stream_gen(
     turn_lease=None, reality_context='',
     jsonl_finality_profile='default', on_stdin_begin=None,
     on_stdin_flushed=None, on_provider_done=None,
-    diagnostic_wake_run_id=None, on_memory_recall=None,
+    diagnostic_wake_run_id=None, on_memory_recall=None, provider_env=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4927,8 +4947,6 @@ def _cc_resident_stream_gen(
     )
     from tools import cc_usage_observability as _cc_obs
 
-    if not CC_TOKEN:
-        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
     if not messages or messages[-1].get('role') != 'user':
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
@@ -4957,9 +4975,16 @@ def _cc_resident_stream_gen(
         prepared[-1] = last_message
         return prepared
 
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    env.pop('ANTHROPIC_API_KEY', None)
+    if provider_env is None:
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority(provider='claude_code')
+        provider_env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
+    env = dict(provider_env)
 
     idle_seconds_before_turn = getattr(
         _CC_RESIDENT, 'peek_idle_seconds', lambda: None
@@ -6106,6 +6131,14 @@ def _cc_stream_gen(full_system, prompt, env):
     import subprocess, threading
     from chat.cc_model import cc_model_args
     from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
+    env = dict(env)
+    model_args = (
+        ['--model', env['ANTHROPIC_MODEL']]
+        if env.get('HAYAGARDEN_CC_PROVIDER') == 'api_relay'
+        else cc_model_args()
+    )
+    env.pop('HAYAGARDEN_CC_PROVIDER', None)
+    env.pop('HAYAGARDEN_CC_PROVIDER_IDENTITY', None)
     try:
         require_pinned_claude_version(env=env, cwd=CC_CWD)
     except ClaudeRuntimeError as exc:
@@ -6123,7 +6156,7 @@ def _cc_stream_gen(full_system, prompt, env):
             '--strict-mcp-config',
             '--allowedTools', CC_ALLOWED_TOOLS,
             '--exclude-dynamic-system-prompt-sections',
-        ) + cc_model_args(),
+        ) + model_args,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
@@ -6259,9 +6292,7 @@ def claude_code_call(system, messages):
     return _cc_save_markers(text), thinking
 
 def generate_reply(system, messages, api_turn_lease=None):
-    if _get_provider() == 'claude_code':
-        return claude_code_call(system, messages)
-    return agent_loop(system, messages, api_turn_lease=api_turn_lease)
+    return claude_code_call(system, messages)
 
 def agent_loop(system, messages, max_rounds=5, api_turn_lease=None):
     from chat.response_parser import extract_text, extract_thinking, extract_tool_uses
@@ -6774,7 +6805,7 @@ def _confirmation_error(message='LEASE_MISMATCH'):
     yield _sse_json({'t': 'err', 'd': message, 'code': message})
 
 
-def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
+def _stream_cc_deferred_confirmation(request_data, *, reality_context='', provider_env=None):
     """Bridge one exact provider-deferred action through the existing lease/fence."""
     import uuid
     from tools.execution_fence import (
@@ -6827,9 +6858,16 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
         requested_capabilities=(capability_id,),
         approval_ids=(approval_id,),
     )
-    resume_env = dict(os.environ)
-    resume_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    resume_env.pop('ANTHROPIC_API_KEY', None)
+    if provider_env is None:
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority(provider='claude_code')
+        provider_env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
+    resume_env = dict(provider_env)
 
     text_acc = []
     think_acc = []
@@ -7643,6 +7681,7 @@ def _birth_chars(text):
 
 def _stream_cc_daily_soft_window(
     _turn_data, _uc, *, request_reality_context='', birth_started_at=None,
+    provider_env=None, provider_authority=None,
 ):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
     import hashlib
@@ -7796,9 +7835,17 @@ def _stream_cc_daily_soft_window(
             prepare_daily_display_thinking_plan,
         )
         _display_thinking_mode, _display_thinking_prompt = get_display_thinking_snapshot()
-        _cc_env = dict(os.environ)
-        _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-        _cc_env.pop('ANTHROPIC_API_KEY', None)
+        if provider_authority is None:
+            from chat.provider_router import capture_generation_authority
+            provider_authority = capture_generation_authority(provider='claude_code')
+        if provider_env is None:
+            from chat.cc_auth import build_cc_provider_env
+            provider_env = build_cc_provider_env(
+                provider_authority.provider,
+                provider_authority.model_identity,
+                token_getter=lambda: CC_TOKEN,
+            )
+        _cc_env = dict(provider_env)
 
         _prepared = {}
 
@@ -7819,8 +7866,8 @@ def _stream_cc_daily_soft_window(
                 persona_sha256=hashlib.sha256(
                     (static_parts.get('persona') or '').encode('utf-8'),
                 ).hexdigest(),
-                provider='claude_code',
-                model=_get_model() or '',
+                provider=provider_authority.provider,
+                model=provider_authority.model_identity,
             )
             # The Daily runtime records resident/stdin/provider lifecycle stages
             # from the plan. Keep the one logical turn recorder attached across
@@ -8559,7 +8606,8 @@ def _stream_cc_daily_soft_window(
 def chat_stream():
     birth_started_at = time.time()
     from flask import Response, stream_with_context
-    if _get_provider() == 'claude_code':
+    _chat_provider = _get_provider()
+    if _chat_provider in ('claude_code', 'api_relay'):
         def gen_cc():
             from moments_turn import (
                 prepare_turn,
@@ -8594,6 +8642,37 @@ def chat_stream():
                 request_reality_context = _normalize_reality_context(
                     _request_data.pop('reality_context', None)
                 )
+                from chat.provider_router import capture_generation_authority, ProviderConfigError
+                from chat.cc_auth import CCProviderEnvError, build_cc_provider_env
+                try:
+                    _cc_authority = capture_generation_authority(
+                        provider=_chat_provider,
+                    )
+                    _cc_env = build_cc_provider_env(
+                        _cc_authority.provider,
+                        _cc_authority.model_identity,
+                        token_getter=lambda: CC_TOKEN,
+                    )
+                except CCProviderEnvError as _provider_exc:
+                    _provider_message = (
+                        '当前 API Relay 模型不可用，请先检查 Relay 模型设置。'
+                        if _provider_exc.code == 'api_relay_model_unavailable'
+                        else 'API Relay 连接配置不可用，请先检查当前 Relay 设置。'
+                        if _provider_exc.code == 'api_relay_gateway_unavailable'
+                        else 'Claude Code 订阅凭证不可用，请先检查登录配置。'
+                    )
+                    yield _sse_json({
+                        't': 'err', 'd': _provider_message, 'code': _provider_exc.code,
+                    })
+                    yield _sse_json({'t': 'done', 'ok': False})
+                    return
+                except ProviderConfigError:
+                    yield _sse_json({
+                        't': 'err', 'd': 'Chat provider 配置不可用。',
+                        'code': 'chat_provider_unavailable',
+                    })
+                    yield _sse_json({'t': 'done', 'ok': False})
+                    return
                 if (
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
@@ -8605,9 +8684,11 @@ def chat_stream():
                         yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
                         return
                     try:
+                        _retire_cc_resident_for_provider_change(_cc_env)
                         yield from _stream_cc_deferred_confirmation(
                             _request_data,
                             reality_context=request_reality_context,
+                            provider_env=_cc_env,
                         )
                     finally:
                         _gen_release(
@@ -8783,6 +8864,7 @@ def chat_stream():
                             yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                         yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                         return
+                _retire_cc_resident_for_provider_change(_cc_env)
                 phase = 'activate_turn'
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 from chat import daily_context as _daily_ctx
@@ -8795,6 +8877,8 @@ def chat_stream():
                         _uc,
                         request_reality_context=request_reality_context,
                         birth_started_at=birth_started_at,
+                        provider_env=_cc_env,
+                        provider_authority=_cc_authority,
                     )
                     try:
                         for _chunk in _daily_stream:
@@ -8890,16 +8974,17 @@ def chat_stream():
                     # 先确定 resident cold/hot，再按当前 generation 的已知文件集合构建 history
                     from chat.system_builder import build_cc_static_parts
                     _static_parts = build_cc_static_parts()
-                    _cc_env = dict(os.environ)
-                    _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-                    _cc_env.pop('ANTHROPIC_API_KEY', None)
-                    # R0 native fork (flagged): resume child trial → hot delta only.
-                    # Else #204 cold bootstrap via ensure_alive.
+                    # R0 native fork (flagged) stays on the subscription path.
+                    # API Gateway requests use the same resident but cold-spawn through its env.
                     _cc_pending_respawn_reason = None
-                    if _rewrite_id and _try_staged_rewrite_native_fork(
-                        _turn_data,
-                        system_text=_static_parts['full_system'],
-                        env=_cc_env,
+                    if (
+                        _rewrite_id
+                        and _cc_authority.provider == 'claude_code'
+                        and _try_staged_rewrite_native_fork(
+                            _turn_data,
+                            system_text=_static_parts['full_system'],
+                            env=_cc_env,
+                        )
                     ):
                         _cc_is_cold = False
                     else:
@@ -8967,6 +9052,7 @@ def chat_stream():
                         display_thinking_prompt=_display_thinking_prompt,
                         reality_context=request_reality_context,
                         on_memory_recall=_recalled.append,
+                        provider_env=_cc_env,
                     )
                     for evt, payload in filter_display_thinking_events(
                         _resident_events,
@@ -9223,563 +9309,6 @@ def chat_stream():
                         pass
         return Response(stream_with_context(cc_history_rewrite.guard_cc_generation(gen_cc())), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-    def generate():
-        from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
-
-        _conv = DEFAULT_CONVERSATION_ID
-        _persisted = [False]
-        _gen_owner = {}
-        _turn_data: dict = {}
-        assistant_id = None
-        _request_data = request.get_json(silent=True) or {}
-        request_reality_context = _normalize_reality_context(
-            _request_data.pop('reality_context', None)
-        )
-        if (
-            _request_data.get('approval_id') is not None
-            or _request_data.get('confirmation_decision') is not None
-            or _request_data.get('pending_action_id') is not None
-        ):
-            yield from _stream_api_confirmation(_request_data)
-            return
-        try:
-            _turn_data = prepare_turn(_request_data, conversation_id=_conv, memories_db_path=DB_PATH)
-            _uc = (_turn_data.get('content') or '').strip()
-            _turn_data = insert_user_message(
-                get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
-            )
-            _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
-            if _rewrite_id:
-                try:
-                    _begin_staged_rewrite_generation(_turn_data)
-                except Exception as _rw_exc:
-                    yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
-                    return
-            # touch_user_interaction() runs inside insert_user_message after persist.
-            if _uc:
-                try:
-                    import emotion_engine as _ee_r
-                    _d_r = _ee_r.rule_score_desire(_uc)
-                    if _d_r['p_delta'] or _d_r['i_delta']:
-                        _ee_r.apply_desire_delta_async(_d_r['p_delta'], _d_r['i_delta'])
-                except Exception:
-                    pass
-            if _rewrite_id:
-                while True:
-                    mode, reused = _gen_acquire_or_wait(
-                        logical_identity={
-                            'user_message_id': _turn_data.get('user_message_id'),
-                            'turn_key': _turn_data.get('turn_key'),
-                        },
-                        owner_token_out=_gen_owner,
-                    )
-                    if mode == 'own':
-                        break
-            else:
-                mode, reused = _gen_acquire_or_wait(
-                    logical_identity={
-                        'user_message_id': _turn_data.get('user_message_id'),
-                        'turn_key': _turn_data.get('turn_key'),
-                    },
-                    owner_token_out=_gen_owner,
-                )
-                if mode == 'reused':
-                    text, thinking = reused
-                    if thinking:
-                        yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
-                    if text:
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
-                    return
-            _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
-            _api_turn_lease = None
-            if _get_provider() != 'claude_code':
-                _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
-            _tool_ctx.conversation_id = _conv
-            _tool_ctx.user_message_id = _turn_data.get('user_message_id')
-            for _jev in _workspace_job_sse_payloads():
-                yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
-            # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
-            text, thinking = None, None
-            _released = [False]
-            cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
-            cache_create_5m_total, cache_create_1h_total = 0, 0
-            api_rounds = []
-            cache_supported = None
-            stream_started_at = time.monotonic()
-            _is_user_turn = bool(_uc) or bool(_rewrite_id) or is_pending_user_turn(
-                get_db, _turn_data.get('user_message_id')
-            )
-            _wake_claim_ids = []
-            think_acc, text_acc, tool_calls_acc = [], [], []
-            display_segments = DisplaySegmentAccumulator()
-
-            def _clean_text(raw):
-                t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
-                return re.sub(r'```tool_result\s.*?```\s*', '', t, flags=re.DOTALL).strip()
-
-            def _persist(p_text, p_thinking):
-                nonlocal assistant_id
-                if not p_text or _persisted[0]:
-                    return
-                _ci_payload = _build_cache_info_payload(
-                    cache_read=cache_read_total,
-                    cache_creation=cache_create_total,
-                    cache_creation_5m=cache_create_5m_total,
-                    cache_creation_1h=cache_create_1h_total,
-                    input_tokens=input_tokens_total,
-                    output_tokens=output_tokens_total,
-                    elapsed_sec=round(max(0.0, time.monotonic() - stream_started_at), 3),
-                    cache_supported=cache_supported,
-                )
-                if api_rounds:
-                    _ci_payload['v'] = 2
-                    _ci_payload['provider'] = 'api_relay'
-                    _ci_payload['num_rounds'] = len(api_rounds)
-                    _ci_payload['rounds'] = api_rounds
-                    _ci_payload['last_round_context'] = api_rounds[-1]['context_tokens']
-                    _ci_payload['max_round_context'] = max(r['context_tokens'] for r in api_rounds)
-                _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
-                # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
-                _pc, _choices = _extract_choices(p_text)
-                if _choices and not _pc:
-                    _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
-                if _rewrite_id:
-                    _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
-                        _turn_data,
-                        assistant_text=_pc,
-                        wake_ids=_wake_claim_ids,
-                        one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
-                        conversation_id=_conv,
-                    )
-                assistant_id = _persist_turn_assistant(
-                    _turn_data,
-                    content=_pc,
-                    thinking=p_thinking or '',
-                    tool_calls_json=json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '',
-                    cache_info_json=_ci,
-                    choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
-
-                    display_segments_json=display_segments.to_json(),
-
-                    side_effects=_turn_data.get('_staged_side_effects'),
-                )
-                # Candidate durable ≠ active assistant durable.
-                if not _rewrite_id:
-                    consume_wake_ids(get_db, _wake_claim_ids)
-                    _write_session_memo(_uc, _pc, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
-                _persisted[0] = True
-                if assistant_id is not None:
-                    try:
-                        from moments_persistence import after_assistant_persisted
-                        after_assistant_persisted(
-                            memories_db_path=DB_PATH,
-                            turn_data=_turn_data,
-                            assistant_message_id=assistant_id,
-                            conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        from chat.scoring_identity import trigger_turn_scoring
-                        trigger_turn_scoring(
-                            assistant_text=_pc,
-                            message_id=_turn_data.get('user_message_id'),
-                            get_db_fn=get_db,
-                        )
-                    except Exception:
-                        pass
-            try:
-                # Staged Relay rewrite: never drain feedback / consume dream in prompt build.
-                _relay_one_shot_claims = {}
-                (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
-                    build_system,
-                    get_db,
-                    user_turn=_is_user_turn,
-                    split_dynamic=True,
-                    allow_side_effects=not bool(_rewrite_id),
-                )
-                if _rewrite_id:
-                    _relay_one_shot_claims, _relay_os_text = _peek_relay_staged_one_shots()
-                    _turn_data['_relay_one_shot_claims'] = _relay_one_shot_claims
-                    if _relay_os_text:
-                        dynamic_context = '\n\n'.join(
-                            p for p in (dynamic_context, _relay_os_text) if p and str(p).strip()
-                        )
-                messages = build_messages(rewrite_id=_rewrite_id or None)
-                _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
-                if _recall:
-                    yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
-                from relay.manager import relay as _chat_relay
-                cache_supported = bool((_chat_relay.caps or {}).get('cache'))
-                _thinking_ok = _model_supports_thinking()
-                _use_guagua_safe = _is_guagua_active() and os.environ.get('GUAGUA_SAFE_MODE') == '1'
-                if not _use_guagua_safe:
-                    messages = _apply_rolling_cache_control(messages)
-                volatile_context = '\n\n'.join(p for p in (dynamic_context, _recall) if p and p.strip())
-                if volatile_context:
-                    messages = _prepend_context_to_last_user(messages, volatile_context)
-                if _use_guagua_safe:
-                    system, messages = _guagua_safe_context(system, messages)
-                # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
-                _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, get_tools())
-                # Reality is request-scoped and must not affect tool selection.
-                messages = _append_reality_to_last_user(messages, request_reality_context)
-                for _round in range(5):
-                    payload = {
-                        'max_tokens': 16000,
-                        'stream': True,
-                        'system': system,
-                        'messages': messages,
-                    }
-                    if not _use_guagua_safe:
-                        payload['tools'] = _turn_tools
-                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
-                    if _thinking_ok and not _use_guagua_safe:
-                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
-                    # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
-                    resp = _chat_relay.call_stream(payload, timeout=300)
-                    blocks, cur, stop_reason = [], None, None
-                    round_cache_read = 0
-                    round_cache_create = 0
-                    round_cache_create_5m = 0
-                    round_cache_create_1h = 0
-                    round_input_tokens = 0
-                    round_output_tokens = 0
-                    for raw in resp:
-                        line = raw.decode('utf-8', 'ignore').strip()
-                        if not line.startswith('data:'):
-                            continue
-                        try:
-                            ev = json.loads(line[5:].strip())
-                        except Exception:
-                            continue
-                        et = ev.get('type')
-                        if et == 'message_start':
-                            _u = (ev.get('message') or {}).get('usage') or {}
-                            round_cache_read = max(round_cache_read, _u.get('cache_read_input_tokens', 0) or 0)
-                            round_cache_create = max(round_cache_create, _u.get('cache_creation_input_tokens', 0) or 0)
-                            _cc = _u.get('cache_creation') or {}
-                            round_cache_create_5m = max(round_cache_create_5m, _cc.get('ephemeral_5m_input_tokens', 0) or 0)
-                            round_cache_create_1h = max(round_cache_create_1h, _cc.get('ephemeral_1h_input_tokens', 0) or 0)
-                            round_input_tokens = max(round_input_tokens, _u.get('input_tokens', 0) or 0)
-                            round_output_tokens = max(round_output_tokens, _u.get('output_tokens', 0) or 0)
-                        elif et == 'content_block_start':
-                            cb  = ev.get('content_block', {}) or {}
-                            cur = {'type': cb.get('type')}
-                            if cur['type'] == 'tool_use':
-                                cur['id'] = cb.get('id')
-                                cur['name'] = cb.get('name')
-                                cur['_json'] = ''
-                            elif cur['type'] == 'thinking':
-                                cur['thinking'] = ''
-                            elif cur['type'] == 'text':
-                                cur['text'] = ''
-                        elif et == 'content_block_delta':
-                            d  = ev.get('delta', {})
-                            dt = d.get('type')
-                            if dt == 'thinking_delta':
-                                s = d.get('thinking', '')
-                                if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
-                                think_acc.append(s)
-                                display_segments.append_thinking(s)
-                                yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
-                            elif dt == 'text_delta':
-                                s = d.get('text', '')
-                                if cur is not None: cur['text'] = cur.get('text', '') + s
-                                text_acc.append(s)
-                                display_segments.append_text(s)
-                                yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
-                            elif dt == 'input_json_delta':
-                                if cur is not None:
-                                    cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
-                                    # 大参数（如 create_html 的整页内容）生成期间前端原本零事件，
-                                    # 空窗超时会断连；每 2KB 推一次进度，顺便让哈娅看见在长
-                                    if len(cur['_json']) - cur.get('_prog', 0) >= 2048:
-                                        cur['_prog'] = len(cur['_json'])
-                                        yield 'data: ' + json.dumps({'t': 'tool_progress', 'd': {'name': cur.get('name', ''), 'chars': cur['_prog']}}) + SSE_END
-                            elif dt == 'signature_delta':
-                                if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
-                        elif et == 'content_block_stop':
-                            if cur is not None:
-                                cur.pop('_prog', None)
-                                if cur.get('type') == 'tool_use':
-                                    try:
-                                        cur['input'] = json.loads(cur.pop('_json') or '{}')
-                                    except Exception:
-                                        cur['input'] = {}
-                                blocks.append(cur)
-                                cur = None
-                        elif et == 'message_delta':
-                            _du = ev.get('usage') or {}
-                            if _du:
-                                round_cache_read = max(round_cache_read, _du.get('cache_read_input_tokens', 0) or 0)
-                                round_cache_create = max(round_cache_create, _du.get('cache_creation_input_tokens', 0) or 0)
-                                _dcc = _du.get('cache_creation') or {}
-                                round_cache_create_5m = max(round_cache_create_5m, _dcc.get('ephemeral_5m_input_tokens', 0) or 0)
-                                round_cache_create_1h = max(round_cache_create_1h, _dcc.get('ephemeral_1h_input_tokens', 0) or 0)
-                                round_input_tokens = max(round_input_tokens, _du.get('input_tokens', 0) or 0)
-                                round_output_tokens = max(round_output_tokens, _du.get('output_tokens', 0) or 0)
-                            stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
-                        elif et == 'message_stop':
-                            break
-                    cache_read_total += round_cache_read
-                    cache_create_total += round_cache_create
-                    cache_create_5m_total += round_cache_create_5m
-                    cache_create_1h_total += round_cache_create_1h
-                    input_tokens_total += round_input_tokens
-                    output_tokens_total += round_output_tokens
-                    api_rounds.append({
-                        'index': len(api_rounds) + 1,
-                        'complete': True,
-                        'input_tokens': round_input_tokens,
-                        'output_tokens': round_output_tokens,
-                        'cache_read': round_cache_read,
-                        'cache_creation': round_cache_create,
-                        'context_tokens': round_input_tokens + round_cache_read + round_cache_create,
-                    })
-                    tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
-                    if stop_reason == 'tool_use' and not tool_uses:
-                        continue
-                    if not tool_uses:
-                        break
-                    messages.append({'role': 'assistant', 'content': blocks})
-                    results = []
-                    for tu in tool_uses:
-                        tname = tu.get('name', '')
-                        targs = tu.get('input') or {}
-                        dispatched = _dispatch_api_chat_tool(
-                            tname,
-                            targs,
-                            _api_turn_lease,
-                            tool_use_id=tu.get('id'),
-                        )
-                        if isinstance(dispatched, dict) and dispatched.get('deferred_tool_use'):
-                            deferred_event = {
-                                'id': dispatched.get('id') or tu.get('id'),
-                                'name': dispatched.get('name') or tname,
-                                'args': _slim_args(dispatched.get('args') or targs),
-                                'tool_input': _slim_args(dispatched.get('tool_input') or targs),
-                                'approval_id': dispatched.get('approval_id'),
-                                'pending_action_id': dispatched.get('pending_action_id'),
-                                'deferred_tool_use': True,
-                                'status': dispatched.get('status'),
-                                'approval_prompt': dispatched.get('approval_prompt'),
-                            }
-                            display_segments.append_tool(len(tool_calls_acc))
-                            yield 'data: ' + json.dumps({
-                                't': 'tool_use',
-                                'd': deferred_event,
-                                'idx': len(tool_calls_acc),
-                            }, ensure_ascii=False) + SSE_END
-                            yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
-                            return
-                        result_str = str(dispatched)
-                        display_segments.append_tool(len(tool_calls_acc))
-                        yield 'data: ' + json.dumps({
-                            't': 'tool_use',
-                            'd': {
-                                'id': tu.get('id'),
-                                'name': tname,
-                                'args': _slim_args(targs),
-                            },
-                            'idx': len(tool_calls_acc),
-                        }, ensure_ascii=False) + SSE_END
-                        file_path = _write_tool_file_path(tname, targs)
-                        old_content = _read_file_safe(file_path) if file_path else None
-                        tc_item = {
-                            'name': tname,
-                            'args': targs,
-                            'result': result_str,
-                            'success': not result_str.startswith('工具执行失败'),
-                        }
-                        if file_path and old_content is not None and tc_item['success']:
-                            new_content = _read_file_safe(file_path)
-                            added, removed = _diff_line_counts(old_content, new_content)
-                            if added or removed:
-                                tc_item['diff'] = {'file': file_path, 'added': added, 'removed': removed}
-                        if tname in ('create_html', 'create_markdown', 'create_document') and tc_item['success']:
-                            try:
-                                parsed = json.loads(result_str)
-                                if isinstance(parsed, dict) and 'artifact' in parsed:
-                                    tc_item['artifact'] = parsed['artifact']
-                            except Exception:
-                                pass
-                        tool_calls_acc.append(tc_item)
-                        _slim_item = {**tc_item, 'args': _slim_args(tc_item.get('args')),
-                                      'result': str(tc_item.get('result') or '')[:2000]}
-                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
-                        # 旧版缓存前端只认 tool_call；dup=1 让新前端跳过防止重复渲染
-                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim_item, 'dup': 1}) + SSE_END
-                        results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
-                                        'content': result_str})
-                    messages.append({'role': 'user', 'content': results})
-                    text_acc.append(NL)
-                text     = _clean_text(''.join(text_acc))
-                thinking = ''.join(think_acc)
-                _persist(text, thinking)
-            finally:
-                # 断流救援：客户端断开(GeneratorExit)或中途异常时，已生成的内容不能凭空消失
-                if not _persisted[0]:
-                    try:
-                        _rt = _clean_text(''.join(text_acc)) if text_acc else ''
-                        if _rt:
-                            _persist(_rt, ''.join(think_acc))
-                            text, thinking = _rt, ''.join(think_acc)
-                    except Exception:
-                        pass
-                if _rewrite_id:
-                    _discard_staged_resident('staged_rewrite_end')
-                _released[0] = True
-                _gen_release(
-                    (text, thinking) if text and not _rewrite_id else None,
-                    expected_owner_token=_gen_owner.get('token'),
-                )
-            if tool_calls_acc and not thinking:
-                _ts = _summarize_traces_sync(tool_calls_acc)
-                if _ts:
-                    yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
-            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
-                _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
-                _usage_payload = _build_cache_info_payload(
-                    cache_read=cache_read_total,
-                    cache_creation=cache_create_total,
-                    cache_creation_5m=cache_create_5m_total,
-                    cache_creation_1h=cache_create_1h_total,
-                    input_tokens=input_tokens_total,
-                    output_tokens=output_tokens_total,
-                    elapsed_sec=_elapsed_sec,
-                    cache_supported=cache_supported,
-                )
-                yield 'data: ' + json.dumps({'t': 'usage', **_usage_payload}, default=str) + SSE_END
-            _done = {'t': 'done', 'ok': bool(text)}
-            if _rewrite_id:
-                _done['rewrite_id'] = _rewrite_id
-            if not text and _rewrite_id:
-                _fail_staged_rewrite(_turn_data, 'empty generation')
-            yield 'data: ' + json.dumps(_done) + SSE_END
-        except urllib.error.HTTPError as e:
-            _ecode = e.code
-            _emsg  = e.read().decode()[:300]
-            try:
-                from chat.provider_router import fallback_for_http_status
-                _fallback_provider = fallback_for_http_status(_ecode)
-            except Exception:
-                # Invalid fallback configuration fails closed: preserve the
-                # upstream error instead of silently choosing another model.
-                _fallback_provider = 'none'
-            if _fallback_provider == 'deepseek':
-                yield 'data: ' + json.dumps({'t': 'notice', 'd': '已切换至备用模型'}) + SSE_END
-                try:
-                    _ds_key = os.environ.get('DEEPSEEK_API_KEY', '')
-                    # 将 system/messages 转成 DeepSeek 兼容格式
-                    _ds_sys_text = ''
-                    if isinstance(system, str):
-                        _ds_sys_text = system
-                    elif isinstance(system, list):
-                        _ds_sys_text = '\n'.join(b.get('text', '') for b in system if isinstance(b, dict) and b.get('type') == 'text')
-                    _ds_msgs = []
-                    if _ds_sys_text:
-                        _ds_msgs.append({'role': 'system', 'content': _ds_sys_text})
-                    for _m in messages:
-                        _role = _m.get('role')
-                        if _role not in ('user', 'assistant'):
-                            continue
-                        _mc = _m.get('content', '')
-                        if isinstance(_mc, str):
-                            _ds_msgs.append({'role': _role, 'content': _mc})
-                        elif isinstance(_mc, list):
-                            _text_parts = [c.get('text', '') for c in _mc if isinstance(c, dict) and c.get('type') == 'text']
-                            if _text_parts:
-                                _ds_msgs.append({'role': _role, 'content': ''.join(_text_parts)})
-                    _ds_model = config_store.get_deepseek_chat_model()
-                    _ds_pay = {
-                        'model': _ds_model,
-                        'thinking': {'type': 'disabled'},
-                        'max_tokens': 8000,
-                        'messages': _ds_msgs,
-                    }
-                    _ds_req = urllib.request.Request(
-                        'https://api.deepseek.com/chat/completions',
-                        data=json.dumps(_ds_pay).encode(),
-                        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ds_key}
-                    )
-                    with urllib.request.urlopen(_ds_req, timeout=120) as _dr:
-                        _dres = json.loads(_dr.read())
-                    _dt = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
-                    if _dt:
-                        display_segments.append_text(_dt)
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': _dt}) + SSE_END
-                        _dt_clean, _dt_choices = _extract_choices(_dt)
-                        if _dt_choices and not _dt_clean:
-                            _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
-                        if _rewrite_id:
-                            # Same freeze contract as the primary Relay persist path.
-                            if not _turn_data.get('_relay_one_shot_claims'):
-                                _peek_claims, _ = _peek_relay_staged_one_shots()
-                                _turn_data['_relay_one_shot_claims'] = _peek_claims
-                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
-                                _turn_data,
-                                assistant_text=_dt_clean,
-                                wake_ids=_wake_claim_ids,
-                                one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
-                                conversation_id=_conv,
-                            )
-                        assistant_id = _persist_turn_assistant(
-                            _turn_data,
-                            content=_dt_clean,
-                            choices_json=json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else '',
-
-                            display_segments_json=display_segments.to_json(),
-
-                            side_effects=_turn_data.get('_staged_side_effects'),
-                        )
-                        if assistant_id is not None:
-                            try:
-                                from moments_persistence import after_assistant_persisted
-                                after_assistant_persisted(
-                                    memories_db_path=DB_PATH,
-                                    turn_data=_turn_data,
-                                    assistant_message_id=assistant_id,
-                                    conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                                )
-                            except Exception:
-                                pass
-                        _persisted[0] = True
-                    _done = {'t': 'done', 'ok': bool(_dt)}
-                    if assistant_id is not None and not _rewrite_id:
-                        _done['assistant_message_id'] = assistant_id
-                    if _rewrite_id:
-                        _done['rewrite_id'] = _rewrite_id
-                    yield 'data: ' + json.dumps(_done) + SSE_END
-                except Exception as _de:
-                    _fail_staged_rewrite(_turn_data, 'DeepSeek fallback失败: ' + str(_de))
-                    yield 'data: ' + json.dumps({'t': 'err', 'd': 'DeepSeek fallback失败: ' + str(_de)}) + SSE_END
-            else:
-                _fail_staged_rewrite(_turn_data, 'API %s: %s' % (_ecode, _emsg))
-                yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (_ecode, _emsg)}) + SSE_END
-        except urllib.error.URLError:
-            _fail_staged_rewrite(_turn_data, '上游API超时，请重试')
-            yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
-        except Exception as e:
-            _fail_staged_rewrite(_turn_data, str(e))
-            yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
-        finally:
-            try:
-                release_turn(
-                    conversation_id=_conv,
-                    memories_db_path=DB_PATH,
-                    turn_key=_turn_data.get('turn_key'),
-                    persisted=_persisted[0],
-                )
-            finally:
-                try:
-                    del _tool_ctx.user_message_id
-                except AttributeError:
-                    pass
-    return Response(stream_with_context(generate()), mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route('/workspace/job-events', methods=['GET'])
@@ -12063,9 +11592,14 @@ def _gw_build_switch_hooks():
         # Shared production system/persona/memory/state chain for resume + cold.
         static_parts = build_cc_daily_static_parts()
         system_text = static_parts['full_system']
-        env = dict(os.environ)
-        env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-        env.pop('ANTHROPIC_API_KEY', None)
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority()
+        env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
         return system_text, env
 
     def _map_staged_resident_error(exc: Exception) -> Exception:

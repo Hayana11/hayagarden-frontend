@@ -5006,7 +5006,7 @@ def _prepare_hidden_flow_plan(
         gate_enabled = False
     eligible = bool(
         gate_enabled
-        and str(provider or "").strip() == "claude_code"
+        and str(provider or "").strip() in {"claude_code", "api_relay"}
         and str(turn_kind or "").strip() in {"hot", "cold", "respawn"}
     )
     try:

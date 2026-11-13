@@ -8,17 +8,11 @@ import './CompressionSettings.css'
 const LENGTH_OPTIONS = [8000, 12000, 16000, 20000]
 const TURN_OPTIONS = [10, 20, 30, 40]
 
-const PRODUCT_PROVIDER_NAMES = ['claude', 'gpt', 'deepseek']
+const PRODUCT_PROVIDER_NAMES = ['claude', 'api_relay', 'gpt', 'deepseek']
 
-function isRelayProvider(provider: { id: string; label: string }) {
-  const id = provider.id.toLowerCase()
-  const label = provider.label.replace(/\s+/g, '').toLowerCase()
-  return id === 'api_relay' || id.includes('relay') || label.includes('relay')
-}
 
 function productProviders(providers: ContinuitySettingsView['providers']) {
-  const visible = providers.filter(provider => !isRelayProvider(provider))
-  return PRODUCT_PROVIDER_NAMES.map(name => visible.find(provider => (provider.id + ' ' + provider.label).toLowerCase().includes(name))).filter((provider): provider is ContinuitySettingsView['providers'][number] => !!provider)
+  return PRODUCT_PROVIDER_NAMES.map(name => providers.find(provider => (provider.id + ' ' + provider.label).toLowerCase().includes(name))).filter((provider): provider is ContinuitySettingsView['providers'][number] => !!provider)
 }
 
 function PinkStar() {

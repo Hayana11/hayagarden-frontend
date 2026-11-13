@@ -374,6 +374,9 @@ class SameTurnReconnectRouteTests(unittest.TestCase):
                 gateway, '_get_provider', return_value='claude_code',
             ))
             stack.enter_context(mock.patch.object(
+                gateway, 'CC_TOKEN', 'test-oauth-token',
+            ))
+            stack.enter_context(mock.patch.object(
                 gateway, '_gen_active_recorder', new=active_recorder,
             ))
             stack.enter_context(mock.patch.object(
