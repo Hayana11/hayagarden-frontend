@@ -977,6 +977,45 @@ class ProducerTests(unittest.TestCase):
             snapshot, (candidate(0, (1,)), candidate(1, (0,)), candidate(2, (2,))), members,
         ))
 
+    def test_targeted_cold_bridge_reuses_failed_generation_job_without_retrying(self):
+        members = self._production_shaped_bridge_members()
+        self._prepare_bridge_policy()
+        _candidates, jobs = self._seed_target_group(members, generation_jobs=True)
+        self.assertEqual(len(jobs), 3)
+
+        failed_job_id = jobs[1].generation_job_id
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            conn.execute(
+                "UPDATE continuity_generation_jobs SET status='failed', attempt=14, "
+                "error_code='generation_error' WHERE generation_job_id=?",
+                (failed_job_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = self._run_target(members)
+
+        self.assertEqual(result.status, 'failed', result)
+        self.assertEqual(result.error_code, 'generation_error')
+        self.assertEqual(result.model_call_count, 0)
+        self.assertEqual(self.model_calls, 0)
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            status, attempt, error_code = conn.execute(
+                'SELECT status, attempt, error_code FROM continuity_generation_jobs '
+                'WHERE generation_job_id=?',
+                (failed_job_id,),
+            ).fetchone()
+            self.assertEqual((status, attempt, error_code), ('failed', 14, 'generation_error'))
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
     def test_targeted_cold_bridge_rebases_nonzero_seq_and_replays_ready(self):
         self._write_source(self._turns(3))
         self._prepare_target_store(
