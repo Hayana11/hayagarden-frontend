@@ -156,6 +156,64 @@ class TurnTimingTests(unittest.TestCase):
         self.assertEqual(payload['generations'][0]['spawn_reason'], 'process_dead')
         self.assertTrue(payload['generations'][0]['reached_stdin'])
 
+    def test_dead_resident_exit_is_attached_to_next_turn_diagnostic(self):
+        class ExitedProcess:
+            pid = 4321
+            returncode = -15
+            stderr = io.StringIO('authorization failed marker')
+
+            def poll(self):
+                return self.returncode
+
+        resident = cc_resident.ResidentSession.__new__(
+            cc_resident.ResidentSession,
+        )
+        resident._proc = ExitedProcess()
+        resident._next_spawn_reason = None
+        resident._cold_start_diagnostic = {
+            'request_received_at': 200.0,
+            'generation_records': [],
+        }
+        resident._last_turn_terminal_at = 100.0
+        resident._generation = 4
+        resident._cc_provider = 'api_relay'
+        resident._runtime_identity = 'claude-code:2.1.280'
+        resident._history_rewrite_epoch = ''
+
+        with (
+            mock.patch(
+                'chat.cc_history_rewrite.current_history_rewrite_epoch',
+                return_value='',
+            ),
+            mock.patch(
+                'chat.cc_history_rewrite.is_unreadable_epoch',
+                return_value=False,
+            ),
+            mock.patch(
+                'chat.cc_history_rewrite.sanitize_bound_epoch',
+                side_effect=lambda value: value,
+            ),
+        ):
+            reason = resident._decide_respawn_reason('system')
+
+        self.assertEqual(reason, 'process_dead')
+        self.assertIsNone(resident._next_spawn_reason)
+        observation = resident._cold_start_diagnostic['previous_process_exit']
+        self.assertEqual(observation['returncode'], -15)
+        self.assertTrue(observation['signal_exit'])
+        self.assertEqual(observation['signal_number'], 15)
+        self.assertEqual(observation['stderr_category'], 'auth_error')
+        self.assertEqual(observation['pid'], 4321)
+        self.assertEqual(observation['process_generation'], 4)
+        self.assertEqual(observation['provider_mode'], 'api_relay')
+        self.assertEqual(observation['runtime_version'], '2.1.280')
+        self.assertEqual(observation['previous_turn_terminal_at'], 100.0)
+
+        payload = self._emit(resident._cold_start_diagnostic)
+        encoded = json.dumps(payload)
+        self.assertIn('previous_process_exit', payload)
+        self.assertNotIn('authorization failed marker', encoded)
+
     def test_birth_summary_waits_for_first_thinking_or_text(self):
         diagnostic = {
             'request_received_at': 10.0,
