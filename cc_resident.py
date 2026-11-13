@@ -1824,6 +1824,8 @@ class ResidentSession:
         self._pending_deferred = None
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
+        self._cc_provider = 'claude_code'
+        self._cc_provider_identity = None
         # CC-CHAT-EFFORT-R1: identity of the effort argv this process was
         # started with. None preserves compatibility with pre-R1 fake fixtures.
         self._effort_identity = None
@@ -2047,7 +2049,11 @@ class ResidentSession:
             if self._turn_active:
                 raise ResidentError('resident_turn_in_progress')
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        requested_provider = str((env or {}).get('HAYAGARDEN_CC_PROVIDER') or 'claude_code')
+        provider_identity = str((env or {}).get('HAYAGARDEN_CC_PROVIDER_IDENTITY') or '')
         env = self._prepare_spawn_env(env)
+        env.pop('HAYAGARDEN_CC_PROVIDER', None)
+        env.pop('HAYAGARDEN_CC_PROVIDER_IDENTITY', None)
         try:
             runtime_version = require_managed_claude_runtime(env=env, cwd=self._cwd)
         except ClaudeRuntimeError as exc:
@@ -2058,9 +2064,18 @@ class ResidentSession:
                 else 'claude_runtime_unavailable'
             )
             raise ResidentError('Claude Code runtime is unavailable', error_code=code) from exc
-        _model, model_identity, model_args = cc_model_snapshot()
+        if requested_provider == 'api_relay':
+            _model = str(env.get('ANTHROPIC_MODEL') or '').strip()
+            if not _model or _model.lower() == 'unknown':
+                raise ResidentError(
+                    '当前 API Relay 模型不可用',
+                    error_code='api_relay_model_unavailable',
+                )
+            _model, model_identity, model_args = cc_model_snapshot(_model)
+        else:
+            _model, model_identity, model_args = cc_model_snapshot()
         effort, effort_identity, effort_args = cc_effort_snapshot()
-        if _model:
+        if _model and requested_provider != 'api_relay':
             from chat.cc_model import cc_model_runtime_compatibility, CC_MODEL_RUNTIME_INCOMPATIBLE
             compatible, requirement = cc_model_runtime_compatibility(_model)
             if not compatible:
@@ -2131,6 +2146,8 @@ class ResidentSession:
         self._system_text = system_text
         self._runtime_identity = self._managed_runtime_identity(runtime_version)
         self._model_identity = model_identity
+        self._cc_provider = requested_provider
+        self._cc_provider_identity = provider_identity or None
         self._effort_identity = effort_identity
         self._effort_value = effort or None
         self._session_id = None
@@ -2226,7 +2243,12 @@ class ResidentSession:
         # identity. Fake/pre-1B alive fixtures keep _model_identity=None and must
         # still reach turn_limit / idle / system_changed contracts.
         stored_identity = getattr(self, '_model_identity', None)
-        if stored_identity is not None and cc_model_identity() != stored_identity:
+        stored_provider = str(getattr(self, '_cc_provider', 'claude_code') or 'claude_code')
+        if (
+            stored_identity is not None
+            and stored_provider != 'api_relay'
+            and cc_model_identity() != stored_identity
+        ):
             return 'model_changed'
         stored_effort_identity = getattr(self, '_effort_identity', None)
         if (
