@@ -109,7 +109,7 @@ class ChatDurableOrderTests(unittest.TestCase):
         self.assertIn('display_segments=display_segments_json', gateway)
         for marker in ('_stream_cc_deferred_confirmation', '_stream_cc_first_turn',
                        '_stream_cc_daily_soft_window', "phase = 'resident_stream'",
-                       'think_acc, text_acc, tool_calls_acc'):
+                       "display_segments.append_text(str(payload or ''))"):
             self.assertIn(marker, gateway)
 
     def test_t11_live_handoff_contract(self):
