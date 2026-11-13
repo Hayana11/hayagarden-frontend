@@ -486,6 +486,7 @@ def _log_cold_start_timing(diagnostic):
             'process_spawn_at': diagnostic.get('process_spawn_at'),
             'process_exit_at': diagnostic.get('process_exit_at'),
             'bounded_stderr_category': diagnostic.get('bounded_stderr_category'),
+            'previous_process_exit': diagnostic.get('previous_process_exit'),
             'stdin_flush_at': diagnostic.get('stdin_flush_at'),
             'claude_init_event_at': diagnostic.get('claude_init_event_at'),
             'first_stream_event_at': diagnostic.get('first_stream_event_at'),
@@ -1803,6 +1804,7 @@ class ResidentSession:
         self._turn_sequence = 0
         self._active_turn_sequence = None
         self._last_turn_sequence = None
+        self._last_turn_terminal_at = None
         self._turn_write_started = False
         self._turn_stdin_flushed = False
         self._last_turn_stdin_write_started = False
@@ -2236,6 +2238,47 @@ class ResidentSession:
         if durable_epoch and durable_epoch != bound_epoch:
             return 'history_rewrite'
         if not self._alive():
+            proc = self._proc
+            diagnostic = getattr(self, '_cold_start_diagnostic', None)
+            if proc is not None and isinstance(diagnostic, dict):
+                returncode = proc.poll()
+                if returncode is not None:
+                    provider = str(
+                        getattr(self, '_cc_provider', 'claude_code') or 'claude_code'
+                    )
+                    runtime_identity = str(
+                        getattr(self, '_runtime_identity', '') or ''
+                    )
+                    runtime_version = (
+                        runtime_identity.split(':', 1)[1][:80]
+                        if runtime_identity.startswith('claude-code:')
+                        else None
+                    )
+                    previous_terminal_at = getattr(
+                        self, '_last_turn_terminal_at', None,
+                    )
+                    diagnostic['previous_process_exit'] = {
+                        'previous_turn_terminal_at': (
+                            previous_terminal_at
+                            if isinstance(previous_terminal_at, (int, float))
+                            else None
+                        ),
+                        'process_exit_discovered_at': _cold_start_now(),
+                        'returncode': _diagnostic_int(returncode),
+                        'signal_exit': returncode < 0,
+                        'signal_number': -returncode if returncode < 0 else None,
+                        'stderr_category': _cold_start_stderr_category(proc),
+                        'pid': _diagnostic_int(getattr(proc, 'pid', None)),
+                        'parent_pid': os.getpid(),
+                        'process_generation': _diagnostic_int(
+                            getattr(self, '_generation', None),
+                        ),
+                        'provider_mode': (
+                            'api_relay' if provider == 'api_relay'
+                            else 'subscription'
+                        ),
+                        'runtime_version': runtime_version,
+                    }
             return self._next_spawn_reason or 'process_dead'
         if str(tool_profile or TOOL_PROFILE_LEGACY) != str(self._tool_profile or TOOL_PROFILE_LEGACY):
             return 'tool_profile_changed'
@@ -3112,8 +3155,10 @@ class ResidentSession:
                 raise
             finally:
                 diagnostic = getattr(self, '_cold_start_diagnostic', None)
+                terminal_at = _cold_start_now()
+                self._last_turn_terminal_at = terminal_at
                 if isinstance(diagnostic, dict):
-                    diagnostic['terminal_at'] = _cold_start_now()
+                    diagnostic['terminal_at'] = terminal_at
                     _log_cold_start_timing(diagnostic)
                     self._cold_start_diagnostic = None
                 with self._turn_state_lock:
