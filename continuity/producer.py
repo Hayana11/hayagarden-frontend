@@ -718,6 +718,17 @@ def run_targeted_cold_bridge(
                 settings_binding=settings_binding,
                 now=stamp,
             )
+            failed_job = next(
+                (job for job in generation_jobs if job.status == 'failed'),
+                None,
+            )
+            if failed_job is not None:
+                return TargetedColdBridgeResult(
+                    status='failed',
+                    error_code=failed_job.error_code,
+                    model_call_count=call_count,
+                    **result_base,
+                )
             rows_provider = _source_rows_provider(source_db_path, snapshot)
 
             def count_provider_call() -> None:
