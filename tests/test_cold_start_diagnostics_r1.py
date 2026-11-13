@@ -204,6 +204,8 @@ class TurnTimingTests(unittest.TestCase):
         self.assertEqual(observation['signal_number'], 15)
         self.assertEqual(observation['stderr_category'], 'auth_error')
         self.assertEqual(observation['pid'], 4321)
+        self.assertEqual(observation['parent_pid'], os.getpid())
+        self.assertIsInstance(observation['process_exit_discovered_at'], (int, float))
         self.assertEqual(observation['process_generation'], 4)
         self.assertEqual(observation['provider_mode'], 'api_relay')
         self.assertEqual(observation['runtime_version'], '2.1.280')
