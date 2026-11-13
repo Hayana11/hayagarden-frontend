@@ -4978,7 +4978,7 @@ def _cc_resident_stream_gen(
     if provider_env is None:
         from chat.provider_router import capture_generation_authority
         from chat.cc_auth import build_cc_provider_env
-        authority = capture_generation_authority()
+        authority = capture_generation_authority(provider='claude_code')
         provider_env = build_cc_provider_env(
             authority.provider,
             authority.model_identity,
@@ -6861,7 +6861,7 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context='', provid
     if provider_env is None:
         from chat.provider_router import capture_generation_authority
         from chat.cc_auth import build_cc_provider_env
-        authority = capture_generation_authority()
+        authority = capture_generation_authority(provider='claude_code')
         provider_env = build_cc_provider_env(
             authority.provider,
             authority.model_identity,
@@ -7835,10 +7835,11 @@ def _stream_cc_daily_soft_window(
             prepare_daily_display_thinking_plan,
         )
         _display_thinking_mode, _display_thinking_prompt = get_display_thinking_snapshot()
-        if provider_env is None or provider_authority is None:
+        if provider_authority is None:
             from chat.provider_router import capture_generation_authority
+            provider_authority = capture_generation_authority(provider='claude_code')
+        if provider_env is None:
             from chat.cc_auth import build_cc_provider_env
-            provider_authority = capture_generation_authority()
             provider_env = build_cc_provider_env(
                 provider_authority.provider,
                 provider_authority.model_identity,
@@ -8605,7 +8606,8 @@ def _stream_cc_daily_soft_window(
 def chat_stream():
     birth_started_at = time.time()
     from flask import Response, stream_with_context
-    if _get_provider() in ('claude_code', 'api_relay'):
+    _chat_provider = _get_provider()
+    if _chat_provider in ('claude_code', 'api_relay'):
         def gen_cc():
             from moments_turn import (
                 prepare_turn,
@@ -8643,7 +8645,9 @@ def chat_stream():
                 from chat.provider_router import capture_generation_authority, ProviderConfigError
                 from chat.cc_auth import CCProviderEnvError, build_cc_provider_env
                 try:
-                    _cc_authority = capture_generation_authority()
+                    _cc_authority = capture_generation_authority(
+                        provider=_chat_provider,
+                    )
                     _cc_env = build_cc_provider_env(
                         _cc_authority.provider,
                         _cc_authority.model_identity,

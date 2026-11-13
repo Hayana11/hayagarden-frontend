@@ -2013,6 +2013,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
+            stack.enter_context(mock.patch.object(
+                gateway, '_retire_cc_resident_for_provider_change', return_value=False,
+            ))
             stack.enter_context(mock.patch.object(gateway, '_get_model', return_value='mock-model'))
             stack.enter_context(mock.patch.object(
                 context_window, 'get_active_switch_intent', return_value=None,
@@ -2147,6 +2150,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_CC_RESIDENT', resident,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_retire_cc_resident_for_provider_change', return_value=False,
             ))
             gen_acquire = stack.enter_context(mock.patch.object(
                 gateway, '_gen_acquire_or_wait', return_value=('own', None),
@@ -2317,6 +2323,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_CC_RESIDENT', resident,
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_retire_cc_resident_for_provider_change', return_value=False,
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_gen_acquire_or_wait', return_value=('own', None),
