@@ -181,6 +181,24 @@ class ContinuitySettingsRouteTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in relay["models"]], ["claude-opus-5-5"])
 
 
+    def test_unknown_api_relay_model_is_disabled_and_cannot_be_saved(self):
+        from context_compression_routes import _provider_registry
+
+        with patch("relay.manager.resolve_active_relay_model_identity", return_value="unknown"):
+            registry = _provider_registry()
+            relay = next(row for row in registry["providers"] if row["id"] == "api_relay")
+            self.assertFalse(relay["enabled"])
+            self.assertEqual(relay["models"], [])
+
+            before = self._revision_count()
+            response = self.client.post("/dash/__continuity/settings", json={
+                "length": 16000, "turns": 30, "provider": "api_relay",
+                "model": "unknown", "prompt": "relay compression prompt",
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "compression_model_unavailable")
+        self.assertEqual(self._revision_count(), before)
+
     def test_save_api_relay_uses_exact_active_relay_model_identity(self):
         current = {
             "available": True, "source_count": 1, "source_refs": ["turn:1"],

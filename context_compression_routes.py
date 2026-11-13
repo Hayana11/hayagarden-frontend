@@ -116,7 +116,7 @@ def _provider_registry() -> dict[str, Any]:
     try:
         from relay.manager import resolve_active_relay_model_identity
         relay_model = str(resolve_active_relay_model_identity() or '').strip()
-        if relay_model:
+        if relay_model and relay_model.lower() != 'unknown':
             relay_models.append({
                 'id': relay_model, 'label': relay_model, 'enabled': True,
                 'disabled_reason': None,
@@ -310,7 +310,11 @@ def create_context_compression_blueprint(
                 active_relay_model = str(resolve_active_relay_model_identity() or '').strip()
             except Exception:
                 active_relay_model = ''
-            if not active_relay_model or model != active_relay_model:
+            if (
+                not active_relay_model
+                or active_relay_model.lower() == 'unknown'
+                or model != active_relay_model
+            ):
                 return _json_error('compression_model_unavailable', 400)
             frozen_model_identity = active_relay_model
         from continuity.settings import save_revision, sealing_policy_for_revision
