@@ -156,6 +156,9 @@ class ChatTerminalContractTests(unittest.TestCase):
                 gateway, '_get_provider', return_value='claude_code',
             ))
             stack.enter_context(mock.patch.object(
+                gateway, 'CC_TOKEN', 'test-oauth-token',
+            ))
+            stack.enter_context(mock.patch.object(
                 gateway, '_gen_acquire_or_wait', return_value=('own', None),
             ))
             stack.enter_context(mock.patch.object(gateway, '_gen_release'))
@@ -2014,6 +2017,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(gateway, '_CC_RESIDENT', resident))
             stack.enter_context(mock.patch.object(
+                gateway, 'CC_TOKEN', 'test-oauth-token',
+            ))
+            stack.enter_context(mock.patch.object(
                 gateway, '_retire_cc_resident_for_provider_change', return_value=False,
             ))
             stack.enter_context(mock.patch.object(gateway, '_get_model', return_value='mock-model'))
@@ -2144,6 +2150,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(
                 gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, 'CC_TOKEN', 'test-oauth-token',
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_get_model', return_value='mock-model',
@@ -2317,6 +2326,9 @@ class DailyCancellationObservabilityTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(
                 gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, 'CC_TOKEN', 'test-oauth-token',
             ))
             stack.enter_context(mock.patch.object(
                 gateway, '_get_model', return_value='mock-model',
