@@ -39,8 +39,11 @@ class MemoryCandidateTest(unittest.TestCase):
         ids = []
         for target in ("SELF", "HAYA"):
             ids.append(create_profile_patch_candidate(
-                str(self.posts), target=target, proposed_patch="完整、不截断的候选修订",
+                str(self.posts), target=target, source_day="2026-11-11",
+                changes=[{"section": "preferences", "proposed_text": "完整、不截断的候选修订",
+                          "evidence_refs": refs}],
                 source_refs=refs, derived_refs=["dayblock:2026-11-11:generation"],
+                prompt_version="test-v1",
             ))
         reopened = [load_candidate(str(self.posts), candidate_id) for candidate_id in ids]
         self.assertEqual(["SELF", "HAYA"], [item["payload"]["target"] for item in reopened])

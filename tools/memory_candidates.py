@@ -157,17 +157,26 @@ def capture_memory_write_candidate(
 
 
 def create_profile_patch_candidate(
-    db_path: str, *, target: str, proposed_patch: str, source_refs: Iterable[str],
-    derived_refs: Iterable[str] = (), provenance_status: str = "resolved",
+    db_path: str, *, target: str, source_day: str, changes: Iterable[dict[str, Any]],
+    source_refs: Iterable[str], derived_refs: Iterable[str], prompt_version: str,
+    provenance_status: str = "resolved",
 ) -> str:
     target = str(target or "").strip().upper()
-    if target not in {"SELF", "HAYA"} or not isinstance(proposed_patch, str) or not proposed_patch.strip():
-        raise ValueError("profile patch requires target SELF/HAYA and nonempty text")
+    changes, derived_refs = list(changes), list(derived_refs)
+    if target not in {"SELF", "HAYA"} or not changes or not source_day or not prompt_version:
+        raise ValueError("profile patch requires target, day, prompt version, and changes")
+    identity = json.dumps(
+        ["daily_profile", target, source_day, derived_refs, prompt_version],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    candidate_id = "memcand:profile:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return create_candidate(
         db_path, candidate_kind="profile_patch",
-        payload={"target": target, "proposed_patch": proposed_patch},
+        payload={"target": target, "source_day": source_day, "prompt_version": prompt_version,
+                 "changes": changes},
         source_type="chat_messages", source_refs=source_refs, derived_refs=derived_refs,
         producer="daily_profile", priority=50, provenance_status=provenance_status,
+        candidate_id=candidate_id,
     )
 
 
