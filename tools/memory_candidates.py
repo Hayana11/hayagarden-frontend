@@ -1,6 +1,7 @@
 """Durable intake candidates and read-only provenance back to canonical sources."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -52,6 +53,7 @@ def create_candidate(
     priority: int = 0,
     explicit_intent: bool = False,
     provenance_status: str = "resolved",
+    candidate_id: str | None = None,
 ) -> str:
     if provenance_status not in {"resolved", "unresolved"}:
         raise ValueError("provenance_status must be resolved or unresolved")
@@ -61,13 +63,13 @@ def create_candidate(
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
     source_refs_json = json.dumps(list(source_refs), ensure_ascii=False, separators=(",", ":"))
     derived_refs_json = json.dumps(list(derived_refs), ensure_ascii=False, separators=(",", ":"))
-    candidate_id = "memcand:" + uuid.uuid4().hex
+    candidate_id = candidate_id or "memcand:" + uuid.uuid4().hex
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn = sqlite3.connect(str(db_path), timeout=10)
     try:
         ensure_schema(conn)
         conn.execute(
-            """INSERT INTO memory_candidates (
+            """INSERT OR IGNORE INTO memory_candidates (
                 candidate_id,candidate_kind,payload_json,source_type,source_refs_json,
                 derived_refs_json,producer,priority,explicit_intent,provenance_status,
                 status,created_at
@@ -138,11 +140,19 @@ def capture_memory_write_candidate(
     turn_id: str | None,
 ) -> str:
     source_type, source_refs, provenance_status = _chat_turn_source(db_path, turn_id)
+    stable_id = None
+    if source_refs:
+        identity = json.dumps(
+            ["memory.write", source_type, source_refs, content],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        stable_id = "memcand:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return create_candidate(
         db_path, candidate_kind="memory",
         payload={"content": content, "surface": str(surface or "")},
         source_type=source_type, source_refs=source_refs, producer="memory.write",
         priority=100, explicit_intent=True, provenance_status=provenance_status,
+        candidate_id=stable_id,
     )
 
 

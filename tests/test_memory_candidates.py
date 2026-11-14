@@ -47,6 +47,13 @@ class MemoryCandidateTest(unittest.TestCase):
         self.assertEqual([refs, refs], [item["source_refs"] for item in reopened])
         self.assertEqual(["pending", "pending"], [item["status"] for item in reopened])
 
+    def _memory_write_candidates(self):
+        with sqlite3.connect(self.posts) as conn:
+            ids = conn.execute(
+                "SELECT candidate_id FROM memory_candidates WHERE producer='memory.write'"
+            ).fetchall()
+        return [load_candidate(str(self.posts), row[0]) for row in ids]
+
     def test_memory_write_keeps_kernel_write_and_adds_candidate(self):
         from tools import memory_kernel_store
 
@@ -57,7 +64,8 @@ class MemoryCandidateTest(unittest.TestCase):
                 str(self.posts), content="这条明确说要长期记住的内容",
                 shadow_surface="api_relay", shadow_turn_id="turn-live",
             )
-        candidate = load_candidate(str(self.posts), result["candidate_id"])
+        candidate, = self._memory_write_candidates()
+        self.assertNotIn("candidate_id", result)
         self.assertEqual("kernel", result["store"])
         self.assertEqual(["chat_messages:41"], candidate["source_refs"])
         self.assertEqual("resolved", candidate["provenance_status"])
@@ -66,6 +74,40 @@ class MemoryCandidateTest(unittest.TestCase):
         self.assertEqual("memory.write", candidate["producer"])
         self.assertIsNotNone(memory_kernel_store.find_head(
             "这条明确说要长期记住的内容", kernel_db=self.kernel,
+        ))
+
+    def test_memory_write_retry_keeps_one_candidate_and_kernel_deduplicates(self):
+        with patch("tools.memory_kernel_store.default_runtime", return_value=None), patch.dict(
+            "os.environ", {"MEMORY_KERNEL_DB": str(self.kernel)}, clear=False,
+        ):
+            first = write_memory(
+                str(self.posts), content="重复提交的长期记忆",
+                shadow_surface="api_relay", shadow_turn_id="turn-live",
+            )
+            second = write_memory(
+                str(self.posts), content="重复提交的长期记忆",
+                shadow_surface="api_relay", shadow_turn_id="turn-live",
+            )
+        self.assertEqual({"status", "store", "kernel_state_id", "ombre_bucket_id", "deduplicated"}, set(first))
+        self.assertFalse(first["deduplicated"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(first["kernel_state_id"], second["kernel_state_id"])
+        self.assertEqual(1, len(self._memory_write_candidates()))
+
+    def test_candidate_persistence_failure_does_not_block_kernel_write(self):
+        from tools import memory_kernel_store
+
+        with patch("tools.memory_candidates.capture_memory_write_candidate", side_effect=OSError("disk unavailable")), \
+             patch("tools.memory_kernel_store.default_runtime", return_value=None), patch.dict(
+            "os.environ", {"MEMORY_KERNEL_DB": str(self.kernel)}, clear=False,
+        ):
+            result = write_memory(
+                str(self.posts), content="Kernel 正式写入不依赖候选旁路",
+                shadow_surface="api_relay", shadow_turn_id="turn-live",
+            )
+        self.assertEqual({"status", "store", "kernel_state_id", "ombre_bucket_id", "deduplicated"}, set(result))
+        self.assertIsNotNone(memory_kernel_store.find_head(
+            "Kernel 正式写入不依赖候选旁路", kernel_db=self.kernel,
         ))
 
     def test_missing_turn_mapping_is_retained_as_unresolved(self):
