@@ -18,6 +18,8 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'ledger_read',
   'ledger_budget_read',
   'ledger_write',
+  'calendar_read',
+  'calendar_write',
   'gallery_save',
   'gallery_recall',
   'gallery_screenshot',
@@ -33,6 +35,8 @@ const ADAPTER_MODULES = Object.freeze({
   ledger_read: 'tools.ledger_internal_adapter',
   ledger_budget_read: 'tools.ledger_internal_adapter',
   ledger_write: 'tools.ledger_internal_adapter',
+  calendar_read: 'tools.calendar_capability_adapter',
+  calendar_write: 'tools.calendar_capability_adapter',
   gallery_save: 'tools.gallery_capability_adapter',
   gallery_recall: 'tools.gallery_capability_adapter',
   gallery_screenshot: 'tools.gallery_capability_adapter',
@@ -118,7 +122,9 @@ function callAdapter(toolName, input, verifiedTurnId = null) {
                 ? 'get_ledger'
                 : toolName === 'ledger_budget_read'
                   ? 'get_ledger_budget'
-                  : 'add_ledger',
+                  : toolName === 'calendar_read' || toolName === 'calendar_write'
+                    ? toolName
+                    : 'add_ledger',
     ...input,
     db_path: dbPath,
   };
@@ -299,6 +305,43 @@ function buildServer() {
       category: category ?? null,
       note: note ?? null,
       date: date ?? null,
+    }),
+  );
+
+  server.tool(
+    'calendar_read',
+    {
+      start_date: z.string().optional().describe('YYYY-MM-DD，默认今天（手机时区）'),
+      days: z.number().int().min(1).max(30).optional().describe('从 start_date 起看几天，默认 1'),
+    },
+    async ({ start_date, days }) => runProxy('calendar_read', {
+      start_date: start_date ?? null,
+      days: days ?? null,
+    }),
+  );
+  server.tool(
+    'calendar_write',
+    {
+      op: z.enum(['create', 'update', 'delete']).describe('create 新建；update / delete 只能改「费佳」日历里的事件'),
+      event_id: z.string().optional().describe('update / delete 的目标，来自 calendar_read 里 mine=true 的事件'),
+      title: z.string().optional().describe('标题；create 必填'),
+      start: z.string().optional().describe("'YYYY-MM-DD HH:MM'（手机时区）；全天事件用 'YYYY-MM-DD'；create 必填"),
+      end: z.string().optional().describe('同 start 格式；省略时定时事件默认 1 小时、全天事件默认当天'),
+      all_day: z.boolean().optional().describe('默认按 start 的格式判断'),
+      location: z.string().optional(),
+      notes: z.string().optional(),
+      reminder_minutes: z.number().int().optional().describe('提前几分钟提醒；定时事件默认 10，-1 表示不提醒'),
+    },
+    async (input) => runProxy('calendar_write', {
+      op: input.op,
+      event_id: input.event_id ?? null,
+      title: input.title ?? null,
+      start: input.start ?? null,
+      end: input.end ?? null,
+      all_day: input.all_day ?? null,
+      location: input.location ?? null,
+      notes: input.notes ?? null,
+      reminder_minutes: input.reminder_minutes ?? null,
     }),
   );
 

@@ -92,7 +92,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "gallery.save", "gallery.recall", "gallery.screenshot"),
+            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "calendar.read", "calendar.write", "gallery.save", "gallery.recall", "gallery.screenshot"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
