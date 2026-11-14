@@ -3469,7 +3469,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         ensure_mail_schema(mail_db)
         record_pending_mail_notice(mail_db, 'daily-map-failure')
         plan.assembly['pending_mail_notice'] = (
-            '【邮箱提示】\\n有新的邮件。\\nmessage id: daily-map-failure'
+            '【邮箱提示】\n有新的邮件。\nmessage id: daily-map-failure'
         )
         plan.assembly['pending_mail_ids'] = ['daily-map-failure']
         list(dr.stream_daily_resident_turn(
@@ -4009,7 +4009,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             ensure_mail_schema(mail_db)
             record_pending_mail_notice(mail_db, 'daily-success')
             plan.assembly['pending_mail_notice'] = (
-                '【邮箱提示】\\n有新的邮件。\\nmessage id: daily-success'
+                '【邮箱提示】\n有新的邮件。\nmessage id: daily-success'
             )
             plan.assembly['pending_mail_ids'] = ['daily-success']
 
@@ -4744,7 +4744,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
 
         plan = types.SimpleNamespace(
             assembly={
-                'state': '【此刻有一点变化】\\n旧 transport delta',
+                'state': '【此刻有一点变化】\n旧 transport delta',
                 'state_snapshot': {
                     'emotion': 'mood=平静',
                     'drive': 'fatigue=0.10 stress=0.10',

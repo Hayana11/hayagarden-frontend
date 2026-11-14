@@ -6963,7 +6963,16 @@ def _attempt_capacity_swap_before_stdin(
                     'capacity ContextPlan was lost during reprepare',
                     error_code='context_plan_capacity_lost_after_reprepare',
                 )
+            pending_mail_notice = str(
+                plan.assembly.get('pending_mail_notice') or ''
+            )
+            pending_mail_ids = list(
+                plan.assembly.get('pending_mail_ids') or []
+            )
             plan.assembly = _project_capacity_context_bootstrap(plan)
+            if pending_mail_ids:
+                plan.assembly['pending_mail_notice'] = pending_mail_notice
+                plan.assembly['pending_mail_ids'] = pending_mail_ids
             raw_refs = tuple(
                 str(member.source_ref)
                 for representation in context_plan.representations
