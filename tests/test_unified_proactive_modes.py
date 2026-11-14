@@ -384,6 +384,14 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         self.assertFalse(result['silent'])
         self.assertEqual(result['text'], '早安')
 
+    def test_normal_wake_returns_exact_one_shot_claims(self):
+        claims = {'pending_mail_ids': ['wake-mail-1', 'wake-mail-2']}
+        result, _ = self._run(events=[(
+            'done',
+            ('wake text', '', {'jsonl_usage': {'stream_totals_match': True}}, claims),
+        )])
+        self.assertEqual(result['one_shot_claims'], claims)
+
     def test_normal_wake_returns_native_and_self_state_segments(self):
         events = [
             ('think', 'native thinking'),

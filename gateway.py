@@ -5868,6 +5868,7 @@ def _run_unified_normal_main_chat_turn(
         tool_calls = []
         tool_decisions = {}
         usage = {}
+        one_shot_claims = {}
         wake_cache_refresh_candidate = None
         saw_done = False
         for evt, payload in filter_display_thinking_events(
@@ -5926,6 +5927,8 @@ def _run_unified_normal_main_chat_turn(
                 saw_done = True
                 if isinstance(payload, tuple) and len(payload) >= 3:
                     usage_obj = payload[2] if isinstance(payload[2], dict) else {}
+                    if len(payload) >= 4 and isinstance(payload[3], dict):
+                        one_shot_claims = dict(payload[3])
                     wake_cache_refresh_candidate = (
                         getattr(usage_obj, '_candidate_cache_refresh_at', None),
                         getattr(usage_obj, '_candidate_cache_refresh_monotonic', None),
@@ -6036,6 +6039,7 @@ def _run_unified_normal_main_chat_turn(
             'self_state': ''.join(self_state_acc),
             'display_segments': display_segments.to_json(),
             'tool_calls': tool_calls,
+            'one_shot_claims': one_shot_claims,
             'provider': 'claude_code',
             'model_identity': str(
                 getattr(resident, '_model_identity', None)
@@ -7695,7 +7699,10 @@ def _stream_cc_daily_soft_window(
     from chat import context_window as _cw
     from chat import cold_bootstrap_budget as _cbb
     from chat import turn_birth as _turn_birth
-    from chat.system_builder import build_cc_daily_static_parts
+    from chat.system_builder import (
+        build_cc_daily_static_parts,
+        build_cc_one_shot,
+    )
 
     # First-turn READY bypass — before ordinary prepare_daily_turn.
     try:
@@ -7899,6 +7906,13 @@ def _stream_cc_daily_soft_window(
         _full_system = _static_parts['full_system']
         _daily_plan.manifest.update(
             _static_parts.get('ombre_prompt_observation') or {},
+        )
+        daily_one_shot = build_cc_one_shot(include_wake=False)
+        _daily_plan.assembly['pending_mail_notice'] = str(
+            daily_one_shot.get('pending_mail_notice') or ''
+        )
+        _daily_plan.assembly['pending_mail_ids'] = list(
+            daily_one_shot.get('pending_mail_ids') or []
         )
         key = _daily_plan.resident_key
         _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
@@ -10356,6 +10370,15 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'reason': 'NORMAL_WAKE_MAIN_CHAT_DELIVERY_FAILED',
                 'wake_run_id': wake_run_id,
             })
+        from chat.system_builder import consume_cc_one_shot_claims
+        consume_cc_one_shot_claims(
+            get_db,
+            {
+                'pending_mail_ids': (
+                    main_turn.get('one_shot_claims') or {}
+                ).get('pending_mail_ids') or [],
+            },
+        )
         _wake_run_id_mark(wake_run_id)
         _wake_live_trace(
             wake_run_id,
