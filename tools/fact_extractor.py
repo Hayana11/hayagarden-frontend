@@ -1,7 +1,10 @@
 #!/usr/bin/env python3.11
-"""长期事实抽取（记忆升级·方案三）——每晚 05:40 cron，赶在 summarizer(06:00) 之前。
+"""LEGACY RETIRED: this historical FACT extractor is no longer scheduled.
 
-问题：约定、纪念日、偏好这类"事实"以前只活在某天的日摘要里，套娃压缩两层后
+Kept for history and rollback only. Deployment removes its exact root-crontab entry.
+The old behavior below is documentation; do not re-enable automatic FACT extraction.
+
+历史实现说明：约定、纪念日、偏好这类"事实"以前只活在某天的日摘要里，套娃压缩两层后
 细节就磨没了。事件可以衰减，事实不该衰减——episodic / semantic 分离。
 
 做法：读前一天的 chat_messages，让 DeepSeek 抽取"值得永久记住的稳定事实"
