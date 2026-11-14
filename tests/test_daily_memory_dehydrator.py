@@ -13,6 +13,8 @@ from tools.daily_memory_dehydrator import (
     _chunks, _message_text, update_day, update_from_trace,
 )
 from tools.memory_candidates import CandidateSourceTrace, load_candidate
+from tools.media_asset_audit import audit_media_assets
+from tools.media_assets import save_media_asset
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,6 +173,131 @@ class DailyMemoryDehydratorTest(unittest.TestCase):
         self.assertIn("猫" * 120, calls[0][0].prompt_text)
         self.assertIn("[msg:102][author=assistant]", calls[1][0].prompt_text)
         self.assertEqual(2, result["model_calls"])
+
+    def _image_trace(self, *, duplicate_ref=False):
+        image_urls = ["/static/uploads/chat-image.png"]
+        if duplicate_ref:
+            image_urls.append("/static/uploads/same-bytes.png")
+        return CandidateSourceTrace(
+            source_refs=("chat_messages:101", "chat_messages:102"),
+            derived_refs=("dayblock:2026-11-07:generation-abc",),
+            unresolved_refs=(),
+            raw_messages=(
+                {"id": 101, "author": "hayana", "content": "这张图记录了项目方案。",
+                 "attachments": json.dumps([{"type": "image", "url": url} for url in image_urls])},
+                {"id": 102, "author": "assistant", "content": "我会记下决定。", "attachments": "[]"},
+            ),
+            evidence_text="派生摘要只做导航",
+        )
+
+    def _run_image_trace(self, trace, evidence_ids, *, annotator=None, media_db=None, media_root=None):
+        prompts = []
+        result = update_from_trace(
+            self.db, source_day="2026-11-07", trace=trace, authority=self.authority,
+            generate_fn=lambda request, authority: (
+                prompts.append(request.prompt_text)
+                or self.result([{"content": "项目方案已确认。", "evidence_message_ids": evidence_ids}], authority)
+            ),
+            image_resolver=lambda ref: (b"same image bytes", "image/png"),
+            image_annotator=annotator or (lambda data, mime: {
+                "caption": "屏幕上有一张表格", "ocr_text": "方案 A", "entities": ["屏幕"],
+                "model_identity": "relay-vision-test",
+            }),
+            media_db_path=media_db or str(self.root / "media.db"),
+            media_root=media_root or str(self.root / "media-root"),
+        )
+        return result, prompts
+
+    def test_candidate_image_evidence_promotes_asset_and_stable_ref(self):
+        trace = self._image_trace()
+        first, _ = self._run_image_trace(trace, [101])
+        second, _ = self._run_image_trace(trace, [101])
+        with sqlite3.connect(self.db) as db:
+            rows = db.execute("SELECT candidate_id,source_refs_json FROM memory_candidates").fetchall()
+        with sqlite3.connect(self.root / "media.db") as db:
+            assets = db.execute("SELECT asset_id,sha256,caption,ocr_text,entities_json FROM media_assets").fetchall()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(first["candidates"][0]["candidate_id"], rows[0][0])
+        refs = json.loads(rows[0][1])
+        self.assertEqual(["chat_messages:101", first["candidates"][0]["media_asset_refs"][0]], refs)
+        self.assertEqual(first["candidates"], second["candidates"])
+        self.assertEqual(1, len(assets))
+        self.assertTrue(assets[0][0].startswith("sha256-"))
+        self.assertEqual(assets[0][0][7:], assets[0][1])
+        self.assertEqual("屏幕上有一张表格", assets[0][2])
+        self.assertEqual("方案 A", assets[0][3])
+        self.assertEqual('["屏幕"]', assets[0][4])
+        self.assertEqual({"total": 1, "missing_file": 0, "hash_mismatch": 0, "duplicate_sha": 0},
+                         audit_media_assets(str(self.root / "media.db"), str(self.root / "media-root")))
+
+    def test_visual_annotation_is_separate_from_original_chat_text(self):
+        result, prompts = self._run_image_trace(self._image_trace(), [101])
+        self.assertEqual(1, result["candidate_count"])
+        prompt = prompts[0]
+        self.assertIn("聊天原文：\n这张图记录了项目方案。", prompt)
+        self.assertIn("[机器视觉标注，仅供证据理解，不代表用户或助手说过]", prompt)
+        self.assertIn("caption: 屏幕上有一张表格", prompt)
+        self.assertLess(prompt.index("聊天原文"), prompt.index("[机器视觉标注"))
+
+    def test_vision_failure_keeps_text_candidate_and_blank_asset_annotation(self):
+        result, _ = self._run_image_trace(
+            self._image_trace(), [101], annotator=lambda _data, _mime: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        self.assertEqual(1, result["candidate_count"])
+        with sqlite3.connect(self.root / "media.db") as db:
+            caption, ocr, entities = db.execute(
+                "SELECT caption,ocr_text,entities_json FROM media_assets"
+            ).fetchone()
+        self.assertEqual(("", "", "[]"), (caption, ocr, entities))
+
+    def test_uncited_image_is_not_promoted(self):
+        result, _ = self._run_image_trace(self._image_trace(), [102])
+        self.assertEqual(1, result["candidate_count"])
+        self.assertEqual([], result["candidates"][0]["media_asset_refs"])
+        self.assertFalse((self.root / "media.db").exists())
+        self.assertFalse((self.root / "media-root" / "gallery" / "evidence").exists())
+
+    def test_distinct_refs_with_same_bytes_share_one_asset(self):
+        result, _ = self._run_image_trace(self._image_trace(duplicate_ref=True), [101])
+        self.assertEqual(1, result["candidate_count"])
+        with sqlite3.connect(self.root / "media.db") as db:
+            count, = db.execute("SELECT COUNT(*) FROM media_assets").fetchone()
+        self.assertEqual(1, count)
+        self.assertEqual(1, len(result["candidates"][0]["media_asset_refs"]))
+
+    def test_audit_reports_missing_and_hash_mismatch_without_repair(self):
+        db_path = str(self.root / "gallery.db")
+        root = self.root / "media-root"
+        missing_id = save_media_asset(b"missing bytes", "image/png", db_path=db_path, data_root=root)
+        bad_id = save_media_asset(b"original bytes", "image/jpeg", db_path=db_path, data_root=root)
+        with sqlite3.connect(db_path) as db:
+            paths = dict(db.execute("SELECT asset_id,storage_uri FROM media_assets").fetchall())
+        (root / paths[missing_id]).unlink()
+        (root / paths[bad_id]).write_bytes(b"corrupted bytes")
+        self.assertEqual(
+            {"total": 2, "missing_file": 1, "hash_mismatch": 1, "duplicate_sha": 0},
+            audit_media_assets(db_path, root),
+        )
+
+    def test_same_hash_with_mime_aliases_still_uses_one_asset(self):
+        db_path = str(self.root / "gallery.db")
+        root = self.root / "media-root"
+        first = save_media_asset(b"same bytes", "image/png", db_path=db_path, data_root=root)
+        second = save_media_asset(b"same bytes", "image/jpeg", db_path=db_path, data_root=root)
+        self.assertEqual(first, second)
+        with sqlite3.connect(db_path) as db:
+            count, = db.execute("SELECT COUNT(*) FROM media_assets").fetchone()
+        self.assertEqual(1, count)
+
+    def test_gallery_db_old_mem_id_is_not_modified_by_media_assets(self):
+        db_path = str(self.root / "gallery.db")
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE TABLE gallery_photos (pid TEXT PRIMARY KEY, mem_id INTEGER)")
+            db.execute("INSERT INTO gallery_photos VALUES ('old-photo', 731)")
+        save_media_asset(b"evidence bytes", "image/png", db_path=db_path, data_root=self.root / "media-root")
+        with sqlite3.connect(db_path) as db:
+            mem_id, = db.execute("SELECT mem_id FROM gallery_photos WHERE pid='old-photo'").fetchone()
+        self.assertEqual(731, mem_id)
 
     def test_messages_are_never_truncated_or_split(self):
         rows = list(self.trace.raw_messages)
