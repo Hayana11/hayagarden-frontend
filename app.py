@@ -2183,36 +2183,115 @@ def book_annotations(book_id):
 @app.route('/api/books/<book_id>/annotations', methods=['POST'])
 def create_annotation(book_id):
     import uuid, datetime as _dt
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    chunk_id = str(data.get('chunkId') or '').strip()
+    quote = str(data.get('quote') or '').strip()
+    author = 'fy' if data.get('author') in ('fy', 'fyodor') else 'haya'
+    try:
+        paragraph_idx = int(data.get('paragraphIdx', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'paragraphIdx must be an integer'}), 400
+    kind = data.get('kind', 'highlight')
+    reply_to = str(data.get('replyTo') or '').strip()
+    if not chunk_id or paragraph_idx < 0 or kind not in ('highlight', 'note'):
+        return jsonify({'error': 'invalid annotation'}), 400
+    if author == 'fy':
+        progress = _read_json(f'{CO_DATA}/progress.json', {}).get(book_id, {})
+        pending = progress.get('assistantPendingBatch') or {}
+        if (pending.get('chunkId') != chunk_id
+                or paragraph_idx < pending.get('startParagraph', 0)
+                or paragraph_idx > pending.get('endParagraph', -1)):
+            return jsonify({'error': 'paragraph is outside the assistant reading batch'}), 403
     ann = {
         'id': str(uuid.uuid4()),
         'bookId': book_id,
-        'chunkId': data.get('chunkId',''),
-        'quote': data.get('quote',''),
-        'kind': data.get('kind','highlight'),
-        'author': data.get('author','haya'),
-        'note': data.get('note',''),
-        'paragraphIdx': data.get('paragraphIdx', 0),
+        'chunkId': chunk_id,
+        'quote': quote,
+        'kind': kind,
+        'author': author,
+        'note': str(data.get('note') or ''),
+        'paragraphIdx': paragraph_idx,
         'createdAt': _dt.datetime.utcnow().isoformat() + 'Z',
     }
+    if reply_to:
+        ann['replyTo'] = reply_to
     with open(f'{CO_DATA}/annotations.jsonl', 'a') as f:
         f.write(_json.dumps(ann, ensure_ascii=False) + '\n')
     return jsonify({'annotation': ann}), 201
 
+@app.route('/api/books/<book_id>/progress', methods=['GET'])
+def book_progress(book_id):
+    progress = _read_json(f'{CO_DATA}/progress.json', {}).get(book_id, {'readChunkIds': []})
+    return jsonify({'progress': progress})
+
 @app.route('/api/books/<book_id>/progress', methods=['POST'])
 def update_book_progress(book_id):
     import datetime as _dt
-    data = request.get_json()
-    prog = _read_json(f'{CO_DATA}/progress.json', {})
-    bp = prog.get(book_id, {'readChunkIds': []})
-    chunk_id = data.get('chunkId')
-    if chunk_id and chunk_id not in bp['readChunkIds']:
-        bp['readChunkIds'].append(chunk_id)
-    bp['lastChunkId'] = chunk_id or bp.get('lastChunkId')
-    bp['lastReadAt'] = _dt.datetime.utcnow().isoformat() + 'Z'
-    prog[book_id] = bp
-    open(f'{CO_DATA}/progress.json','w').write(_json.dumps(prog, ensure_ascii=False, indent=2))
-    return jsonify({'ok': True})
+    data = request.get_json(silent=True) or {}
+    all_progress = _read_json(f'{CO_DATA}/progress.json', {})
+    bp = all_progress.get(book_id, {'readChunkIds': []})
+    bp.setdefault('readChunkIds', [])
+    manifest = _read_json(f'{CO_DATA}/books/{book_id}/manifest.json', {})
+    chapters = [c for c in manifest.get('chunks', [])
+                if c.get('title') and not re.search('cover', c.get('title', ''), re.I)]
+    actor = data.get('actor', 'haya')
+    if actor == 'fy':
+        unlocked = max((i for i, c in enumerate(chapters)
+                        if c.get('id') in bp['readChunkIds']), default=-1)
+        pending = bp.get('assistantPendingBatch') or {}
+        batch = data.get('pendingBatch')
+        if batch:
+            idx = next((i for i, c in enumerate(chapters) if c.get('id') == batch.get('chunkId')), -1)
+            try:
+                start, end = int(batch.get('startParagraph')), int(batch.get('endParagraph'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'invalid reading batch'}), 400
+            if (idx < 0 or idx > unlocked or start < 0 or end < start
+                    or not batch.get('batchId') or (pending and pending.get('batchId') != batch.get('batchId'))):
+                return jsonify({'error': 'reading batch is outside Haya’s unlocked chapters'}), 403
+            bp['assistantPendingBatch'] = {
+                'batchId': str(batch['batchId']), 'chunkId': chapters[idx]['id'],
+                'startParagraph': start, 'endParagraph': end,
+            }
+        elif data.get('confirmBatchId'):
+            if pending.get('batchId') != data.get('confirmBatchId'):
+                return jsonify({'error': 'reading batch confirmation does not match'}), 409
+            idx = next((i for i, c in enumerate(chapters) if c.get('id') == pending.get('chunkId')), -1)
+            if idx < 0 or idx > unlocked:
+                return jsonify({'error': 'chapter is no longer unlocked'}), 403
+            try:
+                text = open(f"{CO_DATA}/books/{book_id}/{chapters[idx]['path']}").read().replace('\r', '')
+            except OSError:
+                return jsonify({'error': 'chapter text not found'}), 404
+            paragraphs = [p for p in re.split(r'\n\s*\n+', text) if p.strip()]
+            end = pending['endParagraph']
+            if end >= len(paragraphs):
+                return jsonify({'error': 'reading batch exceeds chapter length'}), 400
+            bp['assistantPosition'] = {'chunkId': pending['chunkId'], 'paragraphIdx': end}
+            bp.pop('assistantPendingBatch', None)
+        else:
+            return jsonify({'error': 'a pending or confirmed batch is required'}), 400
+    elif actor == 'haya':
+        chunk_id = data.get('chunkId')
+        if chunk_id:
+            if not any(c.get('id') == chunk_id for c in chapters):
+                return jsonify({'error': 'chapter not found'}), 404
+            try:
+                paragraph_idx = int(data.get('paragraphIdx', bp.get('lastParagraphIdx', 0)))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'paragraphIdx must be an integer'}), 400
+            if paragraph_idx < 0:
+                return jsonify({'error': 'paragraphIdx must not be negative'}), 400
+            if chunk_id not in bp['readChunkIds']:
+                bp['readChunkIds'].append(chunk_id)
+            bp['lastChunkId'] = chunk_id
+            bp['lastParagraphIdx'] = paragraph_idx
+            bp['lastReadAt'] = _dt.datetime.utcnow().isoformat() + 'Z'
+    else:
+        return jsonify({'error': 'actor must be haya or fy'}), 400
+    all_progress[book_id] = bp
+    open(f'{CO_DATA}/progress.json', 'w').write(_json.dumps(all_progress, ensure_ascii=False, indent=2))
+    return jsonify({'ok': True, 'progress': bp})
 
 @app.route('/read')
 def read_page():
