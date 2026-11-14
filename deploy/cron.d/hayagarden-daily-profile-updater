@@ -1,0 +1,2 @@
+CRON_TZ=UTC
+15 19 * * * root /usr/bin/flock -n /run/lock/hayagarden-daily-profile-updater.lock /usr/bin/python3.11 /opt/frontend/tools/daily_profile_updater.py >> /var/log/hayagarden-daily-profile-updater.log 2>&1
