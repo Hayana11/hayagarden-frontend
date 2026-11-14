@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import sys
 import tempfile
@@ -18,7 +20,27 @@ from chat.system_builder import (
     consume_cc_one_shot_claims,
     format_one_shot,
 )
-from cc_resident import ResidentSession
+from cc_resident import ResidentError, ResidentSession
+
+
+class FakeProc:
+    def __init__(self, lines):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO(''.join(line + '\n' for line in lines))
+        self.stderr = io.StringIO()
+        self._code = None
+
+    def poll(self):
+        return self._code
+
+    def terminate(self):
+        self._code = 0
+
+    def kill(self):
+        self._code = -9
+
+    def wait(self, timeout=None):
+        return self._code or 0
 
 
 class PendingMailNoticeTests(unittest.TestCase):
@@ -70,6 +92,49 @@ class PendingMailNoticeTests(unittest.TestCase):
 
         self.assertEqual(failed_turn_claim, ['gmail_1'])
         self.assertEqual(next_turn['pending_mail_ids'], ['gmail_1'])
+
+    def test_model_terminal_error_keeps_mail_notice_pending(self):
+        record_pending_mail_notice(self.get_db, 'gmail_1')
+        error_result = json.dumps({
+            'type': 'result',
+            'is_error': True,
+            'result': 'temporary provider error',
+            'usage': {},
+        })
+        resident = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        resident._proc = FakeProc([error_result])
+        resident._cold = False
+
+        with self.assertRaises(ResidentError):
+            list(resident.send_turn('hi', commit_meta={
+                'pending_mail_ids': ['gmail_1'],
+                'state_snapshot': {},
+            }))
+
+        self.assertEqual(peek_pending_mail_notice_ids(self.get_db), ['gmail_1'])
+
+    def test_terminal_without_assistant_commit_keeps_notice_pending(self):
+        record_pending_mail_notice(self.get_db, 'gmail_1')
+        success_result = json.dumps({
+            'type': 'result',
+            'is_error': False,
+            'result': 'ok',
+            'stop_reason': 'end_turn',
+            'usage': {},
+        })
+        resident = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        resident._proc = FakeProc([success_result])
+        resident._cold = False
+
+        events = list(resident.send_turn('hi', commit_meta={
+            'pending_mail_ids': ['gmail_1'],
+            'state_snapshot': {},
+        }))
+        claims = events[-1][1][3]
+
+        self.assertEqual(claims['pending_mail_ids'], ['gmail_1'])
+        # No assistant commit/mapping means the gateway has not consumed this claim.
+        self.assertEqual(peek_pending_mail_notice_ids(self.get_db), ['gmail_1'])
 
     def test_success_consumes_only_ids_carried_by_resident_claims(self):
         record_pending_mail_notice(self.get_db, 'gmail_1')
