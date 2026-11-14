@@ -6,6 +6,7 @@ runtime_config memory.kernel_write is on).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from tools import memory_tool
@@ -39,6 +40,14 @@ def write_memory(
         )
     finally:
         memory_tool.DB_PATH = previous_db_path
+    try:
+        from tools.memory_candidates import capture_memory_write_candidate
+
+        capture_memory_write_candidate(
+            resolved_db_path, content=text, surface=shadow_surface, turn_id=shadow_turn_id,
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("memory.write shadow candidate persistence failed")
     if isinstance(written, memory_tool.KernelWrite):
         # No posts row exists, so the posts-based interop shadow has nothing to observe.
         return {
