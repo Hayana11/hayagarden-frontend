@@ -1,5 +1,5 @@
 [Unit]
-Description=Poll the upstream Gmail MCP and queue Unified Wake for new mail
+Description=Poll the upstream Gmail MCP and record pending mail notices
 After=ai-penpal-mail.service
 
 [Service]

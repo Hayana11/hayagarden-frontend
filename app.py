@@ -5046,6 +5046,25 @@ def _init_self_triggers_table():
 
 _init_self_triggers_table()
 
+from chat.mail_notice_store import (
+    ensure_schema as _ensure_mail_notice_schema,
+    record_pending_mail_notice as _record_pending_mail_notice,
+)
+_ensure_mail_notice_schema(get_db)
+
+
+@app.route('/api/mail_notices', methods=['POST'])
+def record_mail_notice():
+    data = request.get_json(silent=True) or {}
+    message_id = data.get('message_id')
+    if not isinstance(message_id, str) or re.fullmatch(
+        r'[A-Za-z0-9_-]{1,128}', message_id,
+    ) is None:
+        return jsonify({'error': 'message_id invalid'}), 400
+    inserted = _record_pending_mail_notice(get_db, message_id)
+    return jsonify({'ok': True, 'inserted': inserted})
+
+
 @app.route('/api/self_triggers', methods=['POST'])
 def create_self_trigger():
     data = request.get_json() or {}

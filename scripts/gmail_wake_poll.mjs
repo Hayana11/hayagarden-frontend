@@ -6,29 +6,24 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const MAIL_MCP_URL = 'http://127.0.0.1:3457/mcp';
-const SELF_TRIGGER_URL = 'http://127.0.0.1:5050/api/self_triggers';
+const MAIL_NOTICE_URL = 'http://127.0.0.1:5050/api/mail_notices';
 const CURSOR_PATH = '/var/lib/ai-penpal-mail/wake-cursor.json';
 const MAX_RECENT = 50;
 
-export async function queueUnifiedWake(messageId, fetchImpl = globalThis.fetch) {
-  const response = await fetchImpl(SELF_TRIGGER_URL, {
+export async function recordPendingMailNotice(messageId, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl(MAIL_NOTICE_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      minutes: 1,
-      note: `邮箱有新邮件，message id: ${messageId}。`,
-    }),
+    body: JSON.stringify({ message_id: messageId }),
     signal: AbortSignal.timeout(5_000),
     redirect: 'error',
   });
-  if (!response.ok) throw new Error('Unified Wake queue rejected the mail notice');
-  const queued = await response.json();
-  if (queued.ok !== true || !Number.isInteger(queued.id)) {
-    throw new Error('Unified Wake queue returned an invalid trigger');
-  }
+  if (!response.ok) throw new Error('Mail notice registration rejected');
+  const result = await response.json();
+  if (result.ok !== true) throw new Error('Mail notice registration returned an invalid result');
 }
 
-export async function pollRecentMail({ messages, cursorPath = CURSOR_PATH, queueWake = queueUnifiedWake }) {
+export async function pollRecentMail({ messages, cursorPath = CURSOR_PATH, recordNotice = recordPendingMailNotice }) {
   const recentIds = messages
     .map((message) => message?.id)
     .filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id));
@@ -45,19 +40,19 @@ export async function pollRecentMail({ messages, cursorPath = CURSOR_PATH, queue
 
   if (priorIds === null) {
     await writeFile(cursorPath, JSON.stringify({ message_ids: recentIds.slice(0, MAX_RECENT) }), { mode: 0o600 });
-    return { initialized: true, notified: 0 };
+    return { initialized: true, recorded: 0 };
   }
 
   const previous = new Set(priorIds);
   const newIds = recentIds.filter((id) => !previous.has(id));
-  for (const id of newIds) await queueWake(id);
+  for (const id of newIds) await recordNotice(id);
   const messageIds = [...new Set([...recentIds, ...priorIds])].slice(0, MAX_RECENT);
   await writeFile(cursorPath, JSON.stringify({ message_ids: messageIds }), { mode: 0o600 });
-  return { initialized: false, notified: newIds.length };
+  return { initialized: false, recorded: newIds.length };
 }
 
 async function main() {
-  const client = new Client({ name: 'hayagarden-gmail-wake-poll', version: '1.0.0' });
+  const client = new Client({ name: 'hayagarden-gmail-mail-notice-poll', version: '1.0.0' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(MAIL_MCP_URL)));
     const result = await client.callTool({
@@ -69,9 +64,9 @@ async function main() {
     const recent = JSON.parse(text || '{}');
     if (!Array.isArray(recent.messages)) throw new Error('upstream list_recent returned no message list');
     const status = await pollRecentMail({ messages: recent.messages });
-    console.log(`[gmail-wake-poll] initialized=${status.initialized} queued=${status.notified}`);
+    console.log(`[gmail-mail-notice-poll] initialized=${status.initialized} recorded=${status.recorded}`);
   } catch (error) {
-    console.error(`[gmail-wake-poll] failed: ${error?.name || 'Error'}`);
+    console.error(`[gmail-mail-notice-poll] failed: ${error?.name || 'Error'}`);
     process.exitCode = 1;
   } finally {
     await client.close();

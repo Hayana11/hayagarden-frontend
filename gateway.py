@@ -5219,6 +5219,7 @@ def _cc_resident_stream_gen(
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
+            'pending_mail_ids': list(one_shot.get('pending_mail_ids') or []),
         }
         commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:
@@ -5269,6 +5270,7 @@ def _cc_resident_stream_gen(
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
+            'pending_mail_ids': list(one_shot.get('pending_mail_ids') or []),
         }
         commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:

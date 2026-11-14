@@ -2899,6 +2899,7 @@ class ResidentSession:
             'feedback_ids': list(meta.get('feedback_ids') or []),
             'dream_id': meta.get('dream_id'),
             'wake_ids': list(meta.get('wake_ids') or []),
+            'pending_mail_ids': list(meta.get('pending_mail_ids') or []),
         }
 
     def peek_idle_seconds(self):
