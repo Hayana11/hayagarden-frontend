@@ -19,6 +19,16 @@ from tests.test_turn_flight_recorder import (
 
 
 class ChatTerminalContractTests(unittest.TestCase):
+    def test_gateway_startup_initializes_pending_mail_notice_schema(self):
+        conn = gateway.get_db()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_mail_notices'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(exists)
+
     def test_t1_transport_heartbeat_is_not_provider_progress(self):
         tracker = cc_resident.ProviderTerminalTracker(30)
         tracker.observe({'type': 'heartbeat'})
