@@ -162,6 +162,30 @@ class DailyProfileUpdaterTest(unittest.TestCase):
                              conn.execute("SELECT body,version,updated_at FROM profile_documents WHERE target='HAYA'").fetchone())
             self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM profile_document_revisions").fetchone()[0])
 
+    def test_blank_changed_document_is_rejected_without_mutating_existing_target(self):
+        with sqlite3.connect(self.db) as conn:
+            ensure_profile_document_schema(conn)
+            conn.execute(
+                "INSERT INTO profile_documents VALUES ('HAYA','哈娅喜欢巧克力。',3,'keep-this-time','2026-11-06')"
+            )
+            conn.execute(
+                "INSERT INTO profile_document_revisions "
+                "(target,version,before_body,after_body,source_day,evidence_refs_json,provider,model_identity,created_at) "
+                "VALUES ('HAYA',3,'older','哈娅喜欢巧克力。','2026-11-06','[]','api_relay','relay/test-model','revision-v3')"
+            )
+
+        result, _ = self.run_result(
+            self.response(haya="   ", haya_ids=[101]), source_day="2026-11-08",
+        )
+        self.assertEqual([], result["updated_targets"])
+        self.assertEqual(0, result["revision_count"])
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(
+                ("哈娅喜欢巧克力。", 3, "keep-this-time"),
+                conn.execute("SELECT body,version,updated_at FROM profile_documents WHERE target='HAYA'").fetchone(),
+            )
+            self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM profile_document_revisions").fetchone()[0])
+
     def test_same_day_target_is_skipped_on_rerun_and_model_failure_saves_nothing(self):
         first, _ = self.run_result(self.response(haya="HAYA version one", haya_ids=[101]))
         self.assertEqual(["HAYA"], first["updated_targets"])

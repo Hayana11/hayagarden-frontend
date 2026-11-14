@@ -215,7 +215,7 @@ def update_from_trace(
             if not item["changed"]:
                 continue
             body, ids = item.get("updated_document"), item.get("evidence_message_ids")
-            if not isinstance(body, str) or not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):
+            if not isinstance(body, str) or not body.strip() or not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):
                 blocked.add(target)
                 _LOG.warning("daily profile discarded malformed changed result: day=%s target=%s", source_day, target)
                 continue
