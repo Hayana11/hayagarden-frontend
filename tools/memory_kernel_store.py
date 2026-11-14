@@ -1,10 +1,12 @@
 """B-3: Kernel-first memory writes for the live runtime, and Ombre catch-up.
 
-remember() commits Evidence + State + formation Delta to the Kernel first and
-then projects that lineage into Ombre through Ombre's own runtime (see
-memory_kernel_projection). If Ombre is unconfigured or unavailable the lineage
-stays ``pending`` in the projection state and the next sync() retries it; the
-Kernel write already succeeded, so nothing ever falls back to posts.
+remember() commits Evidence + State + formation Delta to the Kernel first.
+Ordinary callers then project the lineage into Ombre through Ombre's own runtime
+(see memory_kernel_projection); source="memory_write" returns with projection
+pending so Kernel commit defines request success. During this transition the
+scheduled sync() still performs the old background projection; after Review is
+connected, projection will be gated on reviewed results. If Ombre is unavailable
+for a projected request, the lineage stays pending and sync() retries it.
 
 sync() keeps the two sides converged without ever letting Ombre be the
 authority: buckets Ombre created on its own (letters, plans, anything a tool
@@ -215,7 +217,12 @@ def remember(
     kernel = MemoryKernel(db)
     kernel.create_state(state, formation, evidence=(evidence,))
     head = projection.Head(lineage, state)
-    ombre_status = _project_one(head, db, _runtime(runtime))
+    if source == "memory_write":
+        # Transitional contract: memory.write stops after Kernel commit. The scheduled
+        # sync() below still projects old-style; Review will later gate that entry.
+        ombre_status = "PENDING"
+    else:
+        ombre_status = _project_one(head, db, _runtime(runtime))
     return {"status": "CREATED", "state_id": state.state_id, "lineage_id": lineage,
             "bucket_id": head.bucket_id, "ombre_status": ombre_status,
             "content_sha256": _sha(text)}
@@ -415,6 +422,8 @@ def sync(kernel_db: Path | None = None, posts_db: Path | None = None, *, runtime
         heads, problems = projection.select_heads(db)
         return {**report, "ombre": f"unavailable:{exc}"[:300], "problems": problems}
     heads, problems = projection.select_heads(db)
+    # Transition period: scheduled sync still projects Kernel heads after the
+    # request-time memory.write path stops doing so. Review will later own this gate.
     report["projected"] = projection.project_heads(heads, ombre, state, kernel_db=db)
     report["problems"] = problems
     return report

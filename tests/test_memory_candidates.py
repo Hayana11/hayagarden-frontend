@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -78,6 +79,50 @@ class MemoryCandidateTest(unittest.TestCase):
         self.assertIsNotNone(memory_kernel_store.find_head(
             "这条明确说要长期记住的内容", kernel_db=self.kernel,
         ))
+
+    def test_memory_write_returns_before_slow_ombre_projection(self):
+        from tools import memory_kernel_store, memory_tool
+
+        calls = []
+        written = []
+        save_memory = memory_tool.save_memory
+
+        def slow_projection(*args, **kwargs):
+            calls.append(True)
+            time.sleep(5.2)
+            return "PENDING:simulated_timeout"
+
+        def capture_write(*args, **kwargs):
+            result = save_memory(*args, **kwargs)
+            written.append(result)
+            return result
+
+        with patch("tools.memory_kernel_store._project_one", side_effect=slow_projection) as project, \
+             patch("tools.memory_kernel_store.default_runtime", return_value=object()), \
+             patch.object(memory_tool, "save_memory", side_effect=capture_write), \
+             patch.dict("os.environ", {
+                 "MEMORY_KERNEL_DB": str(self.kernel),
+                 "MEMORY_KERNEL_PROJECTION_DB": str(self.root / "projection.db"),
+             }, clear=False):
+            started = time.monotonic()
+            result = write_memory(
+                str(self.posts), content="Kernel 落账后即可确认成功",
+                shadow_surface="api_relay", shadow_turn_id="turn-live",
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual([], calls)
+        project.assert_not_called()
+        self.assertEqual("CREATED", result["status"])
+        self.assertEqual("kernel", result["store"])
+        self.assertEqual(1, len(written))
+        self.assertEqual("PENDING", written[0].ombre_status)
+        state = MemoryKernel(self.kernel).get_state(result["kernel_state_id"])
+        self.assertEqual("Kernel 落账后即可确认成功", state.content)
+        candidate, = self._memory_write_candidates()
+        self.assertEqual("pending", candidate["status"])
+        self.assertEqual(["chat_messages:41"], candidate["source_refs"])
 
     def test_memory_write_retry_keeps_one_candidate_and_kernel_deduplicates(self):
         with patch("tools.memory_kernel_store.default_runtime", return_value=None), patch.dict(
