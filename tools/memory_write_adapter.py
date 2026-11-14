@@ -30,6 +30,11 @@ def write_memory(
         return {"status": "CONTENT_TOO_LONG", "max_content_size": MAX_CONTENT_SIZE}
     previous_db_path = memory_tool.DB_PATH
     resolved_db_path = str(db_path or "").strip() or previous_db_path
+    from tools.memory_candidates import capture_memory_write_candidate
+
+    candidate_id = capture_memory_write_candidate(
+        resolved_db_path, content=text, surface=shadow_surface, turn_id=shadow_turn_id,
+    )
     memory_tool.DB_PATH = resolved_db_path
     try:
         written = memory_tool.save_memory(
@@ -43,12 +48,13 @@ def write_memory(
         # No posts row exists, so the posts-based interop shadow has nothing to observe.
         return {
             "status": "CREATED",
+            "candidate_id": candidate_id,
             "store": "kernel",
             "kernel_state_id": written.state_id,
             "ombre_bucket_id": written.bucket_id,
             "deduplicated": written.status == "DEDUPLICATED",
         }
-    result = {"status": "CREATED", "id": int(written)}
+    result = {"status": "CREATED", "id": int(written), "candidate_id": candidate_id}
     try:
         from tools.memory_interop_shadow import observe_memory_write
 
