@@ -1363,6 +1363,9 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+from chat.mail_notice_store import ensure_schema as _ensure_mail_notice_schema
+_ensure_mail_notice_schema(get_db)
+
 def _init_yearring_tables():
     try:
         import desire_ledger as _dl
