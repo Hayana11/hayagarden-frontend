@@ -74,6 +74,8 @@ def _init_chat_messages(db_path: str):
     conn.commit()
     conn.close()
     dc.ensure_schema(db_path)
+    from chat.mail_notice_store import ensure_schema as ensure_mail_notice_schema
+    ensure_mail_notice_schema(lambda: sqlite3.connect(db_path))
 
 
 def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
