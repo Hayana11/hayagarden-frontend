@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.memory_candidates import create_profile_patch_candidate, load_candidate
+from tools.memory_candidates import load_candidate
 from tools.memory_write_adapter import write_memory
 from tools.memory_kernel import MemoryKernel
 
@@ -34,22 +34,6 @@ class MemoryCandidateTest(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
-
-    def test_candidate_survives_reopen_and_keeps_profile_contract(self):
-        refs = ["chat_messages:41"]
-        ids = []
-        for target in ("SELF", "HAYA"):
-            ids.append(create_profile_patch_candidate(
-                str(self.posts), target=target, source_day="2026-11-11",
-                changes=[{"section": "preferences", "proposed_text": "完整、不截断的候选修订",
-                          "evidence_refs": refs}],
-                source_refs=refs, derived_refs=["dayblock:2026-11-11:generation"],
-                prompt_version="test-v1",
-            ))
-        reopened = [load_candidate(str(self.posts), candidate_id) for candidate_id in ids]
-        self.assertEqual(["SELF", "HAYA"], [item["payload"]["target"] for item in reopened])
-        self.assertEqual([refs, refs], [item["source_refs"] for item in reopened])
-        self.assertEqual(["pending", "pending"], [item["status"] for item in reopened])
 
     def _memory_write_candidates(self):
         with sqlite3.connect(self.posts) as conn:

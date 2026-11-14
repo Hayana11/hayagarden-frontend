@@ -9,6 +9,10 @@ BRANCH="${DEPLOY_BRANCH:-main}"
 EXPECTED_SHA="${1:-}"
 PYTHON="${PYTHON_BIN:-/usr/bin/python3.11}"
 SERVICES=(frontend frontend-gw)
+PROFILE_CRON_PATH="/etc/cron.d/hayagarden-daily-profile-updater"
+PROFILE_CRON_BACKUP="/var/tmp/hayagarden-profile-cron.$$.bak"
+PROFILE_CRON_EXISTED=0
+PROFILE_CRON_CHANGED=0
 LOCK_FILE="/var/lock/hayagarden-frontend-deploy.lock"
 STATE_DIR="/var/lib/hayagarden"
 VAULT_KEY_FILE="${HAYAGARDEN_RELAY_VAULT_KEY_FILE:-/etc/hayagarden/relay-credentials.key}"
@@ -213,6 +217,7 @@ bash "$ROOT/tools/backup.sh"
 # The editor schema is an explicit deployment migration. It runs only after the
 # consistent database backup succeeds and before the target services restart.
 "$PYTHON" "$staging/migrations/flow_studio_editor.py" --db-path "$ROOT/memories.db"
+"$PYTHON" "$staging/migrations/profile_documents.py" --db-path "$ROOT/memories.db"
 protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 
@@ -220,6 +225,7 @@ restart_attempted=0
 rollback() {
   trap - ERR
   echo "Deployment failed; rolling back to $current_sha" >&2
+  if [[ "$PROFILE_CRON_CHANGED" -eq 1 ]]; then if [[ "$PROFILE_CRON_EXISTED" -eq 1 ]]; then cp -a "$PROFILE_CRON_BACKUP" "$PROFILE_CRON_PATH"; else rm -f "$PROFILE_CRON_PATH"; fi; fi
   clear_runtime_for_checkout
   git checkout --detach -f "$current_sha"
   restore_runtime
@@ -276,7 +282,11 @@ actual = require_managed_claude_runtime()
 print('deploy claude runtime ok:', actual, '(minimum', MINIMUM_CLAUDE_CODE_VERSION + ')')
 PY
 
+if [[ -f "$PROFILE_CRON_PATH" ]]; then cp -a "$PROFILE_CRON_PATH" "$PROFILE_CRON_BACKUP"; PROFILE_CRON_EXISTED=1; fi
+PROFILE_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-daily-profile-updater" "$PROFILE_CRON_PATH"
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
 trap - ERR
+rm -f "$PROFILE_CRON_BACKUP"
 echo "Deployed $target_sha from $REMOTE/$BRANCH"
