@@ -89,6 +89,11 @@ def update_from_trace(
 
     allowed_ids = {int(ref.split(":", 1)[1]) for ref in trace.source_refs if ref.startswith("chat_messages:")}
     existing_ids = {int(row["id"]) for row in trace.raw_messages}
+    authors_by_id = {
+        int(row["id"]): str(row.get("author") or "").strip().lower()
+        for row in trace.raw_messages
+    }
+    direct_authors = {"SELF": {"assistant", "fyodor"}, "HAYA": {"hayana", "haya", "user"}}
     grouped: dict[str, list[dict[str, Any]]] = {"SELF": [], "HAYA": []}
     seen: dict[str, set[tuple[Any, ...]]] = {"SELF": set(), "HAYA": set()}
     for item in collected:
@@ -101,6 +106,9 @@ def update_from_trace(
             continue
         if any(type(message_id) is not int or message_id not in allowed_ids or message_id not in existing_ids for message_id in ids):
             _LOG.warning("daily profile discarded out-of-scope evidence: day=%s target=%s", source_day, target)
+            continue
+        if not any(authors_by_id.get(message_id) in direct_authors[target] for message_id in ids):
+            _LOG.warning("daily profile discarded evidence without target speaker: day=%s target=%s", source_day, target)
             continue
         refs = tuple(sorted({f"chat_messages:{message_id}" for message_id in ids}, key=lambda ref: int(ref.rsplit(":", 1)[1])))
         key = (section, proposed, refs)

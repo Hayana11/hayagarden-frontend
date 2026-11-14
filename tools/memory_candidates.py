@@ -162,7 +162,7 @@ def create_profile_patch_candidate(
     provenance_status: str = "resolved",
 ) -> str:
     target = str(target or "").strip().upper()
-    changes, derived_refs = list(changes), list(derived_refs)
+    changes, source_refs, derived_refs = list(changes), list(source_refs), list(derived_refs)
     if target not in {"SELF", "HAYA"} or not changes or not source_day or not prompt_version:
         raise ValueError("profile patch requires target, day, prompt version, and changes")
     identity = json.dumps(
@@ -170,14 +170,33 @@ def create_profile_patch_candidate(
         ensure_ascii=False, separators=(",", ":"),
     )
     candidate_id = "memcand:profile:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    return create_candidate(
-        db_path, candidate_kind="profile_patch",
-        payload={"target": target, "source_day": source_day, "prompt_version": prompt_version,
-                 "changes": changes},
+    payload = {"target": target, "source_day": source_day, "prompt_version": prompt_version,
+               "changes": changes}
+    candidate_id = create_candidate(
+        db_path, candidate_kind="profile_patch", payload=payload,
         source_type="chat_messages", source_refs=source_refs, derived_refs=derived_refs,
         producer="daily_profile", priority=50, provenance_status=provenance_status,
         candidate_id=candidate_id,
     )
+    # A rerun may have recovered from an incomplete model batch. Refresh only
+    # this profile candidate while it is still pending; generic candidates keep
+    # their insert-only behavior.
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        conn.execute(
+            """UPDATE memory_candidates
+               SET payload_json=?, source_refs_json=?, derived_refs_json=?, provenance_status=?
+               WHERE candidate_id=? AND candidate_kind='profile_patch'
+                 AND producer='daily_profile' AND status='pending'""",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False),
+             json.dumps(source_refs, ensure_ascii=False, separators=(",", ":")),
+             json.dumps(derived_refs, ensure_ascii=False, separators=(",", ":")),
+             provenance_status, candidate_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return candidate_id
 
 
 def _message_ids_for_member(member: Any) -> tuple[int, ...]:

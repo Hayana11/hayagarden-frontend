@@ -39,7 +39,7 @@ class DailyProfileUpdaterTest(unittest.TestCase):
         replies = [
             {"changes": [{"target": "HAYA", "section": "preferences", "proposed_text": "偏好增补", "evidence_message_ids": [101]}]},
             {"changes": [
-                {"target": "HAYA", "section": "ongoing_projects", "proposed_text": "项目增补", "evidence_message_ids": [102]},
+                {"target": "HAYA", "section": "ongoing_projects", "proposed_text": "项目增补", "evidence_message_ids": [101, 102]},
                 {"target": "SELF", "section": "relationships", "proposed_text": "关系态度增补", "evidence_message_ids": [102]},
             ]},
             {"changes": [{"target": "SELF", "section": "habits", "proposed_text": "习惯增补", "evidence_message_ids": [103]}]},
@@ -71,6 +71,74 @@ class DailyProfileUpdaterTest(unittest.TestCase):
         self.assertEqual({"chat_messages:101", "chat_messages:102"}, set(haya["source_refs"]))
         self.assertEqual("dayblock:2026-11-07:generation-abc", haya["derived_refs"][0])
         self.assertEqual(2, len(haya["payload"]["changes"]))
+
+
+    def test_evidence_requires_a_direct_message_from_the_target_speaker(self):
+        cases = (
+            ("HAYA", [102], False),
+            ("SELF", [101], False),
+            ("HAYA", [101, 102], True),
+            ("SELF", [102, 101], True),
+        )
+        for target, evidence_ids, retained in cases:
+            with self.subTest(target=target, evidence_ids=evidence_ids):
+                result = update_from_trace(
+                    self.db, source_day="2026-11-07", trace=self.trace,
+                    llm_ask=lambda prompt, **kwargs: {"changes": [{
+                        "target": target, "section": "preferences", "proposed_text": "待审增补",
+                        "evidence_message_ids": evidence_ids,
+                    }]},
+                    chunk_chars=100_000,
+                )
+                self.assertEqual(1 if retained else 0, result["change_counts"][target])
+                self.assertEqual(1 if retained else 0, len(result["candidate_ids"]))
+                if retained:
+                    candidate = load_candidate(self.db, result["candidate_ids"][0])
+                    self.assertEqual(set(evidence_ids), {int(ref.rsplit(":", 1)[1]) for ref in candidate["source_refs"]})
+
+    def test_pending_profile_candidate_refreshes_on_same_batch_rerun(self):
+        first = update_from_trace(
+            self.db, source_day="2026-11-07", trace=self.trace,
+            llm_ask=lambda prompt, **kwargs: {"changes": [{
+                "target": "HAYA", "section": "preferences", "proposed_text": "第一项",
+                "evidence_message_ids": [101],
+            }]},
+            chunk_chars=100_000,
+        )
+        second = update_from_trace(
+            self.db, source_day="2026-11-07", trace=self.trace,
+            llm_ask=lambda prompt, **kwargs: {"changes": [
+                {"target": "HAYA", "section": "preferences", "proposed_text": "第一项", "evidence_message_ids": [101]},
+                {"target": "HAYA", "section": "ongoing_projects", "proposed_text": "恢复的第二项", "evidence_message_ids": [101, 102]},
+            ]},
+            chunk_chars=100_000,
+        )
+        self.assertEqual(first["candidate_ids"], second["candidate_ids"])
+        self.assertEqual(1, len(second["candidate_ids"]))
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(1, conn.execute(
+                "SELECT COUNT(*) FROM memory_candidates WHERE candidate_kind='profile_patch' AND producer='daily_profile'"
+            ).fetchone()[0])
+        candidate_id = second["candidate_ids"][0]
+        candidate = load_candidate(self.db, candidate_id)
+        self.assertEqual("pending", candidate["status"])
+        self.assertEqual(2, len(candidate["payload"]["changes"]))
+        self.assertEqual({"chat_messages:101", "chat_messages:102"}, set(candidate["source_refs"]))
+
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE memory_candidates SET status='reviewing' WHERE candidate_id=?", (candidate_id,))
+        update_from_trace(
+            self.db, source_day="2026-11-07", trace=self.trace,
+            llm_ask=lambda prompt, **kwargs: {"changes": [
+                {"target": "HAYA", "section": "preferences", "proposed_text": "第一项", "evidence_message_ids": [101]},
+                {"target": "HAYA", "section": "ongoing_projects", "proposed_text": "恢复的第二项", "evidence_message_ids": [101, 102]},
+                {"target": "HAYA", "section": "habits", "proposed_text": "不覆盖已离开 pending 的版本", "evidence_message_ids": [101]},
+            ]},
+            chunk_chars=100_000,
+        )
+        candidate = load_candidate(self.db, candidate_id)
+        self.assertEqual("reviewing", candidate["status"])
+        self.assertEqual(2, len(candidate["payload"]["changes"]))
 
     def test_out_of_dayblock_evidence_is_discarded(self):
         result = update_from_trace(
