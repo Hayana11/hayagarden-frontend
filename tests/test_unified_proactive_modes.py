@@ -103,14 +103,6 @@ class ProactiveTriggerTextTests(unittest.TestCase):
         self.assertIn('是你之前给自己定的提醒到时间了：「提醒她喝水」', text)
         self.assertIn('怎么兑现由你决定', text)
 
-    def test_mail_notice_wakes_self_trigger_with_only_the_upstream_message_id(self):
-        text = self.build(
-            now=NOW, t2_hours=1.0, t_hours=1.0, mode='self_trigger',
-            self_trigger_note='邮箱有新邮件，message id: gmail_message_123。',
-        )
-        self.assertIn('邮箱有新邮件，message id: gmail_message_123。', text)
-        self.assertNotIn('正文', text)
-
     def test_situation_is_fact_not_a_command(self):
         for mode in UNIFIED_MAIN_CHAT_WAKE_MODES:
             text = self.build(now=NOW, t2_hours=1.0, t_hours=1.0, mode=mode)
@@ -391,6 +383,14 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         result, _ = self._run(events=self._done('早安 [[SILENT]]'))
         self.assertFalse(result['silent'])
         self.assertEqual(result['text'], '早安')
+
+    def test_normal_wake_returns_exact_one_shot_claims(self):
+        claims = {'pending_mail_ids': ['wake-mail-1', 'wake-mail-2']}
+        result, _ = self._run(events=[(
+            'done',
+            ('wake text', '', {'jsonl_usage': {'stream_totals_match': True}}, claims),
+        )])
+        self.assertEqual(result['one_shot_claims'], claims)
 
     def test_normal_wake_returns_native_and_self_state_segments(self):
         events = [

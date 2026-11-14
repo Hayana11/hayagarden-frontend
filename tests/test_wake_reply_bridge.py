@@ -106,6 +106,8 @@ class WakeOneShotSplitTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        from chat.mail_notice_store import ensure_schema
+        ensure_schema(self.get_db)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -597,6 +599,8 @@ class WakeConsumeSemanticsTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+        from chat.mail_notice_store import ensure_schema
+        ensure_schema(self.get_db)
 
     def tearDown(self):
         self.tmp.cleanup()

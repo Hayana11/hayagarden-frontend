@@ -557,6 +557,9 @@ def format_resident_turn_content(
     task_feedback = str(assembly.get('task_feedback') or '').strip()
     if task_feedback:
         prefix_parts.append(task_feedback)
+    pending_mail_notice = str(assembly.get('pending_mail_notice') or '').strip()
+    if pending_mail_notice:
+        prefix_parts.append(pending_mail_notice)
     memory_recall = str(assembly.get('memory_recall') or '').strip()
     if memory_recall:
         prefix_parts.append(memory_recall)
@@ -6069,6 +6072,10 @@ def _adopt_reprepared_plan_in_place(
     provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
     provider_prompt = getattr(current, 'provider_display_thinking_prompt', '')
     cold_start_diagnostic = getattr(current, 'cold_start_diagnostic', None)
+    pending_mail_notice = str(
+        (current.assembly or {}).get('pending_mail_notice') or ''
+    )
+    pending_mail_ids = list((current.assembly or {}).get('pending_mail_ids') or [])
     hot_decision = getattr(current, 'hot_decision', None)
     hot_decision_reason = getattr(current, 'hot_decision_reason', None)
     for f in fields(DailyTurnPlan):
@@ -6082,6 +6089,9 @@ def _adopt_reprepared_plan_in_place(
         if isinstance(cold_start_diagnostic, dict)
         else getattr(replacement, 'cold_start_diagnostic', None)
     )
+    if pending_mail_ids and isinstance(current.assembly, dict):
+        current.assembly['pending_mail_notice'] = pending_mail_notice
+        current.assembly['pending_mail_ids'] = pending_mail_ids
     if hot_decision is not None:
         current.hot_decision = hot_decision
         current.hot_decision_reason = str(hot_decision_reason or '')
@@ -6598,6 +6608,10 @@ def _apply_daily_cold_prompt_fence(
             non_history_estimate=non_history_est,
             cold_target=resident_rebuild_target_val,
         )
+        pending_mail_notice = str(
+            plan.assembly.get('pending_mail_notice') or ''
+        )
+        pending_mail_ids = list(plan.assembly.get('pending_mail_ids') or [])
         rebuilt = _rebuild_daily_assembly_with_history_budget(
             plan,
             static_system=static_system,
@@ -6606,6 +6620,9 @@ def _apply_daily_cold_prompt_fence(
             is_cold=is_cold,
             is_respawn=is_respawn,
         )
+        if pending_mail_ids:
+            rebuilt['pending_mail_notice'] = pending_mail_notice
+            rebuilt['pending_mail_ids'] = pending_mail_ids
         plan.assembly = rebuilt
         content = format_resident_turn_content(
             assembly=plan.assembly,
@@ -6946,7 +6963,16 @@ def _attempt_capacity_swap_before_stdin(
                     'capacity ContextPlan was lost during reprepare',
                     error_code='context_plan_capacity_lost_after_reprepare',
                 )
+            pending_mail_notice = str(
+                plan.assembly.get('pending_mail_notice') or ''
+            )
+            pending_mail_ids = list(
+                plan.assembly.get('pending_mail_ids') or []
+            )
             plan.assembly = _project_capacity_context_bootstrap(plan)
+            if pending_mail_ids:
+                plan.assembly['pending_mail_notice'] = pending_mail_notice
+                plan.assembly['pending_mail_ids'] = pending_mail_ids
             raw_refs = tuple(
                 str(member.source_ref)
                 for representation in context_plan.representations
@@ -8757,7 +8783,12 @@ def ensure_resident_and_stream(
         )
 
         state_snapshot = dict(plan.assembly.get('state_snapshot') or {})
-        commit_meta = {'state_snapshot': state_snapshot}
+        commit_meta = {
+            'state_snapshot': state_snapshot,
+            'pending_mail_ids': list(
+                plan.assembly.get('pending_mail_ids') or []
+            ),
+        }
         if plan.assembly.get('manifest', {}).get('state_mode') == 'delta':
             commit_meta['lean_state_active'] = True
 
@@ -10157,6 +10188,13 @@ def handle_provider_success(
             target_receipt_committed=target_receipt_committed,
         )
     _consume_feedback_after_success(plan)
+    pending_mail_ids = list(plan.assembly.get('pending_mail_ids') or [])
+    if pending_mail_ids:
+        from chat.system_builder import consume_cc_one_shot_claims
+        consume_cc_one_shot_claims(
+            lambda: sqlite3.connect(plan.db_path or dc.DEFAULT_DB_PATH),
+            {'pending_mail_ids': pending_mail_ids},
+        )
     return dict(plan.manifest)
 
 

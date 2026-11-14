@@ -74,6 +74,8 @@ def _init_chat_messages(db_path: str):
     conn.commit()
     conn.close()
     dc.ensure_schema(db_path)
+    from chat.mail_notice_store import ensure_schema as ensure_mail_notice_schema
+    ensure_mail_notice_schema(lambda: sqlite3.connect(db_path))
 
 
 def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
@@ -221,6 +223,7 @@ class _FakeResident:
         self.killed = 0
         self._spawn_args: list[tuple] = []
         self.turn_leases: list[dict[str, Any]] = []
+        self.commit_metas: list[dict[str, Any]] = []
 
     def ensure_alive(self, system_text, env, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
         self._spawn_args.append((system_text, tool_profile))
@@ -240,6 +243,7 @@ class _FakeResident:
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         self.turn_leases.append(turn_lease)
+        self.commit_metas.append(dict(commit_meta or {}))
         yield ('text', 'daily reply')
         yield ('done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
 
@@ -2893,6 +2897,7 @@ class _MappingBlockedResident(_TranscriptColdResident):
 
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
+        self.last_commit_meta = dict(commit_meta or {})
         yield ('text', 'blocked-map reply')
         self.session_id = self._new_session_id
         # Assistant-only event: mapping rejects (candidate_user_missing).
@@ -3457,9 +3462,26 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
         )
         plan = self._prepare(uid, resident=resident)
+        from chat.mail_notice_store import (
+            ensure_schema as ensure_mail_schema,
+            peek_pending_mail_notice_ids,
+            record_pending_mail_notice,
+        )
+        mail_db = lambda: sqlite3.connect(self.db)
+        ensure_mail_schema(mail_db)
+        record_pending_mail_notice(mail_db, 'daily-map-failure')
+        plan.assembly['pending_mail_notice'] = (
+            '【邮箱提示】\n有新的邮件。\nmessage id: daily-map-failure'
+        )
+        plan.assembly['pending_mail_ids'] = ['daily-map-failure']
         list(dr.stream_daily_resident_turn(
             plan, resident=resident, env={}, static_system='STATIC',
         ))
+        self.assertIn('message id: daily-map-failure', resident.sent[-1])
+        self.assertEqual(
+            resident.last_commit_meta['pending_mail_ids'],
+            ['daily-map-failure'],
+        )
         self.assertIsNone(plan.transcript_observation_error_code)
         canonical, aid = _persist_canonical_for_plan(plan)
         with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
@@ -3471,6 +3493,10 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
         self.assertIn('candidate_user_missing', str(ctx.exception))
         self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
+        self.assertEqual(
+            peek_pending_mail_notice_ids(mail_db),
+            ['daily-map-failure'],
+        )
         self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
         self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
         self.assertIsNone(plan.manifest.get('cursor_cas_success'))
@@ -3969,6 +3995,75 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             store.consume_feedback.assert_called_once_with([31])
             self.assertEqual(out['feedback_consume_status'], 'CONSUMED')
             self.assertEqual(out['feedback_consumed_count'], 1)
+        finally:
+            os.unlink(db)
+
+    def test_daily_success_consumes_mail_only_after_mapping_and_cursor_finalize(self):
+        db = _tmp_db()
+        try:
+            plan, _store = self._prepare(db)
+            from chat.mail_notice_store import (
+                ensure_schema as ensure_mail_schema,
+                peek_pending_mail_notice_ids,
+                record_pending_mail_notice,
+            )
+            mail_db = lambda: sqlite3.connect(db)
+            ensure_mail_schema(mail_db)
+            record_pending_mail_notice(mail_db, 'daily-success')
+            plan.assembly['pending_mail_notice'] = (
+                '【邮箱提示】\n有新的邮件。\nmessage id: daily-success'
+            )
+            plan.assembly['pending_mail_ids'] = ['daily-success']
+
+            with mock.patch.object(dr, 'complete_daily_turn') as complete:
+                complete.side_effect = lambda *a, **kw: self.assertEqual(
+                    peek_pending_mail_notice_ids(mail_db), ['daily-success'],
+                )
+                with mock.patch.object(
+                    dr, 'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=199, raw_text='成功回复',
+                    )
+
+            complete.assert_called_once()
+            self.assertEqual(peek_pending_mail_notice_ids(mail_db), [])
+        finally:
+            os.unlink(db)
+
+    def test_daily_cursor_finalize_failure_keeps_mail_pending(self):
+        db = _tmp_db()
+        try:
+            plan, _store = self._prepare(db)
+            from chat.mail_notice_store import (
+                ensure_schema as ensure_mail_schema,
+                peek_pending_mail_notice_ids,
+                record_pending_mail_notice,
+            )
+            mail_db = lambda: sqlite3.connect(db)
+            ensure_mail_schema(mail_db)
+            record_pending_mail_notice(mail_db, 'daily-cursor-failure')
+            plan.assembly['pending_mail_ids'] = ['daily-cursor-failure']
+            error = dr.CursorCASConflictAfterPersist(
+                'cursor conflict', assistant_message_id=200, manifest={},
+            )
+            with mock.patch.object(
+                dr, 'complete_daily_turn', side_effect=error,
+            ), mock.patch.object(
+                dr, 'finalize_transcript_mapping_after_success',
+                side_effect=_mark_transcript_mapped,
+            ), mock.patch.object(
+                dr, '_rollback_failed_terminalization', return_value={},
+            ):
+                with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=200, raw_text='回复',
+                    )
+            self.assertEqual(
+                peek_pending_mail_notice_ids(mail_db),
+                ['daily-cursor-failure'],
+            )
         finally:
             os.unlink(db)
 
@@ -4651,7 +4746,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
 
         plan = types.SimpleNamespace(
             assembly={
-                'state': '【此刻有一点变化】\\n旧 transport delta',
+                'state': '【此刻有一点变化】\n旧 transport delta',
                 'state_snapshot': {
                     'emotion': 'mood=平静',
                     'drive': 'fatigue=0.10 stress=0.10',
