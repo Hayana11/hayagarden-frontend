@@ -282,11 +282,3 @@ def trace_ready_dayblock(
         db_path, block.members, f"dayblock:{block.source_day}:{block.generation_id}",
         lambda members, rows: materialize_raw_evidence(members, rows, static_dir=static_dir),
     )
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Create the Memory Candidate table")
-    parser.add_argument("--db", default="/opt/frontend/memories.db")
-    with sqlite3.connect(parser.parse_args().db) as conn:
-        ensure_schema(conn)
