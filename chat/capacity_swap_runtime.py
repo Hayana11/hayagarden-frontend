@@ -936,8 +936,8 @@ def prepare_capacity_swap_for_context_plan(
         if int(anchor_message_id) > 0
         else ''
     )
-    anchor_event = None
     anchor_canonical = None
+    anchor_created_at = ''
     if anchor_standalone:
         anchor_rows = [
             item for item in formal
@@ -967,145 +967,7 @@ def prepare_capacity_swap_for_context_plan(
                 'context_plan_capacity_anchor_source_mismatch',
                 ['ContextPlan anchor no longer matches its canonical database revision'],
             )
-        anchor_mappings = [
-            row for row in mapping_rows
-            if int(row.get('message_id') or 0) == int(anchor_message_id)
-            and str(row.get('role') or '') == 'user'
-        ]
-        if not anchor_mappings:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_missing',
-                ['standalone anchor has no trusted user mapping'],
-            )
-        if len(anchor_mappings) != 1:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_ambiguous',
-                ['standalone anchor has multiple user mappings'],
-            )
-        anchor_mapping = anchor_mappings[0]
-        anchor_event_uuid = str(anchor_mapping.get('event_uuid') or '').strip()
-        anchor_session_id = str(anchor_mapping.get('claude_session_id') or '').strip()
-        try:
-            anchor_generation = int(anchor_mapping.get('resident_generation'))
-            anchor_mapping_context = int(anchor_mapping.get('context_id'))
-            anchor_mapping_epoch = int(anchor_mapping.get('context_epoch'))
-            anchor_offset = anchor_mapping.get('jsonl_byte_offset')
-            if (
-                not anchor_event_uuid
-                or not anchor_session_id
-                or anchor_generation <= 0
-                or anchor_mapping_context != source_ctx
-                or anchor_mapping_epoch != source_epoch
-                or isinstance(anchor_offset, bool)
-                or not isinstance(anchor_offset, int)
-                or anchor_offset < 0
-            ):
-                raise ValueError('anchor mapping identity is invalid')
-        except (TypeError, ValueError) as exc:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_invalid',
-                [str(exc)],
-            )
-        if anchor_generation > source_gen:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_invalid',
-                ['anchor mapping belongs to a future generation'],
-            )
-        try:
-            anchor_registry = (
-                registry if anchor_generation == source_gen
-                else get_context_claude_session(
-                    source_ctx, anchor_generation, db_path=plan.db_path,
-                )
-            )
-            registry_identity_matches = bool(
-                anchor_registry is not None
-                and str(anchor_registry.get('claude_session_id') or '') == anchor_session_id
-                and int(anchor_registry.get('context_id') or 0) == source_ctx
-                and int(anchor_registry.get('context_epoch') or 0) == source_epoch
-                and int(anchor_registry.get('resident_generation') or 0) == anchor_generation
-            )
-            anchor_scan_offset = int(
-                (anchor_registry or {}).get('scan_offset') or 0
-            )
-        except Exception as exc:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_invalid',
-                [type(exc).__name__],
-            )
-        if not registry_identity_matches:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_invalid',
-                ['anchor mapping session registry identity is unproven'],
-            )
-        if anchor_offset >= anchor_scan_offset:
-            return _failure(
-                'context_plan_capacity_anchor_mapping_invalid',
-                ['anchor mapping offset is outside its registered transcript'],
-            )
-        if anchor_generation == source_gen:
-            anchor_graph = graph
-            anchor_event = anchor_graph.by_uuid.get(anchor_event_uuid)
-        else:
-            anchor_path = str(anchor_registry.get('transcript_path') or '').strip()
-            if not anchor_path:
-                return _failure(
-                    'context_plan_capacity_anchor_transcript_unreadable',
-                    ['historical session has no registered transcript path'],
-                )
-            try:
-                fd = os.open(
-                    anchor_path,
-                    os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0),
-                )
-                try:
-                    anchor_file_size = int(os.fstat(fd).st_size)
-                    with os.fdopen(fd, 'rb') as handle:
-                        fd = -1
-                        handle.seek(anchor_offset)
-                        anchor_line = handle.readline()
-                finally:
-                    if fd >= 0:
-                        os.close(fd)
-                if not anchor_line or (
-                    not anchor_line.endswith(b'\n')
-                    and anchor_offset + len(anchor_line) < anchor_file_size
-                ):
-                    return _failure(
-                        'context_plan_capacity_anchor_transcript_unreadable',
-                        ['mapped historical event line is unavailable'],
-                    )
-                anchor_graph = read_transcript_range(
-                    anchor_path,
-                    anchor_offset,
-                    anchor_offset + len(anchor_line),
-                )
-            except Exception as exc:
-                logger.info(
-                    'capacity ContextPlan historical anchor read failed: %s',
-                    type(exc).__name__,
-                )
-                return _failure(
-                    'context_plan_capacity_anchor_transcript_unreadable',
-                    [type(exc).__name__],
-                )
-            anchor_event = anchor_graph.by_uuid.get(anchor_event_uuid)
-        if str(getattr(anchor_graph, 'session_id', '') or '') != anchor_session_id:
-            return _failure(
-                'context_plan_capacity_anchor_session_mismatch',
-                ['anchor transcript identity differs from its mapping'],
-            )
-        if (
-            anchor_event is None
-            or str(getattr(anchor_event, 'event_uuid', '') or '') != anchor_event_uuid
-            or str(getattr(anchor_event, 'session_id', '') or '') != anchor_session_id
-            or int(getattr(anchor_event, 'byte_offset', -1)) != int(anchor_offset)
-            or anchor_event.event_role != EventRole.CANDIDATE_USER
-        ):
-            return _failure(
-                'context_plan_capacity_anchor_mapping_missing',
-                ['trusted anchor event is unavailable or is not a user event'],
-            )
+        anchor_created_at = str(anchor_row.get('created_at') or '')
         from chat.context_window_preview import _canonical_user_payload_from_db
         anchor_canonical = _canonical_user_payload_from_db(
             content=str(anchor_row.get('content') or ''),
@@ -1116,7 +978,7 @@ def prepare_capacity_swap_for_context_plan(
         )
         if anchor_canonical is None:
             return _failure(
-                'context_plan_capacity_anchor_mapping_missing',
+                'context_plan_capacity_anchor_database_payload_missing',
                 ['canonical database user payload is unavailable'],
             )
 
@@ -1187,18 +1049,19 @@ def prepare_capacity_swap_for_context_plan(
 
     anchor_output_event_uuid = None
     if anchor_standalone:
-        source_event = anchor_event
-        anchor_output_event_uuid = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f'{cid}:anchor:{anchor_event_uuid}')
-        )
+        anchor_output_event_uuid = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{cid}:anchor:message:{anchor_message_id}:{getattr(anchor_section, 'content_hash', '')}",
+        ))
         anchor_event = emit_anchor_user_event(
-            source_event,
+            created_at=anchor_created_at,
             new_session_id=cid,
             cwd=cwd_guess,
             version=request.version,
             new_event_uuid=anchor_output_event_uuid,
             canonical=anchor_canonical,
         )
+        anchor_event_uuid = anchor_output_event_uuid
         events = (
             merge_prepended_user_and_tail(anchor_event, events)
             if events else [anchor_event]
@@ -1218,10 +1081,7 @@ def prepare_capacity_swap_for_context_plan(
                 max_round_count=(
                     None if anchor_standalone else len(selected_rounds)
                 ),
-                old_uuids=set(graph.by_uuid) | (
-                    {str(getattr(anchor_event, 'event_uuid', '') or '')}
-                    if anchor_event is not None else set()
-                ),
+                old_uuids=set(graph.by_uuid),
                 unknown_event_mode='reject',
             ),
         )

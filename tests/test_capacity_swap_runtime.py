@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import types
+import uuid
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -1981,13 +1982,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self,
         *,
         status: str,
-        anchor_mapped: bool,
         raw_anchor: bool = False,
-        anchor_generation: int = 199,
-        duplicate_anchor_mapping: bool = False,
-        historical_event_present: bool = True,
-        transcript_session_id: str = 'old-session',
-        registry_session_id: str = 'old-session',
         actual_revision: str = 'anchor-revision',
         actual_content_hash: str = 'anchor-hash',
     ):
@@ -2140,52 +2135,13 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'jsonl_byte_offset': raw_assistant_offset,
             },
         ]
-        history_registry = None
-        if anchor_mapped and not raw_anchor:
-            history_event_uuid = 'u1' if historical_event_present else 'other-u'
-            history_payload = (
-                json.dumps({
-                    'type': 'user',
-                    'uuid': history_event_uuid,
-                    'sessionId': transcript_session_id,
-                    'parentUuid': None,
-                    'message': {'role': 'user', 'content': 'OLD EVENT'},
-                }, separators=(',', ':')) + '\n'
-            ).encode('utf-8')
-            history_path = os.path.join(tmp_dir, 'old-session.jsonl')
-            Path(history_path).write_bytes(history_payload)
-            history_registry = {
-                'scan_status': 'ready',
-                'transcript_path': history_path,
-                'claude_session_id': registry_session_id,
-                'scan_offset': len(history_payload),
-                'context_id': 7,
-                'context_epoch': 3,
-                'resident_generation': anchor_generation,
-            }
-            anchor_mapping = {
-                'event_uuid': 'u1',
-                'message_id': 1,
-                'role': 'user',
-                'claude_session_id': 'old-session',
-                'context_id': 7,
-                'context_epoch': 3,
-                'resident_generation': anchor_generation,
-                'jsonl_byte_offset': 0,
-            }
-            mapping_rows.append(anchor_mapping)
-            if duplicate_anchor_mapping:
-                mapping_rows.append(dict(anchor_mapping, event_uuid='u1-duplicate'))
-            canonical['u1'] = 'ANCHOR'
-            mid_to_event[1] = 'u1'
-            event_to_mid['u1'] = 1
         if raw_anchor:
             canonical['u1'] = 'ANCHOR'
             mid_to_event[1] = 'u1'
             event_to_mid.update({'u1': 1, 'a1': 2})
 
         def get_registry(context_id, generation, **_kwargs):
-            return registry if int(generation) == 219 else history_registry
+            return registry
 
         with mock.patch(
             'chat.capacity_swap_runtime.get_context_claude_session',
@@ -2239,7 +2195,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
     def test_context_plan_too_large_anchor_does_not_require_event_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_TOO_LARGE',
-            anchor_mapped=False,
         )
         self.assertTrue(result.ok, result.warnings)
         self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_TOO_LARGE)
@@ -2252,7 +2207,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
     def test_context_plan_too_large_raw_anchor_uses_normal_raw_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_TOO_LARGE',
-            anchor_mapped=True,
             raw_anchor=True,
         )
         self.assertTrue(result.ok, result.warnings)
@@ -2263,43 +2217,46 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self.assertEqual(result.candidate.selected_message_ids, (1, 2))
         emit_anchor.assert_not_called()
 
-    def test_context_plan_retained_anchor_missing_mapping_stays_fail_closed(self):
+    def test_context_plan_retained_anchor_uses_database_projection_without_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_RETAINED',
-            anchor_mapped=False,
         )
-        self.assertFalse(result.ok)
+        self.assertTrue(result.ok, (result.error_code, result.warnings))
+        self.assertIn('context_plan_anchor_emitted', result.candidate.warnings)
+        self.assertEqual(result.candidate.anchor_event_uuid, json.loads(
+            result.candidate.serialized_jsonl.splitlines()[0]
+        )['uuid'])
         self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
+            json.loads(result.candidate.serialized_jsonl.splitlines()[0])['message']['content'],
+            'ANCHOR',
         )
-        emit_anchor.assert_not_called()
+        emitted = json.loads(result.candidate.serialized_jsonl.splitlines()[0])
+        expected_uuid = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{result.candidate.candidate_session_id}:anchor:message:1:anchor-hash",
+        ))
+        self.assertEqual(emitted['uuid'], expected_uuid)
+        self.assertEqual(emitted['timestamp'], '2026-11-09T13:00:00.000Z')
+        emit_anchor.assert_called_once()
 
-    def test_context_plan_image_degraded_anchor_missing_mapping_stays_fail_closed(self):
+    def test_context_plan_image_degraded_anchor_uses_database_projection_without_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_IMAGE_DEGRADED',
-            anchor_mapped=False,
         )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
-        )
-        emit_anchor.assert_not_called()
+        self.assertTrue(result.ok, (result.error_code, result.warnings))
+        self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_IMAGE_DEGRADED)
+        emit_anchor.assert_called_once()
 
     def test_context_plan_emits_standalone_anchor_before_selected_raw(self):
         for status in ('ANCHOR_RETAINED', 'ANCHOR_IMAGE_DEGRADED'):
             with self.subTest(status=status):
                 result, emit_anchor = self._run_anchor_case(
                     status=status,
-                    anchor_mapped=True,
-                    anchor_generation=199,
                 )
                 self.assertTrue(result.ok, (result.error_code, result.warnings))
                 candidate = result.candidate
                 self.assertEqual(candidate.anchor_status, AnchorStatus(status))
                 self.assertEqual(candidate.anchor_message_id, 1)
-                self.assertEqual(candidate.anchor_event_uuid, 'u1')
                 self.assertIn('context_plan_anchor_emitted', candidate.warnings)
                 self.assertEqual(candidate.selected_message_ids, (1, 3, 4))
                 self.assertNotIn(14987, candidate.selected_message_ids)
@@ -2312,6 +2269,8 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                     'user', 'user', 'assistant',
                 ])
                 self.assertEqual(events[0]['message']['content'], 'ANCHOR')
+                self.assertEqual(candidate.anchor_event_uuid, events[0]['uuid'])
+                self.assertEqual(events[0]['timestamp'], '2026-11-09T13:00:00.000Z')
                 self.assertEqual(events[1]['message']['content'], 'RAW')
                 self.assertEqual(events[1]['parentUuid'], events[0]['uuid'])
                 self.assertEqual(events[2]['parentUuid'], events[1]['uuid'])
@@ -2321,66 +2280,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 self.assertNotEqual(events[2]['uuid'], 'a2')
                 self.assertEqual(events[2]['message']['content'][0]['text'], 'TAIL')
 
-                source_event = emit_anchor.call_args.args[0]
-                self.assertEqual(source_event.event_uuid, 'u1')
-                self.assertEqual(source_event.session_id, 'old-session')
+                self.assertEqual(emit_anchor.call_args.kwargs['created_at'], '2026-11-09 13:00:00')
                 self.assertEqual(emit_anchor.call_args.kwargs['new_session_id'],
                                  candidate.candidate_session_id)
-                self.assertNotEqual(
-                    emit_anchor.call_args.kwargs['new_event_uuid'], 'u1',
-                )
-
-    def test_context_plan_historical_anchor_without_unique_user_mapping_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            duplicate_anchor_mapping=True,
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_ambiguous',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_mapping_without_event_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            historical_event_present=False,
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_mapping_session_mismatch_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            transcript_session_id='another-session',
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_session_mismatch',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_registry_session_mismatch_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            registry_session_id='another-session',
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_invalid',
-        )
-        emit_anchor.assert_not_called()
 
     def test_context_plan_anchor_revision_or_hash_mismatch_fails_closed(self):
         for kwargs in (
@@ -2390,7 +2292,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 result, emit_anchor = self._run_anchor_case(
                     status='ANCHOR_RETAINED',
-                    anchor_mapped=True,
                     **kwargs,
                 )
                 self.assertFalse(result.ok)

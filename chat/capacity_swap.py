@@ -395,7 +395,7 @@ def prepare_capacity_swap_candidate(
             uuid.uuid5(uuid.NAMESPACE_URL, f'{cid}:anchor:{anchor_event_uuid}')
         )
         anchor_evt = emit_anchor_user_event(
-            src_evt,
+            created_at=str(src_evt.raw.get('timestamp') or ''),
             new_session_id=cid,
             cwd=cwd,
             version=tail_request.version,
