@@ -237,31 +237,71 @@ class PipelineTest(ReviewTestCase):
                             for c in reasons))
         self.assertEqual(([], 0), (self.gen.calls, self.kernel_count("state")))
 
-    def test_ombre_failures_fail_closed_to_needs_review(self):
+    def test_ombre_failures_are_errors_that_stay_pending_and_retry_next_run(self):
         head = self.seed_head()
-        self.ombre.hits = [{"bucket_id": head["bucket_id"]}]
 
         def boom(*_):
-            raise RuntimeError("ombre_analyze_failed:down")
+            raise RuntimeError("down")
 
         cases = {
-            "analyze_raises": lambda: setattr(self.ombre, "analyze", boom),
-            "analyze_shape": lambda: setattr(self.ombre, "analyze", lambda text: ["x"]),
-            "judge_raises": lambda: setattr(self.ombre, "judge", boom),
-            "judge_shape": lambda: setattr(self.ombre, "judge", lambda a, b: {"confidence": "high"}),
-            "search_raises": lambda: setattr(self.ombre, "search", boom),
+            "analyze_raises": lambda o: setattr(o, "analyze", boom),
+            "analyze_shape": lambda o: setattr(o, "analyze", lambda text: ["x"]),
+            "judge_raises": lambda o: setattr(o, "judge", boom),
+            "judge_shape": lambda o: setattr(o, "judge", lambda a, b: {"confidence": "high"}),
+            "search_raises": lambda o: setattr(o, "search", boom),
         }
         before = self.kernel_count("state")
         for name, break_it in cases.items():
             self.ombre = FakeOmbre()
             self.ombre.hits = [{"bucket_id": head["bucket_id"]}]
-            break_it()
+            break_it(self.ombre)
             cid = self.add(f"今天去了海边散步 {name}。")
-            self.run_review()
+            result = self.run_review()
             row = self.row(cid)
-            self.assertEqual("needs_review", row["outcome"], name)
-            self.assertTrue(row["decision_reason"].startswith("ombre_failed:"), (name, row["decision_reason"]))
-        self.assertEqual(before, self.kernel_count("state"))
+            self.assertEqual(("error", "pending"), (row["outcome"], self.status(cid)), name)
+            self.assertIn("ombre_failed:", row["error"], name)
+            self.assertEqual(("failed", 1), (result["status"], result["ombre_failure_count"]), name)
+            self.assertEqual(before, self.kernel_count("state"))
+            self.ombre = FakeOmbre()  # Ombre recovers: the retry succeeds
+            self.ombre.hits = [{"bucket_id": head["bucket_id"]}]
+            self.run_review(dry_run=True)
+            self.assertEqual("committed_new", self.row(cid)["outcome"], name)
+            self.run_review(dry_run=True)
+            conn = sqlite3.connect(self.db)
+            conn.execute("UPDATE memory_candidates SET status='rejected' WHERE candidate_id=?", (cid,))
+            conn.commit()
+            conn.close()
+
+    def test_partial_ombre_failure_is_partial_not_failed_and_counted(self):
+        good, bad = self.add("甲去了海边。"), self.add("乙去了山里。")
+        self.ombre.analyze = lambda text: ANALYSIS if "甲" in text else (_ for _ in ()).throw(RuntimeError("x"))
+        result = self.run_review()
+        self.assertEqual(("partial_failure", 1), (result["status"], result["ombre_failure_count"]))
+        self.assertEqual(("committed", "pending"), (self.status(good), self.status(bad)))
+        self.assertEqual(1, review.review_health(self.db)["last_run"]["failure_count"])
+
+    def test_preflight_abort_leaves_candidates_pending_and_writes_no_review_rows(self):
+        cid = self.add("今天去了海边散步。")
+        runtime = OmbreAdapterTest.Runtime(["analyze", "search", "judge_same_event"],
+                                           dehydrator={"ok": False, "methods": [], "error": "ImportError: x"})
+        ombre = review.RuntimeReviewOmbre(runtime)
+        for dry in (True, False):
+            with self.assertRaisesRegex(review.ReviewAbort, "ombre_dehydrator_unavailable"):
+                self.run_review(preflight=ombre.preflight, dry_run=dry)
+            self.assertIsNone(self.row(cid))
+            self.assertEqual("pending", self.status(cid))
+            self.assertEqual("aborted", review.review_health(self.db)["last_run"]["status"])
+        self.assertEqual([], self.ombre.calls)
+
+    def test_main_aborts_non_zero_when_dehydrator_is_not_ok(self):
+        cid = self.add("今天去了海边散步。")
+        runtime = OmbreAdapterTest.Runtime(["analyze", "search", "judge_same_event"],
+                                           dehydrator={"ok": False, "methods": [], "error": "x"})
+        with mock.patch.object(projection.OmbreRuntime, "from_env", return_value=runtime), \
+             mock.patch("tools.dayblock_scheduled_runner.formal_background_generation",
+                        return_value=(self.authority, self.gen)):
+            code = review.main(["--dry-run", "--db", self.db, "--kernel-db", self.kernel_db])
+        self.assertEqual((1, "pending", None), (code, self.status(cid), self.row(cid)))
 
     def test_same_event_bands(self):
         head = self.seed_head()
@@ -446,11 +486,12 @@ class ResolverTest(ReviewTestCase):
 
 class OmbreAdapterTest(unittest.TestCase):
     class Runtime:
-        def __init__(self, ops, results=None):
+        def __init__(self, ops, results=None, dehydrator=None):
             self.ops, self.results, self.sent = ops, results or {}, []
+            self.dehydrator = dehydrator or {"ok": True, "methods": ["analyze", "judge_same_event"], "error": ""}
 
         def capabilities(self):
-            return {"version": "3.6.14", "ops": self.ops}
+            return {"version": "3.6.14", "ops": self.ops, "dehydrator": self.dehydrator}
 
         def batch(self, requests):
             self.sent.extend(requests)
@@ -460,6 +501,14 @@ class OmbreAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(review.ReviewAbort, "ombre_review_ops_missing:analyze,judge_same_event"):
             review.RuntimeReviewOmbre(self.Runtime(["get", "search"])).preflight()
         review.RuntimeReviewOmbre(self.Runtime(["analyze", "search", "judge_same_event"])).preflight()
+        ops = ["analyze", "search", "judge_same_event"]
+        with self.assertRaisesRegex(review.ReviewAbort, "ombre_dehydrator_methods_missing:judge_same_event"):
+            review.RuntimeReviewOmbre(self.Runtime(
+                ops, dehydrator={"ok": True, "methods": ["analyze"], "error": ""})).preflight()
+        with self.assertRaisesRegex(review.ReviewAbort, "ombre_dehydrator_unavailable:not_reported"):
+            runtime = self.Runtime(ops)
+            runtime.capabilities = lambda: {"ops": ops}
+            review.RuntimeReviewOmbre(runtime).preflight()
 
     def test_ops_map_to_worker_requests_and_failures_raise(self):
         runtime = self.Runtime([], {"search": [{"id": "b1", "content": "x"}, {"content": "no id"}],

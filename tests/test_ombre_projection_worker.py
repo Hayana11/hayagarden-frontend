@@ -286,7 +286,9 @@ class WorkerTests(FakeOmbreSource):
 
     def test_analyze_and_judge_drive_ombres_own_dehydrator_and_fail_closed(self):
         (self.src / "dehydrator.py").write_text(self.FAKE_DEHYDRATOR, encoding="utf-8")
-        ops = self.runtime.capabilities()["ops"]
+        caps = self.runtime.capabilities()
+        self.assertEqual({"ok": True, "methods": ["analyze", "judge_same_event"], "error": ""}, caps["dehydrator"])
+        ops = caps["ops"]
         self.assertTrue({"analyze", "judge_same_event", "search"} <= set(ops))
         analyzed, same, bad, boom = self.runtime.batch([
             {"op": "analyze", "text": "我养了猫"},
@@ -297,6 +299,15 @@ class WorkerTests(FakeOmbreSource):
         self.assertEqual((True, 0.9), (same["same_event"], same["confidence"]))
         self.assertIsInstance(bad, projection.RequestFailed)
         self.assertIsInstance(boom, projection.RequestFailed)
+
+    def test_capabilities_report_dehydrator_problems_without_raising(self):
+        caps = self.runtime.capabilities()  # no dehydrator module in the fake source
+        self.assertFalse(caps["dehydrator"]["ok"])
+        self.assertTrue(caps["dehydrator"]["error"])
+        (self.src / "dehydrator.py").write_text(
+            "class Dehydrator:\n    def __init__(self, c): pass\n    async def analyze(self, t): return {}\n",
+            encoding="utf-8")
+        self.assertEqual(["analyze"], self.runtime.capabilities()["dehydrator"]["methods"])
 
     def test_missing_dehydrator_fails_the_request_not_the_batch(self):
         got, listed = self.runtime.batch([{"op": "analyze", "text": "x"}, {"op": "list"}])

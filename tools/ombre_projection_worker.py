@@ -139,6 +139,16 @@ def _dehydrator():
     return _DEHYDRATOR
 
 
+def _dehydrator_report() -> dict:
+    """Whether the (UNVERIFIED) dehydrator names resolve. Never raises."""
+    try:
+        target = _dehydrator()
+        methods = [name for name in (ANALYZE_METHOD, JUDGE_METHOD) if callable(getattr(target, name, None))]
+        return {"ok": True, "methods": methods, "error": ""}
+    except BaseException as exc:
+        return {"ok": False, "methods": [], "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 async def _call_dehydrator(method: str, *args):
     fn = getattr(_dehydrator(), method, None)
     if not callable(fn):
@@ -241,7 +251,8 @@ async def run(src_dir: str, requests: list[dict]) -> dict:
         # One failing request (e.g. Ombre's validation) must not hide the others' outcomes.
         try:
             if request.get("op") == "capabilities":
-                value = {"version": version, "update_fields": list(UPDATE_FIELDS), "ops": list(OPS)}
+                value = {"version": version, "update_fields": list(UPDATE_FIELDS), "ops": list(OPS),
+                         "dehydrator": _dehydrator_report()}
             else:
                 value = await handle(manager, request)
             results.append({"ok": True, "value": value})

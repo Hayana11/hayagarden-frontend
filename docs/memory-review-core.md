@@ -25,7 +25,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
    - 解析器可注入。读不到、暂时不可用、没有对应解析器、或 Candidate 本身没有可靠来源（`provenance_status≠resolved` / 无 refs）→ `needs_review`，原因写明，**不会自动提交**。
 4. **曾被人拒绝**：与人工拒绝过的 Candidate（`decision='rejected'` 且 `decision_by` 为 `fedya` / `haya`）归一化后精确相同 → `suppressed_rejected`。策略自动拒绝的（`decision_by='policy'`）不算。
 5. **证据支持检查**（一次模型调用，走正式 Chat 背景生成的 authority，与日采集同一条保护）：原文是否支持这条 Candidate 的说法。返回 `{supported, reason}`。不支持 → `rejected_unsupported`（`decision_by='policy'`）。
-6. **Ombre 分析**：`analyze(content)`，结果原样存入 `analysis_json`，之后写进 Kernel State 供 Ombre 投影使用（不调用 digest）。第 6、7 步的所有 Ombre 调用（analyze / search / judge_same_event）一旦抛错或返回形状不对，该条一律 `needs_review`（原因 `ombre_failed:<op>:...`），**绝不自动提交**；Kernel 写入错误不在此列。
+6. **Ombre 分析**：`analyze(content)`，结果原样存入 `analysis_json`，之后写进 Kernel State 供 Ombre 投影使用（不调用 digest）。第 6、7 步的所有 Ombre 调用（analyze / search / judge_same_event）一旦抛错或返回形状不对，该条记为 `error`（原因 `ombre_failed:<op>:...` 写进判定行的 `error`），Candidate 保持 `pending`，下轮重试，**绝不自动提交，也不会涌进人工队列**（和 Kernel 写入错误同样处理）。
 7. **搜索与同事件判断**：
    - 先与最近 10 条人工拒绝的 Candidate 做同事件判断：置信度 ≥ 0.85 → `suppressed_rejected`；0.60–0.85 → `needs_review`（`uncertain`）。
    - 再用 Ombre 语义搜索取前 5 个已有谱系（Kernel 里没有对应 head 的桶忽略），逐个判断同事件，取最高分：
@@ -48,7 +48,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 | `suppressed_rejected` | rejected / policy | `rejected` |
 | `rejected_unsupported` | rejected / policy | `rejected` |
 | `needs_review` | NULL / NULL（等待人工） | `needs_review` |
-| `error`（模型或解析失败） | — | 保持 `pending`，下轮重试 |
+| `error`（模型、解析或 Ombre 调用失败） | — | 保持 `pending`，下轮重试 |
 
 `decision_by` 在决定前为 NULL，取值只会是 `policy` / `fedya` / `haya`。`needs_review` 的人工界面和决定写入不在本 PR。
 
@@ -63,7 +63,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 
 ## 健康记录
 
-`memory_review_runs` 每次运行一行：开始 / 结束、dry-run、状态（`running` / `completed` / `partial_failure` / `aborted` / `failed`）、待审总数、各 outcome 计数、失败列表、耗时。进程被杀会留下一直是 `running` 的行；启动前就失败（Ombre 未配置、authority 取不到）也会写一行 `failed`。`--status` 或 `review_health()` 给出最近一次运行、最近一次正式成功、超过 6 小时未结束的运行和当前待审数。“当晚能否跑完”看 `remaining` 与 `duration_ms`。
+`memory_review_runs` 每次运行一行（`counts_json` 里另有 `ombre_failure_count`；本轮实际审核的每一条都因 Ombre 失败时，整轮标 `failed`，原因 `ombre_failed_all_candidates`，退出码非零；部分失败为 `partial_failure`）：开始 / 结束、dry-run、状态（`running` / `completed` / `partial_failure` / `aborted` / `failed`）、待审总数、各 outcome 计数、失败列表、耗时。进程被杀会留下一直是 `running` 的行；启动前就失败（Ombre 未配置、authority 取不到）也会写一行 `failed`。`--status` 或 `review_health()` 给出最近一次运行、最近一次正式成功、超过 6 小时未结束的运行和当前待审数。“当晚能否跑完”看 `remaining` 与 `duration_ms`。
 
 ## 关于 Ombre：已验证 / 未验证
 
@@ -73,7 +73,8 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 - 投影 worker 现有的 op：`capabilities`、`get`、`create_if_absent`、`update`、`touch`、`list`、`search`。
 - `BucketManager.search(query, limit=)` 返回含 `id` / `metadata` / `content` 的桶字典，这是 `tools/ombre_adapter.py` 现有调用方式。worker 里的只读 op `search` 据此实现。**真实 Ombre 上是否可用未验证**：worker 里的 `BucketManager(load_config())` 与 adapter 用的 `bucket_mgr` 是否等价，尚未实测。
 - `utils.load_config()` 与 `bucket_manager.BucketManager`：worker 现有代码已在使用。
-- worker 的 `capabilities` 返回 `ops`，Review 用它做启动前检查；缺 op 时中止（`ombre_review_ops_missing:...`）。
+- worker 的 `capabilities` 返回 `ops`，另带 `dehydrator: {ok, methods, error}`：worker 会尝试构造 dehydrator 并报告 `analyze` / `judge_same_event` 是否可调用，这一步绝不抛错。
+- **启动前检查（`--dry-run` 同样）**：缺 op（`ombre_review_ops_missing:...`）、dehydrator 构造失败（`ombre_dehydrator_unavailable:<原因>`）或缺方法（`ombre_dehydrator_methods_missing:...`）→ 在碰任何 Candidate 之前中止，运行记录标 `aborted`/`failed` 并写明原因，不写判定行，所有 Candidate 保持 `pending`，退出码非零。
 
 **接线方式**
 
@@ -85,7 +86,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 - `analyze` 返回 dict，期望含 `domain` / `valence` / `arousal` / `tags` / `suggested_name` / `importance` / `why_remembered`。worker 只检查“非空 dict”，缺失字段不补默认值，写 Kernel 时 `title` 取空、数值取 `None`，由投影层按其原有默认值处理。
 - `judge_same_event` 返回 dict，含布尔 `same_event` 和 0..1 的 `confidence`（可带 `reason`）。形状不符 → worker 报错。有效分数 = `confidence`；明确 `same_event=false` 时按 0 处理（假设，需和真实语义核对）。
 - 阈值 0.85 / 0.60 来自计划，不是 Ombre 的原生阈值；本模块用独立常量（`SAME_EVENT_REVIEW` / `SAME_EVENT_UNCERTAIN`）。
-- 任何一项不成立时的行为：对应请求失败 → 该 Candidate `needs_review`（原因写明），不会自动提交，也不会猜测结果。要启用，需在服务器上确认 Ombre 的真实名字并只改 worker 顶部常量。
+- 任何一项不成立时的行为：启动前检查就会中止（见下）；运行中单条调用失败 → 该 Candidate 记 `error` 并保持 `pending`，不会自动提交，也不会猜测结果。要启用，需在服务器上确认 Ombre 的真实名字并只改 worker 顶部常量。
 
 ## 运维注意
 

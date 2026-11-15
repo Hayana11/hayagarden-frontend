@@ -51,6 +51,7 @@ REVIEW_STATUS = "accepted_by_review"
 PROCESSOR = "memory_review.commit_candidate"
 HUMAN_DECIDERS = ("fedya", "haya")
 REQUIRED_OMBRE_OPS = ("analyze", "search", "judge_same_event")
+REQUIRED_DEHYDRATOR_METHODS = ("analyze", "judge_same_event")  # worker ANALYZE_METHOD / JUDGE_METHOD
 
 # Candidate.status after a non-dry verdict (pending stays pending only for errors).
 STATUS_FOR_OUTCOME = {
@@ -129,12 +130,20 @@ class RuntimeReviewOmbre:
 
     def preflight(self) -> None:
         try:
-            ops = set(self.runtime.capabilities().get("ops") or ())
+            caps = self.runtime.capabilities()
+            ops = set(caps.get("ops") or ())
         except projection.RuntimeUnavailable as exc:
             raise ReviewAbort(f"ombre_unavailable:{exc}"[:300]) from exc
         missing = [op for op in REQUIRED_OMBRE_OPS if op not in ops]
         if missing:
             raise ReviewAbort("ombre_review_ops_missing:" + ",".join(missing))
+        dehydrator = caps.get("dehydrator")
+        if not isinstance(dehydrator, dict) or not dehydrator.get("ok"):
+            reason = dehydrator.get("error") if isinstance(dehydrator, dict) else "not_reported"
+            raise ReviewAbort(f"ombre_dehydrator_unavailable:{reason}"[:300])
+        absent = [m for m in REQUIRED_DEHYDRATOR_METHODS if m not in (dehydrator.get("methods") or ())]
+        if absent:
+            raise ReviewAbort("ombre_dehydrator_methods_missing:" + ",".join(absent))
 
     def _call(self, request: dict[str, Any]) -> Any:
         try:
@@ -482,10 +491,9 @@ def review_candidate(ctx: Context, conn: sqlite3.Connection, candidate: dict[str
     if not support["supported"]:
         return Verdict("rejected_unsupported", support["reason"], support=support, evidence=evidence)
 
-    try:  # fail closed: any Ombre failure or odd shape ends in needs_review, never an auto-create
-        return _ombre_stage(ctx, candidate, content, attribution, evidence, support, rejected, now, media_link)
-    except OmbreFailure as exc:
-        return Verdict("needs_review", f"ombre_failed:{exc}"[:300], support=support, evidence=evidence)
+    # An Ombre failure or odd shape raises OmbreFailure: the run records outcome ``error`` and the
+    # Candidate stays pending for the next run (never an auto-create, never a human-queue entry).
+    return _ombre_stage(ctx, candidate, content, attribution, evidence, support, rejected, now, media_link)
 
 
 class OmbreFailure(Exception):
@@ -499,11 +507,11 @@ def _ombre_stage(ctx: Context, candidate: dict[str, Any], content: str, attribut
         try:
             return fn()
         except Exception as exc:
-            raise OmbreFailure(f"{name}:{type(exc).__name__}:{exc}") from exc
+            raise OmbreFailure(f"ombre_failed:{name}:{type(exc).__name__}:{exc}") from exc
 
     analysis = ombre("analyze", lambda: ctx.ombre.analyze(content))
     if not isinstance(analysis, dict) or not analysis:
-        raise OmbreFailure("analyze:unexpected_shape")
+        raise OmbreFailure("ombre_failed:analyze:unexpected_shape")
     base = dict(analysis=analysis, support=support, evidence=evidence)
 
     judged: list[dict[str, Any]] = []
@@ -602,6 +610,7 @@ def run_review(
     conn.commit()
     counts: dict[str, int] = {}
     failures: list[dict[str, str]] = []
+    attempted = ombre_failures = 0
     status, error, pending_total = "completed", None, None
     ctx = Context(candidate_db, kernel_db, ombre, authority, generate_fn, resolvers, dry_run)
     try:
@@ -620,6 +629,7 @@ def run_review(
                                      (STATUS_FOR_OUTCOME[done[0]], cid))
                         conn.commit()
                 else:
+                    attempted += 1
                     verdict = review_candidate(ctx, conn, candidate, now=_now(), media_link=media_link)
                     _record(conn, cid, verdict, error=None, dry_run=dry_run, run_id=run_id, now=_now())
                 counts[verdict.outcome] = counts.get(verdict.outcome, 0) + 1
@@ -628,9 +638,12 @@ def run_review(
             except Exception as exc:
                 _LOG.warning("memory review failed for %s: %s", cid, type(exc).__name__)
                 failures.append({"candidate_id": cid, "error": type(exc).__name__})
+                ombre_failures += isinstance(exc, OmbreFailure)
                 _record(conn, cid, None, error=f"{type(exc).__name__}:{exc}"[:300], dry_run=dry_run,
                         run_id=run_id, now=_now())
         status = "partial_failure" if failures else "completed"
+        if attempted and ombre_failures == attempted:  # Ombre is effectively down for this whole run
+            status, error = "failed", "ombre_failed_all_candidates"
     except ReviewAbort as exc:
         status, error = "aborted", str(exc)[:300]
         raise
@@ -640,14 +653,15 @@ def run_review(
     finally:
         conn.execute("UPDATE memory_review_runs SET finished_at=?, status=?, pending_total=?, counts_json=?, "
                      "failure_count=?, duration_ms=?, error=? WHERE run_id=?",
-                     (_now(), status, pending_total, _dump({**counts, "failures": failures[:20]}), len(failures),
+                     (_now(), status, pending_total, _dump({**counts, "ombre_failure_count": ombre_failures, "failures": failures[:20]}), len(failures),
                       int((time.monotonic() - began) * 1000), error, run_id))
         conn.commit()
         conn.close()
     reviewed = sum(counts.values())
     return {"run_id": run_id, "status": status, "dry_run": dry_run, "pending_total": pending_total,
             "reviewed": reviewed, "remaining": None if dry_run else (pending_total or 0) - reviewed,
-            "outcomes": counts, "failure_count": len(failures), "failures": failures}
+            "outcomes": counts, "failure_count": len(failures), "ombre_failure_count": ombre_failures,
+            "failures": failures}
 
 
 def review_health(candidate_db: str, *, stale_after_hours: float = 6.0) -> dict[str, Any]:
