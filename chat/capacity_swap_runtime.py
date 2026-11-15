@@ -599,10 +599,18 @@ def _context_plan_raw_transport(
     for index, (representation, members) in enumerate(raw_representations):
         representation_id = str(getattr(representation, 'representation_id', '') or '')
         message_ids = [int(mid) for _member, ids in members for mid in ids]
-        mapped_ids = [mid for mid in message_ids if rows_by_mid.get(mid)]
+        member_mapping_counts = [
+            (len(ids), sum(1 for mid in ids if rows_by_mid.get(int(mid))))
+            for _member, ids in members
+        ]
+        if any(0 < mapped < total for total, mapped in member_mapping_counts):
+            raise _transport_error(
+                'context_plan_capacity_raw_mapping_invalid',
+                'ContextPlan raw source member is only partly mapped',
+            )
         reason = ''
-        if len(mapped_ids) != len(message_ids):
-            reason = 'partial' if mapped_ids else 'unmapped'
+        if any(mapped == 0 for _total, mapped in member_mapping_counts):
+            reason = 'unmapped'
         else:
             sessions = {
                 str(row.get('claude_session_id') or '')
