@@ -1,7 +1,8 @@
-"""Collect evidence-linked memory Candidates from the read-only ai-penpal-mail archive.
+"""Collect evidence-linked memory Candidates from the ai-penpal-mail readonly HTTP surface.
 
-The upstream archive stays the only copy of the mail. This tool reads it, groups messages by
-Gmail thread, asks the formal background model for a few Candidates per thread, and records
+The upstream archive stays the only copy of the mail. This tool reads it through upstream's
+``/readonly`` endpoints (addresses are already replaced by contact names there), groups messages
+by the Gmail ``threadId`` upstream reports, asks the formal background model for a few Candidates per thread, and records
 which message IDs it has already handled so a thread that grows later is only re-read for its
 new letters. Every Candidate cites exact ``gmail_message:<id>`` refs and states whose claim it
 is (Fedya's own letter, the penpal's letter, or something both sides agreed on).
@@ -13,9 +14,13 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
-from dataclasses import dataclass
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -25,20 +30,19 @@ from tools.memory_candidates import create_candidate
 
 _LOG = logging.getLogger(__name__)
 PRODUCER = "mail_dehydrator"
-DEFAULT_ARCHIVE_PATH = "/var/lib/ai-penpal-mail/mail-archive.json"
-DEFAULT_CONTACTS_PATH = "/var/lib/ai-penpal-mail/mail-contacts.json"
+DEFAULT_MAIL_URL = "http://127.0.0.1:3457"
+DEFAULT_MAIL_ENV_FILE = "/etc/ai-penpal-mail/.env"
 MAX_CHUNK_CHARS = 32_000
 MAX_CONTEXT_CHARS = 8_000
 MAX_MESSAGE_CHARS = 24_000
 DEFAULT_MAX_THREADS = 20
 ATTRIBUTIONS = ("fedya", "penpal", "mutual")
 
-_ADDRESS = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
-_AUTOMATED_LOCAL = re.compile(
-    r"^(no-?reply|do-?not-?reply|notifications?|mailer-daemon|postmaster|bounce[s]?|alerts?)([+._-].*)?$",
+# Upstream hides addresses behind contact names, so notification senders are recognised by name.
+_AUTOMATED_NAME = re.compile(
+    r"\b(no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?)\b|^\s*(google|gmail)\b",
     re.IGNORECASE,
 )
-_AUTOMATED_DOMAINS = {"accounts.google.com", "google.com", "googlemail.com"}
 _QUOTE_HEADER = re.compile(
     r"^\s*(On\s.+wrote:|在\s?.+(写道|寫道|wrote)\s*[:：]|-{2,}\s*(Original Message|原始邮件|原始郵件)\s*-{2,}"
     r"|-{2,}\s*Forwarded message\s*-{2,}|-{2,}\s*转发的邮件\s*-{2,})\s*$",
@@ -61,7 +65,7 @@ class MailMessage:
     id: str
     thread_id: str
     direction: str
-    addresses: tuple[str, ...]
+    counterparts: tuple[tuple[str, str], ...]  # (upstream contact id, contact name)
     subject: str
     date: str
     internal_ms: int
@@ -74,96 +78,79 @@ class ArchiveNotReady(RuntimeError):
     pass
 
 
-# --- archive / contacts --------------------------------------------------------------------
+# --- upstream readonly surface --------------------------------------------------------------
 
-def load_archive(path: str) -> dict[str, Any]:
+def read_token(env_file: str = DEFAULT_MAIL_ENV_FILE) -> str:
+    """The same MAIL_READ_TOKEN the upstream service reads: process env first, then its .env."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ArchiveNotReady("archive_missing") from exc
-    if (not isinstance(data, dict) or data.get("version") != 1
-            or not isinstance(data.get("messages"), dict)):
-        raise ArchiveNotReady("archive_invalid")
-    if data.get("initialComplete") is not True:
-        raise ArchiveNotReady("archive_initial_sync_incomplete")
-    return data
+        found = re.search(r"^MAIL_READ_TOKEN=(.*)$", Path(env_file).read_text(encoding="utf-8"), re.M)
+    except OSError:
+        found = None
+    token = (os.environ.get("MAIL_READ_TOKEN") or (found.group(1) if found else "")).strip().strip("\"'")
+    if not token:
+        raise ArchiveNotReady("mail_read_token_missing")
+    return token
 
 
-def load_contacts(path: str | None) -> dict[str, dict[str, Any]]:
-    if not path:
-        return {}
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("contacts"), dict):
-        raise ValueError("mail_contacts_invalid")
-    return {str(address).lower(): dict(contact) for address, contact in data["contacts"].items()
-            if isinstance(contact, dict)}
+def http_reader(base_url: str, token: str, timeout: float = 30.0) -> Callable[..., Any]:
+    def get(path: str, **params: Any) -> Any:
+        query = urllib.parse.urlencode({key: value for key, value in params.items() if value != ""})
+        request = urllib.request.Request(base_url.rstrip("/") + path + ("?" + query if query else ""),
+                                         headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 503:
+                raise ArchiveNotReady("archive_not_ready") from exc
+            raise
+    return get
 
 
-def _message_ms(record: dict[str, Any]) -> int:
-    try:
-        return int(str(record.get("internalDate") or "0"))
-    except ValueError:
-        return 0
-
-
-def _parse_message(record: Any) -> MailMessage | None:
+def _parse_message(record: Any, contact: tuple[str, str]) -> MailMessage | None:
     if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not record["id"]:
         return None
-    direction = "outgoing" if record.get("direction") == "outgoing" else "incoming"
-    addresses = tuple(
-        str(contact.get("address") or "").strip().lower()
-        for contact in record.get("contacts") or []
-        if isinstance(contact, dict) and str(contact.get("address") or "").strip()
-    )
-    attachments = tuple(
-        {"filename": str(item.get("filename") or ""), "mimeType": str(item.get("mimeType") or "")}
-        for item in record.get("attachments") or [] if isinstance(item, dict)
-    )
+    if not record.get("threadId"):
+        raise ValueError("upstream_message_missing_threadId")
     return MailMessage(
-        id=record["id"], thread_id=str(record.get("threadId") or "") or record["id"],
-        direction=direction, addresses=addresses, subject=str(record.get("subject") or ""),
-        date=str(record.get("date") or ""), internal_ms=_message_ms(record),
-        text=str(record.get("text") or ""), truncated=record.get("truncated") is True,
-        attachments=attachments,
+        id=record["id"], thread_id=str(record["threadId"]),
+        direction="outgoing" if record.get("direction") == "outgoing" else "incoming",
+        counterparts=(contact,), subject=str(record.get("subject") or ""),
+        date=str(record.get("date") or ""), text=str(record.get("text") or ""),
+        internal_ms=int(record["internalDate"]) if str(record.get("internalDate") or "").isdigit() else 0,
+        truncated=record.get("truncated") is True,
+        attachments=tuple({"filename": str(item.get("filename") or ""), "mimeType": str(item.get("mimeType") or "")}
+                          for item in record.get("attachments") or [] if isinstance(item, dict)),
     )
 
 
-def group_threads(archive: dict[str, Any], *, since_ms: int = 0) -> dict[str, list[MailMessage]]:
+def fetch_threads(get: Callable[..., Any], *, since_ms: int = 0) -> dict[str, list[MailMessage]]:
+    status = get("/readonly/archive/status")
+    if status.get("ready") is not True:
+        raise ArchiveNotReady("archive_not_ready")
+    if status.get("initialComplete") is not True:
+        raise ArchiveNotReady("archive_initial_sync_incomplete")
+    by_id: dict[str, MailMessage] = {}
+    for conversation in get("/readonly/conversations", limit=200).get("conversations") or []:
+        contact = (str(conversation.get("id") or ""), str(conversation.get("name") or ""))
+        token = ""
+        while True:
+            page = get("/readonly/conversations/" + urllib.parse.quote(contact[0], safe=""),
+                       limit=12, pageToken=token)
+            for record in page.get("messages") or []:
+                message = _parse_message(record, contact)
+                known = by_id.get(message.id) if message else None
+                if message and not known:
+                    by_id[message.id] = message
+                elif known and contact not in known.counterparts:  # same letter listed under two contacts
+                    by_id[known.id] = replace(known, counterparts=known.counterparts + (contact,))
+            if not page.get("nextPageToken") or page["nextPageToken"] == token:
+                break
+            token = page["nextPageToken"]
     threads: dict[str, list[MailMessage]] = {}
-    for record in archive["messages"].values():
-        message = _parse_message(record)
-        if message is None:
-            continue
+    for message in sorted(by_id.values(), key=lambda item: (item.internal_ms, item.id)):
         threads.setdefault(message.thread_id, []).append(message)
-    for messages in threads.values():
-        messages.sort(key=lambda item: (item.internal_ms, item.id))
-    if since_ms:
-        threads = {tid: msgs for tid, msgs in threads.items() if msgs[-1].internal_ms >= since_ms}
-    return threads
-
-
-def is_automated_address(address: str) -> bool:
-    local, _, domain = address.lower().partition("@")
-    return bool(_AUTOMATED_LOCAL.match(local)) or domain in _AUTOMATED_DOMAINS
-
-
-def _counterpart_label(address: str, contacts: dict[str, dict[str, Any]]) -> str:
-    contact = contacts.get(address)
-    if not contact:
-        return "未备注邮箱"
-    name = str(contact.get("name") or "").strip()
-    if name:
-        return name
-    return "未备注笔友 · " + str(contact.get("id") or "")[-4:].upper()
-
-
-def redact_addresses(text: str, contacts: dict[str, dict[str, Any]]) -> str:
-    normalized = re.sub(r"&#(?:64|x0*40);", "@", str(text or ""), flags=re.IGNORECASE)
-    normalized = re.sub(r"%40", "@", normalized, flags=re.IGNORECASE)
-    return _ADDRESS.sub(lambda match: _counterpart_label(match.group(0).lower(), contacts), normalized)
+    return {tid: msgs for tid, msgs in threads.items() if msgs[-1].internal_ms >= since_ms}
 
 
 def strip_quoted_reply(text: str) -> str:
@@ -218,28 +205,25 @@ def mark_processed(db_path: str, thread_id: str, message_ids: Iterable[str]) -> 
 
 # --- prompt --------------------------------------------------------------------------------
 
-def _speaker(message: MailMessage, contacts: dict[str, dict[str, Any]]) -> str:
-    if message.direction == "outgoing":
-        return "费奥多尔"
-    labels = [_counterpart_label(address, contacts) for address in message.addresses]
-    return "、".join(dict.fromkeys(labels)) or "未备注邮箱"
+def _names(message: MailMessage) -> str:
+    return "、".join(dict.fromkeys(name for _id, name in message.counterparts))
 
 
-def message_text(message: MailMessage, contacts: dict[str, dict[str, Any]], *, role: str,
-                 limit: int = MAX_MESSAGE_CHARS) -> str:
-    body = redact_addresses(strip_quoted_reply(message.text), contacts)
+def message_text(message: MailMessage, *, role: str, limit: int = MAX_MESSAGE_CHARS) -> str:
+    body = strip_quoted_reply(message.text)
     cut = len(body) > limit
     if cut:
         body = body[:limit]
-    recipients = "、".join(dict.fromkeys(_counterpart_label(a, contacts) for a in message.addresses))
+    counterpart = _names(message) or "未知"
+    speaker = "费奥多尔" if message.direction == "outgoing" else counterpart
     lines = [
         f"[mail:{message.id}][role={role}][direction={message.direction}]"
-        f"[speaker={_speaker(message, contacts)}][counterpart={recipients or '未知'}][date={message.date}]",
-        "subject: " + redact_addresses(message.subject, contacts),
+        f"[speaker={speaker}][counterpart={counterpart}][date={message.date}]",
+        "subject: " + message.subject,
     ]
     if message.attachments:
         lines.append("attachments(仅元数据，未读取内容): " + ", ".join(
-            f"{redact_addresses(item['filename'], contacts)}({item['mimeType']})"
+            f"{item['filename']}({item['mimeType']})"
             for item in message.attachments
         ))
     lines.append("正文（已去掉信里引用的旧信）：")
@@ -249,13 +233,12 @@ def message_text(message: MailMessage, contacts: dict[str, dict[str, Any]], *, r
     return "\n".join(lines)
 
 
-def _context_block(previous: list[MailMessage], contacts: dict[str, dict[str, Any]],
-                   budget: int = MAX_CONTEXT_CHARS) -> tuple[str, list[MailMessage]]:
+def _context_block(previous: list[MailMessage], budget: int = MAX_CONTEXT_CHARS) -> tuple[str, list[MailMessage]]:
     selected: list[str] = []
     used: list[MailMessage] = []
     size = 0
     for message in reversed(previous):
-        text = message_text(message, contacts, role="context", limit=max(budget // 2, 1))
+        text = message_text(message, role="context", limit=max(budget // 2, 1))
         if selected and size + len(text) > budget:
             break
         selected.append(text)
@@ -264,15 +247,14 @@ def _context_block(previous: list[MailMessage], contacts: dict[str, dict[str, An
     return "\n\n".join(reversed(selected)), list(reversed(used))
 
 
-def _chunk_new(new: list[MailMessage], contacts: dict[str, dict[str, Any]],
-               budget: int) -> list[list[MailMessage]]:
+def _chunk_new(new: list[MailMessage], budget: int) -> list[list[MailMessage]]:
     if budget < 1:
         raise ValueError("chunk character budget must be positive")
     chunks: list[list[MailMessage]] = []
     current: list[MailMessage] = []
     size = 0
     for message in new:
-        length = len(message_text(message, contacts, role="new")) + 2
+        length = len(message_text(message, role="new")) + 2
         if current and size + length > budget:
             chunks.append(current)
             current, size = [], 0
@@ -336,34 +318,27 @@ def _candidate_id(thread_id: str, content: str, attribution: str, source_refs: l
     return "mail_dehydrator:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def _counterparts(messages: Iterable[MailMessage], contacts: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
-    seen: dict[str, dict[str, str]] = {}
-    for message in messages:
-        for address in message.addresses:
-            contact = contacts.get(address) or {}
-            key = str(contact.get("id") or "") or _counterpart_label(address, contacts)
-            seen.setdefault(key, {"contact_id": str(contact.get("id") or ""),
-                                  "name": _counterpart_label(address, contacts)})
-    return list(seen.values())
+def _counterparts(messages: Iterable[MailMessage]) -> list[dict[str, str]]:
+    seen = dict.fromkeys(pair for message in messages for pair in message.counterparts)
+    return [{"contact_id": contact_id, "name": name} for contact_id, name in seen]
 
 
 # --- run -----------------------------------------------------------------------------------
 
 def dehydrate_thread(
     candidate_db_path: str, *, thread_id: str, messages: list[MailMessage], new_ids: set[str],
-    contacts: dict[str, dict[str, Any]], authority: Any,
-    generate_fn: Callable[[Any, Any], Any], chunk_chars: int = MAX_CHUNK_CHARS,
+    authority: Any, generate_fn: Callable[[Any, Any], Any], chunk_chars: int = MAX_CHUNK_CHARS,
 ) -> dict[str, Any]:
     new = [message for message in messages if message.id in new_ids]
     previous = [message for message in messages if message.id not in new_ids]
-    if all(is_automated_address(address) for message in new for address in message.addresses) \
-            or not any(message.addresses for message in new):
+    if all(_AUTOMATED_NAME.search(name) for message in new for _id, name in message.counterparts) \
+            or not any(message.counterparts for message in new):
         return {"thread_id": thread_id, "status": "skipped_automated", "model_calls": 0,
                 "candidates": [], "new_message_ids": sorted(new_ids)}
-    context_text, context_messages = _context_block(previous, contacts)
+    context_text, context_messages = _context_block(previous)
     proposals: list[dict[str, Any]] = []
     model_candidate_count = 0
-    chunks = _chunk_new(new, contacts, chunk_chars)
+    chunks = _chunk_new(new, chunk_chars)
     for index, chunk in enumerate(chunks, 1):
         chunk_new_ids = {message.id for message in chunk}
         allowed = {message.id: message for message in [*context_messages, *chunk]}
@@ -371,7 +346,7 @@ def dehydrate_thread(
         if context_text:
             parts.append("=== 已处理过的旧信（role=context，仅供理解）===\n" + context_text)
         parts.append("=== 本次要判断的新信（role=new）===\n" + "\n\n".join(
-            message_text(message, contacts, role="new") for message in chunk
+            message_text(message, role="new") for message in chunk
         ))
         request = BackgroundGenerationRequest(
             system_text=_SYSTEM, prompt_text="\n\n".join(parts), max_tokens_hint=8192,
@@ -386,7 +361,7 @@ def dehydrate_thread(
         model_candidate_count += count
         proposals.extend(valid)
 
-    counterparts = _counterparts(messages, contacts)
+    counterparts = _counterparts(messages)
     saved: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in proposals:
@@ -411,15 +386,12 @@ def dehydrate_thread(
 
 
 def run(
-    *, archive_path: str = DEFAULT_ARCHIVE_PATH, contacts_path: str | None = DEFAULT_CONTACTS_PATH,
-    candidate_db_path: str = DEFAULT_DB_PATH, authority: Any,
+    *, get: Callable[..., Any], candidate_db_path: str = DEFAULT_DB_PATH, authority: Any,
     generate_fn: Callable[[Any, Any], Any], max_threads: int = DEFAULT_MAX_THREADS,
     since_ms: int = 0, chunk_chars: int = MAX_CHUNK_CHARS,
 ) -> dict[str, Any]:
-    archive = load_archive(archive_path)
-    contacts = load_contacts(contacts_path)
     done = processed_message_ids(candidate_db_path)
-    threads = group_threads(archive, since_ms=since_ms)
+    threads = fetch_threads(get, since_ms=since_ms)
     pending = []
     for thread_id, messages in threads.items():
         new_ids = {message.id for message in messages} - done
@@ -433,7 +405,7 @@ def run(
         try:
             outcome = dehydrate_thread(
                 candidate_db_path, thread_id=thread_id, messages=messages, new_ids=new_ids,
-                contacts=contacts, authority=authority, generate_fn=generate_fn,
+                authority=authority, generate_fn=generate_fn,
                 chunk_chars=chunk_chars,
             )
         except Exception as exc:
@@ -484,8 +456,8 @@ def _since_ms(value: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Collect evidence-linked memory Candidates from the penpal mail archive")
-    parser.add_argument("--archive", default=DEFAULT_ARCHIVE_PATH, help="read-only ai-penpal-mail archive JSON")
-    parser.add_argument("--contacts", default=DEFAULT_CONTACTS_PATH, help="read-only ai-penpal-mail contacts JSON")
+    parser.add_argument("--mail-url", default=DEFAULT_MAIL_URL, help="ai-penpal-mail base URL (readonly endpoints)")
+    parser.add_argument("--mail-env", default=DEFAULT_MAIL_ENV_FILE, help="upstream .env holding MAIL_READ_TOKEN")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="read-only formal config database")
     parser.add_argument("--candidate-db", default=DEFAULT_DB_PATH)
     parser.add_argument("--max-threads", type=int, default=DEFAULT_MAX_THREADS)
@@ -494,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
     try:
         result = run_formal(
-            chat_db_path=args.db, archive_path=args.archive, contacts_path=args.contacts,
+            chat_db_path=args.db, get=http_reader(args.mail_url, read_token(args.mail_env)),
             candidate_db_path=args.candidate_db, max_threads=args.max_threads,
             since_ms=_since_ms(args.since),
         )

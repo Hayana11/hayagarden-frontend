@@ -17,6 +17,10 @@ DEHYDRATOR_CRON_PATH="/etc/cron.d/hayagarden-daily-memory-dehydrator"
 DEHYDRATOR_CRON_BACKUP="/var/tmp/hayagarden-dehydrator-cron.$$.bak"
 DEHYDRATOR_CRON_EXISTED=0
 DEHYDRATOR_CRON_CHANGED=0
+MAIL_CRON_PATH="/etc/cron.d/hayagarden-mail-memory-dehydrator"
+MAIL_CRON_BACKUP="/var/tmp/hayagarden-mail-dehydrator-cron.$$.bak"
+MAIL_CRON_EXISTED=0
+MAIL_CRON_CHANGED=0
 ROOT_CRONTAB_BACKUP="/var/tmp/hayagarden-fact-extractor-crontab.$$.bak"
 ROOT_CRONTAB_EXISTED=0
 ROOT_CRONTAB_CHANGED=0
@@ -239,6 +243,9 @@ rollback() {
   if [[ "$DEHYDRATOR_CRON_CHANGED" -eq 1 ]]; then
     if [[ "$DEHYDRATOR_CRON_EXISTED" -eq 1 ]]; then cp -a "$DEHYDRATOR_CRON_BACKUP" "$DEHYDRATOR_CRON_PATH"; else rm -f "$DEHYDRATOR_CRON_PATH"; fi
   fi
+  if [[ "$MAIL_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$MAIL_CRON_EXISTED" -eq 1 ]]; then cp -a "$MAIL_CRON_BACKUP" "$MAIL_CRON_PATH"; else rm -f "$MAIL_CRON_PATH"; fi
+  fi
   if [[ "$ROOT_CRONTAB_CHANGED" -eq 1 ]]; then
     if [[ "$ROOT_CRONTAB_EXISTED" -eq 1 ]]; then crontab "$ROOT_CRONTAB_BACKUP"; else crontab -r 2>/dev/null || true; fi
   fi
@@ -256,7 +263,7 @@ rollback() {
       echo "Rollback restart withheld: managed Claude runtime is not healthy." >&2
     fi
   fi
-  rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
+  rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$MAIL_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
 }
 trap rollback ERR
 
@@ -301,12 +308,15 @@ PY
 
 if [[ -f "$PROFILE_CRON_PATH" ]]; then cp -a "$PROFILE_CRON_PATH" "$PROFILE_CRON_BACKUP"; PROFILE_CRON_EXISTED=1; fi
 if [[ -f "$DEHYDRATOR_CRON_PATH" ]]; then cp -a "$DEHYDRATOR_CRON_PATH" "$DEHYDRATOR_CRON_BACKUP"; DEHYDRATOR_CRON_EXISTED=1; fi
+if [[ -f "$MAIL_CRON_PATH" ]]; then cp -a "$MAIL_CRON_PATH" "$MAIL_CRON_BACKUP"; MAIL_CRON_EXISTED=1; fi
 umask 077
 if crontab -l > "$ROOT_CRONTAB_BACKUP" 2>/dev/null; then ROOT_CRONTAB_EXISTED=1; else : > "$ROOT_CRONTAB_BACKUP"; fi
 PROFILE_CRON_CHANGED=1
 rm -f "$PROFILE_CRON_PATH"
 DEHYDRATOR_CRON_CHANGED=1
 install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-daily-memory-dehydrator" "$DEHYDRATOR_CRON_PATH"
+MAIL_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-mail-memory-dehydrator" "$MAIL_CRON_PATH"
 # Retire only the root-cron entry that runs the legacy FACT extractor.
 if [[ "$ROOT_CRONTAB_EXISTED" -eq 1 ]] && grep -Fq "/opt/frontend/tools/fact_extractor.py" "$ROOT_CRONTAB_BACKUP"; then
   ROOT_CRONTAB_CHANGED=1
@@ -315,5 +325,5 @@ fi
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
 trap - ERR
-rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
+rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$MAIL_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
 echo "Deployed $target_sha from $REMOTE/$BRANCH"

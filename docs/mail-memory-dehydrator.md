@@ -1,12 +1,24 @@
-# Mail Dehydrator（#688 Gmail → Candidate）
+# Mail Dehydrator（#689 Gmail → Candidate）
 
-`tools/mail_memory_dehydrator.py` 只读上游 `ai-penpal-mail` 的本地存档，按 Gmail thread 脱水成 `memory_candidates`。不复制邮件库，不写 Kernel。
+`tools/mail_memory_dehydrator.py` 通过上游 `ai-penpal-mail` 的只读 HTTP 接口读邮件，按 Gmail thread 脱水成 `memory_candidates`。不读上游的 JSON 文件，不复制邮件库，不写 Kernel。
+
+```
+ai-penpal-mail → /readonly 接口 → Mail Dehydrator → Candidate
+```
 
 ## 读什么
 
-- `/var/lib/ai-penpal-mail/mail-archive.json`（`--archive`）：上游 `mail-archive.mjs` v1 格式。`initialComplete` 不为 true 时整轮跳过，不给半截结果。
-- `/var/lib/ai-penpal-mail/mail-contacts.json`（`--contacts`）：只用来把邮箱地址换成笔友备注名。地址不进 prompt，也不进 Candidate。
-- 部署前请对照 `/etc/ai-penpal-mail/.env` 里的 `MAIL_ARCHIVE_FILE` / `MAIL_CONTACTS_FILE` 确认这两个路径。
+- `GET /readonly/archive/status`：`ready` 与 `initialComplete` 都为 true 才继续，否则整轮跳过，不给半截结果。
+- `GET /readonly/conversations`：笔友（联系人）列表，取 `id` 与备注名。
+- `GET /readonly/conversations/<id>`：逐页读该笔友的信。上游已把正文、标题、附件名里的邮箱地址换成联系人备注名，所以这里不再处理地址，也不读联系人库。
+- thread 一律用上游消息里的 `threadId`，缺失时直接报错，不在这边推断。上游需要包含「`publicArchiveMessage` 输出 `threadId`」这一处改动。
+- 同一封信同时出现在两个联系人名下时合并为一封，counterpart 记两个人。
+
+## 凭证与地址
+
+只读接口需要上游的 `MAIL_READ_TOKEN`。先取进程环境变量 `MAIL_READ_TOKEN`，没有则读上游正式配置 `/etc/ai-penpal-mail/.env`（`--mail-env`）里的同名项；都没有则整轮跳过。服务地址默认 `http://127.0.0.1:3457`（`--mail-url`）。上游未配置 `MAIL_READ_TOKEN` 时没有只读接口，需先在上游 `.env` 中配置并重启 `ai-penpal-mail`。
+
+发件人识别为通知类（备注名含 no-reply / notifications / mailer-daemon，或以 Google / Gmail 开头）的 thread 不调用模型。上游不再给出邮箱地址，所以这里按备注名判断。
 
 ## 规则
 
