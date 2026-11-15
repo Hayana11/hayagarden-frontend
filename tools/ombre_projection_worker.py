@@ -4,8 +4,8 @@ The Memory Kernel projection never touches Ombre's files. It starts this
 worker with Ombre's Python, pointing at Ombre's source tree and env file, and
 the worker drives Ombre exclusively through ``BucketManager.create / update /
 get`` (plus ``get_including_archive`` / ``list_all`` to read deletions and
-buckets Ombre created on its own, and ``touch_many`` to reinforce memories a
-reader actually used). Vault location, validation, normalisation,
+buckets Ombre created on its own, ``touch_many`` to reinforce memories a
+reader actually used, and ``search`` for Review's read-only candidate lookup). Vault location, validation, normalisation,
 locking, the ledger and derived indexes are all Ombre's.
 
 ``hold`` is never called: its similarity merge is the right behaviour for
@@ -37,6 +37,11 @@ REQUIRED_CREATE_PARAMS = (
 )
 # Lifecycle and bookkeeping are Ombre's; only these semantics are projected.
 UPDATE_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "arousal", "pinned")
+
+
+# Ops this worker implements. Review also needs ``analyze`` and ``judge_same_event``; they are
+# deliberately absent until Ombre's real function names are confirmed (see docs/memory-review-core.md).
+OPS = ("capabilities", "get", "create_if_absent", "update", "touch", "list", "search")
 
 
 class Incompatible(RuntimeError):
@@ -161,6 +166,13 @@ async def handle(manager, request: dict) -> object:
             raise Incompatible("BucketManager lacks: touch_many")
         await touch_many([str(b) for b in request.get("bucket_ids") or []], ripple=False)
         return {"touched": len(request.get("bucket_ids") or [])}
+    if op == "search":
+        # Read-only ranking. BucketManager.search(query, limit=) as ombre_adapter calls it.
+        search = getattr(manager, "search", None)
+        if not callable(search):
+            raise Incompatible("BucketManager lacks: search")
+        found = await search(str(request["query"]), limit=max(1, int(request.get("limit") or 5)))
+        return [_bucket_view(bucket) for bucket in found or []]
     if op == "list":
         buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
         return [_bucket_view(bucket) for bucket in buckets]
@@ -174,7 +186,7 @@ async def run(src_dir: str, requests: list[dict]) -> dict:
         # One failing request (e.g. Ombre's validation) must not hide the others' outcomes.
         try:
             if request.get("op") == "capabilities":
-                value = {"version": version, "update_fields": list(UPDATE_FIELDS)}
+                value = {"version": version, "update_fields": list(UPDATE_FIELDS), "ops": list(OPS)}
             else:
                 value = await handle(manager, request)
             results.append({"ok": True, "value": value})

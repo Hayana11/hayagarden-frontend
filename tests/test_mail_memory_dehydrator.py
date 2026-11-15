@@ -280,7 +280,7 @@ class MailCronDeployTest(unittest.TestCase):
         return text.replace("/var/tmp/", f"{self.temp.name}/")
 
     def deploy(self, rollback):
-        script = f'staging="{self.staging}"\nPROFILE_CRON_BACKUP="{self.temp.name}/p" DEHYDRATOR_CRON_BACKUP="{self.temp.name}/d" ROOT_CRONTAB_BACKUP="{self.temp.name}/r"\n' + self.script_lines(rollback)
+        script = f'staging="{self.staging}"\nPROFILE_CRON_BACKUP="{self.temp.name}/p" DEHYDRATOR_CRON_BACKUP="{self.temp.name}/d" ROOT_CRONTAB_BACKUP="{self.temp.name}/r" REVIEW_CRON_BACKUP="{self.temp.name}/v"\n' + self.script_lines(rollback)
         subprocess.run(["bash", "-Eeuo", "pipefail", "-c", script], check=True)
 
     def test_target_cron_is_installed_and_backup_cleaned(self):

@@ -1,0 +1,4 @@
+CRON_TZ=UTC
+# Memory Candidate review (#690), after the 19:15 and 19:45 UTC dehydrators. Dry-run first:
+# it records verdicts only and writes nothing to the Memory Kernel.
+15 20 * * * root cd /opt/frontend && /usr/bin/flock -n /run/lock/hayagarden-memory-review.lock /usr/bin/python3.11 -m tools.memory_review --dry-run >> /var/log/hayagarden-memory-review.log 2>&1
