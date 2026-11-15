@@ -532,7 +532,8 @@ def _native_rows_by_message(
     seen: set[str] = set()
     for raw in mapping_rows:
         try:
-            if int(raw.get('resident_generation')) != int(resident_generation):
+            row_generation = int(raw.get('resident_generation'))
+            if row_generation != int(resident_generation):
                 continue
             uid = str(raw.get('event_uuid') or '').strip()
             mid = int(raw.get('message_id'))
@@ -540,6 +541,12 @@ def _native_rows_by_message(
             event = graph.by_uuid.get(uid)
             if not uid or uid in seen or mid <= 0:
                 raise ValueError(uid)
+            if mid in exact_ids and str(raw.get('claude_session_id') or '') != str(claude_session_id):
+                if int(raw.get('context_id')) != int(context_id) or int(raw.get('context_epoch')) != int(context_epoch):
+                    raise ValueError(uid)
+                seen.add(uid)
+                out.setdefault(mid, []).append(dict(raw))
+                continue
             if mid in exact_ids and (
                 event is None
                 or str(raw.get('claude_session_id') or '') != str(claude_session_id)
@@ -570,9 +577,9 @@ def _context_plan_raw_transport(
 ) -> tuple[list[Any], list[str]]:
     """Choose the transport per raw representation; never split one.
 
-    Every member natively mapped: carry the representation's source rounds.
-    Any member with no native mapping at all: the whole representation goes
-    readable through the continuity materializer. Partial mapping fails.
+    A complete same-session mapping carries native rounds. Incomplete or
+    cross-session representations stay intact and go through readable
+    materialization.
     """
     owner_by_uuid = {
         str(row['event_uuid']): (int(mid), str(row.get('role') or ''))
@@ -588,18 +595,28 @@ def _context_plan_raw_transport(
     claimed_by: dict[str, int] = {}
     readable_ids: list[str] = []
     for index, (representation, members) in enumerate(raw_representations):
-        absent = False
-        for _member, ids in members:
-            mapped = [mid for mid in ids if rows_by_mid.get(int(mid))]
-            if not mapped:
-                absent = True
-            elif len(mapped) != len(ids):
-                raise _transport_error(
-                    'context_plan_capacity_raw_mapping_invalid',
-                    'ContextPlan raw source is only partly mapped',
-                )
-        if absent:
-            readable_ids.append(str(getattr(representation, 'representation_id', '') or ''))
+        representation_id = str(getattr(representation, 'representation_id', '') or '')
+        message_ids = [int(mid) for _member, ids in members for mid in ids]
+        mapped_ids = [mid for mid in message_ids if rows_by_mid.get(mid)]
+        reason = ''
+        if len(mapped_ids) != len(message_ids):
+            reason = 'partial' if mapped_ids else 'unmapped'
+        else:
+            sessions = {
+                str(row.get('claude_session_id') or '')
+                for mid in message_ids
+                for row in rows_by_mid[mid]
+            }
+            graph_session = str(getattr(graph, 'session_id', '') or '')
+            if len(sessions) != 1 or not graph_session or sessions != {graph_session}:
+                reason = 'cross_session'
+        if reason:
+            readable_ids.append(representation_id)
+            logger.warning(
+                'capacity ContextPlan raw representation readable: representation_id=%s reason=%s',
+                representation_id,
+                reason,
+            )
             continue
         id_set = {int(mid) for _member, ids in members for mid in ids}
         for _member, ids in members:

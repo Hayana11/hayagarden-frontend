@@ -1607,6 +1607,56 @@ class NeverUsedIdleReapContractTests(unittest.TestCase):
 
 
 class ContextPlanCapacityCarrierTests(unittest.TestCase):
+    def test_raw_transport_degrades_incomplete_and_cross_session_representations(self):
+        from chat.capacity_swap_runtime import _context_plan_raw_transport
+
+        graph = types.SimpleNamespace(
+            session_id='source-session',
+            candidate_rounds=(types.SimpleNamespace(
+                candidate_user_event_uuid='u1', event_uuids=('u1',),
+                has_sidechain_impact=False,
+            ),),
+            by_uuid={'u1': types.SimpleNamespace(byte_offset=1)},
+        )
+        representations = [
+            (types.SimpleNamespace(representation_id='partial'), ((None, (1, 2)),)),
+            (types.SimpleNamespace(representation_id='unmapped'), ((None, (3,)),)),
+            (types.SimpleNamespace(representation_id='cross'), ((None, (4,)),)),
+        ]
+        rows_by_mid = {
+            1: [{'event_uuid': 'u1', 'role': 'user', 'claude_session_id': 'source-session'}],
+            4: [{'event_uuid': 'u4', 'role': 'user', 'claude_session_id': 'other-session'}],
+        }
+        with self.assertLogs('chat.capacity_swap_runtime', level='WARNING') as captured:
+            native, readable = _context_plan_raw_transport(
+                representations, rows_by_mid, graph=graph,
+            )
+        self.assertEqual(native, [])
+        self.assertEqual(readable, ['partial', 'unmapped', 'cross'])
+        log = '\n'.join(captured.output)
+        self.assertIn('representation_id=partial reason=partial', log)
+        self.assertIn('representation_id=unmapped reason=unmapped', log)
+        self.assertIn('representation_id=cross reason=cross_session', log)
+
+    def test_raw_transport_keeps_mapping_damage_failures(self):
+        from chat.capacity_swap_runtime import _context_plan_raw_transport
+
+        graph = types.SimpleNamespace(
+            session_id='source-session', candidate_rounds=(), by_uuid={},
+        )
+        representation = types.SimpleNamespace(representation_id='broken')
+        with self.assertRaises(CapacitySwapRuntimeError) as raised:
+            _context_plan_raw_transport(
+                [(representation, ((None, (1,)),))],
+                {1: [{'event_uuid': 'missing-round', 'role': 'user',
+                      'claude_session_id': 'source-session'}]},
+                graph=graph,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_capacity_raw_round_missing',
+        )
+
     def test_zero_raw_blocks_before_legacy_selector(self):
         plan = mock.Mock(
             context_id=7,
