@@ -310,7 +310,9 @@ class ThinCapacityPrepareTests(unittest.TestCase):
             },
         )
         self.assertFalse(result.ok)
-        self.assertEqual(result.error_code, 'registry_blocked')
+        self.assertEqual(
+            result.error_code, 'context_plan_capacity_raw_mapping_invalid',
+        )
 
     def test_native_round_carrying_an_unselected_message_fails_closed(self):
         members = [m for m in _members() if m.source_ref == 'turn:14716:14717']
@@ -832,7 +834,9 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
         candidate = sent_carriers[0].candidate
         self.assertTrue(sent_carriers[0].ok, sent_carriers[0].error_code)
         self.assertEqual(candidate.anchor_message_id, 14716)
-        self.assertEqual(candidate.anchor_event_uuid, 'old-u')
+        emitted_anchor = json.loads(candidate.serialized_jsonl.splitlines()[0])
+        self.assertEqual(candidate.anchor_event_uuid, emitted_anchor['uuid'])
+        self.assertNotEqual(candidate.anchor_event_uuid, 'old-u')
         self.assertEqual(candidate.selected_message_ids, (14716, 14720, 14721))
         self.assertNotIn(14987, candidate.selected_message_ids)
         self.assertEqual(len(swaps), 1)
