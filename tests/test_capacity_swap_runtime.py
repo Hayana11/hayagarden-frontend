@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Optional
 from unittest import mock
 
-import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
@@ -2449,46 +2448,73 @@ def _assert_database_anchor(result):
     return events
 
 
-@pytest.mark.parametrize(('supplier', 'has_complete_mapping'), _CAPACITY_SUPPLIER_CASES)
-def test_capacity_swap_supplier_matrix_window_anchor_and_raw_block(supplier, has_complete_mapping):
-    result, _emit_anchor = _run_supplier_matrix_case(supplier=supplier)
-    events = _assert_database_anchor(result)
-    if has_complete_mapping:
-        assert result.candidate.readable_raw_representation_ids == ()
-        assert result.candidate.selected_round_count == 1
-        assert len(events) == 3
-    else:
-        assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
-        assert result.candidate.selected_round_count == 0
-        assert len(events) == 1
+class CapacitySupplierMatrixTests(unittest.TestCase):
+    def test_window_anchor_and_raw_block(self):
+        for supplier, has_complete_mapping in _CAPACITY_SUPPLIER_CASES:
+            with self.subTest(supplier=supplier):
+                result, _emit_anchor = _run_supplier_matrix_case(
+                    supplier=supplier,
+                )
+                events = _assert_database_anchor(result)
+                if has_complete_mapping:
+                    self.assertEqual(
+                        result.candidate.readable_raw_representation_ids, (),
+                    )
+                    self.assertEqual(result.candidate.selected_round_count, 1)
+                    self.assertEqual(len(events), 3)
+                else:
+                    self.assertEqual(
+                        result.candidate.readable_raw_representation_ids,
+                        ('raw:matrix',),
+                    )
+                    self.assertEqual(result.candidate.selected_round_count, 0)
+                    self.assertEqual(len(events), 1)
 
+    def test_survives_two_consecutive_swaps(self):
+        for supplier, has_complete_mapping in _CAPACITY_SUPPLIER_CASES:
+            for generation in (219, 220):
+                with self.subTest(supplier=supplier, generation=generation):
+                    result, _emit_anchor = _run_supplier_matrix_case(
+                        supplier=supplier,
+                        resident_generation=generation,
+                    )
+                    events = _assert_database_anchor(result)
+                    if has_complete_mapping:
+                        self.assertEqual(
+                            result.candidate.readable_raw_representation_ids, (),
+                        )
+                        self.assertEqual(
+                            result.candidate.selected_round_count, 1,
+                        )
+                        self.assertEqual(len(events), 3)
+                    else:
+                        self.assertEqual(
+                            result.candidate.readable_raw_representation_ids,
+                            ('raw:matrix',),
+                        )
+                        self.assertEqual(
+                            result.candidate.selected_round_count, 0,
+                        )
+                        self.assertEqual(len(events), 1)
 
-@pytest.mark.parametrize(('supplier', 'has_complete_mapping'), _CAPACITY_SUPPLIER_CASES)
-def test_capacity_swap_supplier_matrix_survives_two_consecutive_swaps(supplier, has_complete_mapping):
-    for generation in (219, 220):
-        result, _emit_anchor = _run_supplier_matrix_case(
-            supplier=supplier, resident_generation=generation,
-        )
+    def test_mixed_sources_in_one_representation_use_readable_block(self):
+        with self.assertLogs(
+            'chat.capacity_swap_runtime', level='WARNING',
+        ) as captured:
+            result, _emit_anchor = _run_supplier_matrix_case(
+                supplier='api_relay', placement='mixed',
+            )
         events = _assert_database_anchor(result)
-        if has_complete_mapping:
-            assert result.candidate.readable_raw_representation_ids == ()
-            assert result.candidate.selected_round_count == 1
-            assert len(events) == 3
-        else:
-            assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
-            assert result.candidate.selected_round_count == 0
-            assert len(events) == 1
-
-
-def test_capacity_swap_mixed_sources_in_one_representation_use_readable_block(caplog):
-    result, _emit_anchor = _run_supplier_matrix_case(
-        supplier='api_relay', placement='mixed',
-    )
-    events = _assert_database_anchor(result)
-    assert len(events) == 1
-    assert result.candidate.selected_round_count == 0
-    assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
-    assert 'representation_id=raw:matrix reason=partial' in caplog.text
+        self.assertEqual(len(events), 1)
+        self.assertEqual(result.candidate.selected_round_count, 0)
+        self.assertEqual(
+            result.candidate.readable_raw_representation_ids,
+            ('raw:matrix',),
+        )
+        self.assertTrue(any(
+            'representation_id=raw:matrix reason=unmapped' in line
+            for line in captured.output
+        ))
 
 
 if __name__ == '__main__':
