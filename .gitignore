@@ -17,7 +17,8 @@ gateway.log
 mcp-http.log
 internal-mcp.log
 .discord-session-id
-.claude/
+.claude/*
+!.claude/agents/
 # Deploy-managed pinned Claude Code install (see scripts/ensure-claude-runtime.sh)
 .claude-runtime/
 private/

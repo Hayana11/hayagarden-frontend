@@ -48,3 +48,18 @@ If current code conflicts with the guide, STOP and report the drift before editi
 ## Agent temporary workspace
 
 Except for explicitly persistent assets, VPS temporary work must be under /var/tmp/hayagarden-agent/: one-off files use scratch/, and Git worktrees use worktrees/. Clean up completed work; scratch is covered by systemd-tmpfiles retention, while worktrees must leave through git worktree remove followed by git worktree prune. Do not create new disposable test/build workspaces under /tmp, /root, or /opt.
+
+## Claude Code division of labor
+
+Subagent definitions live in `.claude/agents/` (committed, so every session inherits them).
+When delegating, name the agent type explicitly so the model comes from its definition instead
+of inheriting the main session's model.
+
+| Work | Who | Model |
+|---|---|---|
+| Design, trade-offs, code review, talking with Haya | main session | session model |
+| Find files, read code/logs, summarize (read-only, no tests) | `reader` | haiku |
+| Implement an agreed spec, write/run tests, push to the named branch | `implementer` | sonnet |
+
+The main session reviews `implementer` output before presenting it to Haya. If a spec is unclear,
+`implementer` stops and reports instead of guessing.
