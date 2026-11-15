@@ -281,24 +281,6 @@ def update_from_trace(
     }
 
 
-def _formal_background(chat_db_path: str) -> tuple[Any, Callable[[Any, Any], Any]]:
-    """Freeze the formal authority once; the read-only guard encloses that and each model call only.
-
-    While the guard is active it forces the production memories.db read-only, and Candidates
-    (and progress) are written to that same file, so no write may happen inside it."""
-    from tools.dayblock_scheduled_runner import _formal_config_read_guard
-    with _formal_config_read_guard(chat_db_path):
-        from chat.provider_router import capture_generation_authority
-        authority = capture_generation_authority()
-
-    def generate(request: Any, frozen: Any) -> Any:
-        with _formal_config_read_guard(chat_db_path) as formal:
-            _request_cls, generate_background, _authority_cls, token_getter = formal
-            return generate_background(request, frozen, cc_token_getter=token_getter)
-
-    return authority, generate
-
-
 def _guarded_annotator(chat_db_path: str) -> Callable[[bytes, str], dict[str, Any]]:
     """The default vision call is also a model call: it runs inside the guard, one image at a time."""
     from tools.dayblock_scheduled_runner import _formal_config_read_guard
@@ -341,7 +323,8 @@ def update_day(
             image_resolver=image_resolver, image_annotator=image_annotator, static_dir=static_dir,
         )
 
-    authority, generate_fn = _formal_background(chat_db_path)
+    from tools.dayblock_scheduled_runner import formal_background_generation
+    authority, generate_fn = formal_background_generation(chat_db_path)
     return update_from_trace(
         candidate_db_path, source_day=source_day, trace=trace, authority=authority,
         generate_fn=generate_fn, chunk_chars=chunk_chars, media_db_path=media_db_path,

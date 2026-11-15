@@ -20,6 +20,7 @@ from chat.background_generation import BackgroundGenerationResult
 from tools import daily_memory_dehydrator as daily
 from tools import dayblock_scheduled_runner as runner
 from tools import mail_memory_dehydrator as mail
+from tools import memory_review as review
 from tools.memory_candidates import CandidateSourceTrace
 
 AUTHORITY = SimpleNamespace(provider="p", model_identity="m")
@@ -152,6 +153,48 @@ class MailGuardScopeTest(GuardScopeTestCase):
         writes = [e for e in self.events if e[0] in ("create_candidate", "mark_processed")]
         self.assertEqual({"create_candidate", "mark_processed"}, {name for name, _ in writes})
         self.assertTrue(all(depth == 0 for _, depth in writes))
+
+
+class ReviewGuardScopeTest(GuardScopeTestCase):
+    def test_review_and_kernel_writes_happen_outside_guard_and_support_check_inside(self):
+        from tools.memory_candidates import create_candidate
+        from tools.memory_kernel import MemoryKernel
+
+        kernel_db = str(Path(self.temp.name) / "kernel.db")
+        MemoryKernel(kernel_db).initialize()
+
+        class Ombre:
+            def analyze(self_, text):
+                return {"domain": ["生活"], "valence": 0.5, "arousal": 0.3, "tags": [], "suggested_name": "n",
+                        "importance": 5, "why_remembered": "w"}
+
+            def search(self_, query, limit):
+                return []
+
+            def judge_same_event(self_, old, new):
+                return {"same_event": False, "confidence": 0.0}
+
+        create_candidate(self.db, candidate_kind="memory", payload={"content": "阿蒂尔下个月搬家。"},
+                         source_type="chat_messages", source_refs=["chat_messages:1"], derived_refs=["d:1"],
+                         producer="daily_dehydrator", candidate_id="memcand:1")
+        resolver = lambda ref: review.Resolved(ref, "chat_messages", "原文", "2026-11-01T09:00:00+08:00", ("Haya",))
+        self.reply = {"supported": True, "reason": "ok"}
+        for module, name in ((review, "_record"), (review, "commit_candidate")):
+            self.track(module, name)
+        authority, generate = runner.formal_background_generation(self.db)
+        result = review.run_review(self.db, kernel_db, ombre=Ombre(), authority=authority, generate_fn=generate,
+                                   resolvers={"chat_messages": resolver})
+        self.assertEqual({"committed_new": 1}, result["outcomes"])
+        self.assertEqual([("authority", 1), ("model", 1)],
+                         [e for e in self.events if e[0] in ("authority", "model")])
+        writes = [e for e in self.events if e[0] in ("_record", "commit_candidate")]
+        self.assertEqual({"_record", "commit_candidate"}, {name for name, _ in writes})
+        self.assertTrue(all(depth == 0 for _, depth in writes))
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual("committed", conn.execute("SELECT status FROM memory_candidates").fetchone()[0])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

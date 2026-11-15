@@ -264,8 +264,48 @@ class WorkerTests(FakeOmbreSource):
         with self.assertRaisesRegex(projection.RuntimeUnavailable, "worker_unreachable"):
             runtime.get("abc")
 
+    FAKE_DEHYDRATOR = textwrap.dedent("""
+        class Dehydrator:
+            def __init__(self, config):
+                self.config = config
+
+            async def analyze(self, text):
+                return {"domain": ["生活"], "valence": 0.6, "arousal": 0.4, "tags": ["猫"],
+                        "suggested_name": text[:4], "importance": 6}
+
+            async def judge_same_event(self, old, new):
+                if new == "bad":
+                    return {"confidence": "high"}
+                if new == "boom":
+                    raise RuntimeError("llm down")
+                return {"same_event": old == new, "confidence": 0.9, "reason": "r"}
+
+            async def digest(self, *a):
+                raise AssertionError("digest must never be called")
+    """)
+
+    def test_analyze_and_judge_drive_ombres_own_dehydrator_and_fail_closed(self):
+        (self.src / "dehydrator.py").write_text(self.FAKE_DEHYDRATOR, encoding="utf-8")
+        ops = self.runtime.capabilities()["ops"]
+        self.assertTrue({"analyze", "judge_same_event", "search"} <= set(ops))
+        analyzed, same, bad, boom = self.runtime.batch([
+            {"op": "analyze", "text": "我养了猫"},
+            {"op": "judge_same_event", "old": "a", "new": "a"},
+            {"op": "judge_same_event", "old": "a", "new": "bad"},
+            {"op": "judge_same_event", "old": "a", "new": "boom"}])
+        self.assertEqual(("我养了猫", ["生活"]), (analyzed["suggested_name"], analyzed["domain"]))
+        self.assertEqual((True, 0.9), (same["same_event"], same["confidence"]))
+        self.assertIsInstance(bad, projection.RequestFailed)
+        self.assertIsInstance(boom, projection.RequestFailed)
+
+    def test_missing_dehydrator_fails_the_request_not_the_batch(self):
+        got, listed = self.runtime.batch([{"op": "analyze", "text": "x"}, {"op": "list"}])
+        self.assertIsInstance(got, projection.RequestFailed)
+        self.assertNotIsInstance(listed, projection.RequestFailed)
+
     def test_worker_is_self_contained_and_never_holds(self):
         source = projection.WORKER.read_text(encoding="utf-8")
+        self.assertNotIn(".digest(", source)
         for forbidden in ("from tools", "import tools", ".hold(", "merge_or_create", "write_text", "open(version_path, \"w"):
             self.assertNotIn(forbidden, source)
 

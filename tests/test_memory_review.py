@@ -237,12 +237,38 @@ class PipelineTest(ReviewTestCase):
                             for c in reasons))
         self.assertEqual(([], 0), (self.gen.calls, self.kernel_count("state")))
 
+    def test_ombre_failures_fail_closed_to_needs_review(self):
+        head = self.seed_head()
+        self.ombre.hits = [{"bucket_id": head["bucket_id"]}]
+
+        def boom(*_):
+            raise RuntimeError("ombre_analyze_failed:down")
+
+        cases = {
+            "analyze_raises": lambda: setattr(self.ombre, "analyze", boom),
+            "analyze_shape": lambda: setattr(self.ombre, "analyze", lambda text: ["x"]),
+            "judge_raises": lambda: setattr(self.ombre, "judge", boom),
+            "judge_shape": lambda: setattr(self.ombre, "judge", lambda a, b: {"confidence": "high"}),
+            "search_raises": lambda: setattr(self.ombre, "search", boom),
+        }
+        before = self.kernel_count("state")
+        for name, break_it in cases.items():
+            self.ombre = FakeOmbre()
+            self.ombre.hits = [{"bucket_id": head["bucket_id"]}]
+            break_it()
+            cid = self.add(f"今天去了海边散步 {name}。")
+            self.run_review()
+            row = self.row(cid)
+            self.assertEqual("needs_review", row["outcome"], name)
+            self.assertTrue(row["decision_reason"].startswith("ombre_failed:"), (name, row["decision_reason"]))
+        self.assertEqual(before, self.kernel_count("state"))
+
     def test_same_event_bands(self):
         head = self.seed_head()
         self.ombre.hits = [{"bucket_id": head["bucket_id"]}, {"bucket_id": "foreign-bucket"}]
         cases = [
             ({"same_event": True, "confidence": 0.9}, "needs_review", "revise"),
-            ({"same_event": True, "confidence": 0.9, "duplicate": True}, "needs_review", "attach_evidence"),
+            ({"same_event": True, "confidence": 0.9, "duplicate": True}, "needs_review", "revise"),
             ({"same_event": True, "confidence": 0.85}, "needs_review", "revise"),
             ({"same_event": True, "confidence": 0.7}, "needs_review", "uncertain"),
             ({"same_event": True, "confidence": 0.6}, "needs_review", "uncertain"),
@@ -455,7 +481,8 @@ class OmbreAdapterTest(unittest.TestCase):
         found = asyncio.run(worker.handle(manager, {"op": "search", "query": "猫", "limit": 3}))
         self.assertEqual((("猫", 3), "b1"), (manager.args, found[0]["id"]))
         self.assertIn("search", worker.OPS)
-        self.assertNotIn("analyze", worker.OPS)
+        self.assertTrue({"analyze", "judge_same_event"} <= set(worker.OPS))
+        self.assertNotIn("digest", worker.OPS)
         with self.assertRaises(worker.Incompatible):
             asyncio.run(worker.handle(object(), {"op": "search", "query": "x"}))
 

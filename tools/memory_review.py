@@ -40,7 +40,7 @@ from tools.memory_kernel_store import (
 _LOG = logging.getLogger(__name__)
 
 # Same-event confidence bands, applied to the best match among existing lineages.
-SAME_EVENT_REVIEW = 0.85      # >= : needs_review, propose revise (or attach_evidence)
+SAME_EVENT_REVIEW = 0.85      # >= : needs_review, propose revise
 SAME_EVENT_UNCERTAIN = 0.60   # [0.60, 0.85) : needs_review, flagged uncertain
 SEARCH_LIMIT = 5              # existing lineages compared per Candidate (3-5)
 REJECTED_COMPARE_LIMIT = 10   # most recent human-rejected Candidates compared per Candidate
@@ -113,7 +113,7 @@ class ReviewOmbre(Protocol):
                                     "importance", "why_remembered"}
     search(query, limit)        -> [{"bucket_id": str, ...}] best first (read-only)
     judge_same_event(old, new)  -> {"same_event": bool, "confidence": float 0..1,
-                                    "duplicate": bool (optional), "reason": str (optional)}
+                                    "reason": str (optional)}
     """
 
     def analyze(self, text: str) -> dict[str, Any]: ...
@@ -482,14 +482,33 @@ def review_candidate(ctx: Context, conn: sqlite3.Connection, candidate: dict[str
     if not support["supported"]:
         return Verdict("rejected_unsupported", support["reason"], support=support, evidence=evidence)
 
-    analysis = ctx.ombre.analyze(content)
-    if not isinstance(analysis, dict):
-        raise ValueError("ombre_analyze_not_object")
+    try:  # fail closed: any Ombre failure or odd shape ends in needs_review, never an auto-create
+        return _ombre_stage(ctx, candidate, content, attribution, evidence, support, rejected, now, media_link)
+    except OmbreFailure as exc:
+        return Verdict("needs_review", f"ombre_failed:{exc}"[:300], support=support, evidence=evidence)
+
+
+class OmbreFailure(Exception):
+    pass
+
+
+def _ombre_stage(ctx: Context, candidate: dict[str, Any], content: str, attribution: Any,
+                 evidence: tuple, support: dict[str, Any], rejected: list, now: str,
+                 media_link: Any) -> Verdict:
+    def ombre(name: str, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except Exception as exc:
+            raise OmbreFailure(f"{name}:{type(exc).__name__}:{exc}") from exc
+
+    analysis = ombre("analyze", lambda: ctx.ombre.analyze(content))
+    if not isinstance(analysis, dict) or not analysis:
+        raise OmbreFailure("analyze:unexpected_shape")
     base = dict(analysis=analysis, support=support, evidence=evidence)
 
     judged: list[dict[str, Any]] = []
     for other_id, other in rejected:
-        score = _score(ctx.ombre.judge_same_event(other, content))
+        score = ombre("judge_same_event", lambda: _score(ctx.ombre.judge_same_event(other, content)))
         judged.append({"against": f"rejected:{other_id}", "score": score})
         if score >= SAME_EVENT_REVIEW:
             return Verdict("suppressed_rejected", f"human_rejected_same_event:{other_id}",
@@ -498,20 +517,21 @@ def review_candidate(ctx: Context, conn: sqlite3.Connection, candidate: dict[str
             return Verdict("needs_review", f"uncertain_same_event_as_rejected:{other_id}",
                            proposed_action="uncertain", same_event={"matches": judged}, **base)
 
-    best: tuple[float, str, bool] | None = None
-    for hit in ctx.ombre.search(content, SEARCH_LIMIT)[:SEARCH_LIMIT]:
+    best: tuple[float, str] | None = None
+    for hit in ombre("search", lambda: ctx.ombre.search(content, SEARCH_LIMIT))[:SEARCH_LIMIT]:
         head_hit = ctx.heads_by_bucket().get(str(hit.get("bucket_id")))
         if head_hit is None:
             continue  # a bucket Ombre holds that the Kernel has no head for
-        judgement = ctx.ombre.judge_same_event(head_hit.state.content or "", content)
-        score = _score(judgement)
+        judgement = ombre("judge_same_event",
+                          lambda: ctx.ombre.judge_same_event(head_hit.state.content or "", content))
+        score = ombre("judge_same_event", lambda: _score(judgement))
         judged.append({"against": head_hit.lineage_id, "score": score, "judgement": judgement})
         if best is None or score > best[0]:
-            best = (score, head_hit.lineage_id, bool(judgement.get("duplicate")))
+            best = (score, head_hit.lineage_id)
     same_event = {"matches": judged} if judged else None
     if best and best[0] >= SAME_EVENT_REVIEW:
         return Verdict("needs_review", f"same_event:{best[0]:.2f}", matched_lineage_id=best[1],
-                       proposed_action="attach_evidence" if best[2] else "revise", same_event=same_event, **base)
+                       proposed_action="revise", same_event=same_event, **base)
     if best and best[0] >= SAME_EVENT_UNCERTAIN:
         return Verdict("needs_review", f"uncertain_same_event:{best[0]:.2f}", matched_lineage_id=best[1],
                        proposed_action="uncertain", same_event=same_event, **base)
@@ -651,25 +671,6 @@ def review_health(candidate_db: str, *, stale_after_hours: float = 6.0) -> dict[
 
 # ------------------------------------------------------------------------- formal
 
-def formal_background(chat_db: str) -> tuple[Any, Callable[[Any, Any], Any]]:
-    """Formal Chat authority, frozen once; the read-only guard encloses each model call only.
-
-    The guard forces the production memories.db read-only for its whole duration, and that
-    file also holds the Candidates and review rows, so the whole run must not sit inside it.
-    """
-    from tools.dayblock_scheduled_runner import _formal_config_read_guard
-    with _formal_config_read_guard(chat_db):
-        from chat.provider_router import capture_generation_authority
-        authority = capture_generation_authority()
-
-    def generate(request: Any, frozen: Any) -> Any:
-        with _formal_config_read_guard(chat_db) as formal:
-            _request_cls, generate_background, _authority_cls, token_getter = formal
-            return generate_background(request, frozen, cc_token_getter=token_getter)
-
-    return authority, generate
-
-
 def record_failed_run(candidate_db: str, *, dry_run: bool, limit: int, error: str) -> None:
     """A run that died before run_review started (authority capture, Ombre config) stays visible."""
     conn = _connect(candidate_db)
@@ -702,7 +703,8 @@ def main(argv: list[str] | None = None) -> int:
         if runtime is None:
             raise ReviewAbort("ombre_runtime_unconfigured")
         ombre = RuntimeReviewOmbre(runtime)
-        authority, generate = formal_background(args.db)
+        from tools.dayblock_scheduled_runner import formal_background_generation
+        authority, generate = formal_background_generation(args.db)
         started = True
         result = run_review(args.db, args.kernel_db, ombre=ombre, authority=authority, generate_fn=generate,
                             resolvers=default_resolvers(args.db), dry_run=args.dry_run, limit=args.limit,
