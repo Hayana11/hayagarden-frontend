@@ -14,10 +14,12 @@ import sys
 import tempfile
 import time
 import types
+import uuid
 import unittest
 from pathlib import Path
 from typing import Optional
 from unittest import mock
+
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
@@ -1606,6 +1608,75 @@ class NeverUsedIdleReapContractTests(unittest.TestCase):
 
 
 class ContextPlanCapacityCarrierTests(unittest.TestCase):
+    def test_raw_transport_degrades_unmapped_and_cross_session_representations(self):
+        from chat.capacity_swap_runtime import _context_plan_raw_transport
+
+        graph = types.SimpleNamespace(
+            session_id='source-session', candidate_rounds=(), by_uuid={},
+        )
+        representations = [
+            (types.SimpleNamespace(representation_id='unmapped'), ((None, (3,)),)),
+            (types.SimpleNamespace(representation_id='cross'), ((None, (4,)),)),
+        ]
+        rows_by_mid = {
+            4: [{'event_uuid': 'u4', 'role': 'user',
+                 'claude_session_id': 'other-session'}],
+        }
+        with self.assertLogs(
+            'chat.capacity_swap_runtime', level='WARNING',
+        ) as captured:
+            native, readable = _context_plan_raw_transport(
+                representations, rows_by_mid, graph=graph,
+            )
+        self.assertEqual(native, [])
+        self.assertEqual(readable, ['unmapped', 'cross'])
+        log = '\n'.join(captured.output)
+        self.assertIn('representation_id=unmapped reason=unmapped', log)
+        self.assertIn('representation_id=cross reason=cross_session', log)
+
+    def test_raw_transport_rejects_partly_mapped_member(self):
+        from chat.capacity_swap_runtime import _context_plan_raw_transport
+
+        graph = types.SimpleNamespace(
+            session_id='source-session',
+            candidate_rounds=(types.SimpleNamespace(
+                candidate_user_event_uuid='u1', event_uuids=('u1',),
+                has_sidechain_impact=False,
+            ),),
+            by_uuid={'u1': types.SimpleNamespace(byte_offset=1)},
+        )
+        representation = types.SimpleNamespace(representation_id='partial')
+        with self.assertRaises(CapacitySwapRuntimeError) as raised:
+            _context_plan_raw_transport(
+                [(representation, ((None, (1, 2)),))],
+                {1: [{'event_uuid': 'u1', 'role': 'user',
+                      'claude_session_id': 'source-session'}]},
+                graph=graph,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_capacity_raw_mapping_invalid',
+        )
+
+    def test_raw_transport_keeps_mapping_damage_failures(self):
+        from chat.capacity_swap_runtime import _context_plan_raw_transport
+
+        graph = types.SimpleNamespace(
+            session_id='source-session', candidate_rounds=(), by_uuid={},
+        )
+        representation = types.SimpleNamespace(representation_id='broken')
+        with self.assertRaises(CapacitySwapRuntimeError) as raised:
+            _context_plan_raw_transport(
+                [(representation, ((None, (1,)),))],
+                {1: [{'event_uuid': 'missing-round', 'role': 'user',
+                      'claude_session_id': 'source-session'}]},
+                graph=graph,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_capacity_raw_round_missing',
+        )
+
     def test_zero_raw_blocks_before_legacy_selector(self):
         plan = mock.Mock(
             context_id=7,
@@ -1981,13 +2052,11 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self,
         *,
         status: str,
-        anchor_mapped: bool,
         raw_anchor: bool = False,
-        anchor_generation: int = 199,
-        duplicate_anchor_mapping: bool = False,
-        historical_event_present: bool = True,
-        transcript_session_id: str = 'old-session',
-        registry_session_id: str = 'old-session',
+        supplier: str = 'api_relay',
+        placement: str = 'single',
+        resident_generation: int = 219,
+        current_user_in_candidate: bool = False,
         actual_revision: str = 'anchor-revision',
         actual_content_hash: str = 'anchor-hash',
     ):
@@ -2025,7 +2094,27 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         raw_assistant_line = (
             json.dumps(raw_assistant, separators=(',', ':')) + '\n'
         ).encode('utf-8')
-        current_bytes = raw_user_line + raw_assistant_line
+        raw_user_2 = {
+            'type': 'user', 'uuid': 'u3', 'sessionId': 'current-session',
+            'parentUuid': None, 'message': {'role': 'user', 'content': 'RAW P'},
+        }
+        raw_assistant_2 = {
+            'type': 'assistant', 'uuid': 'a3', 'sessionId': 'current-session',
+            'parentUuid': 'u3',
+            'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'TAIL P'}]},
+        }
+        second_lines = [
+            (json.dumps(item, separators=(',', ':')) + '\n').encode('utf-8')
+            for item in (raw_user_2, raw_assistant_2)
+        ]
+        current_bytes = raw_user_line + raw_assistant_line + b''.join(second_lines)
+        if supplier == 'third_party':
+            unrelated = {
+                'type': 'system', 'uuid': 'third-party-placeholder',
+                'sessionId': 'current-session', 'parentUuid': None,
+                'content': 'No native provider transcript',
+            }
+            current_bytes = (json.dumps(unrelated, separators=(',', ':')) + '\n').encode('utf-8')
         current_path = os.path.join(tmp_dir, 'current-session.jsonl')
         Path(current_path).write_bytes(current_bytes)
         raw_user_offset = 0
@@ -2041,6 +2130,13 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             span_end=None,
             branch_id='active',
         )
+        raw_members = [raw_member]
+        if placement == 'mixed':
+            raw_members.append(types.SimpleNamespace(
+                seq=2, source_ref='turn:5:6', source_revision='raw-p-revision',
+                source_kind='completed_turn', content_hash='raw-p-hash',
+                span_start=None, span_end=None, branch_id='active',
+            ))
         context_plan = types.SimpleNamespace(
             plan_hash='plan-hash-%s' % status,
             window_anchor=types.SimpleNamespace(
@@ -2055,14 +2151,15 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             window_anchor_raw_satisfied=raw_anchor,
             representations=(types.SimpleNamespace(
                 kind='raw',
-                source_members=(raw_member,),
+                representation_id='raw:matrix',
+                source_members=tuple(raw_members),
             ),),
         )
         plan = types.SimpleNamespace(
             context_id=7,
             context_epoch=3,
-            resident_generation=219,
-            user_message_id=14987,
+            resident_generation=resident_generation,
+            user_message_id=raw_user_id if current_user_in_candidate else 14987,
             cursor_before=10,
             db_path='db',
             chat_id='default',
@@ -2076,7 +2173,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             'last_mapped_message_id': 10,
             'context_id': 7,
             'context_epoch': 3,
-            'resident_generation': 219,
+            'resident_generation': resident_generation,
         }
         formal = [
             {
@@ -2111,6 +2208,20 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'file_name': '',
                 'attachments': '[]',
             },
+            {
+                'id': 5, 'author': 'hayana', 'content': 'RAW P',
+                'created_at': '2026-11-09 13:02:00', 'source_kind': 'chat',
+                'thinking': '', 'tool_calls': '', 'branches': '', 'branch_idx': 0,
+                'cache_info': '', 'image_url': '', 'file_url': '', 'file_name': '',
+                'attachments': '[]',
+            },
+            {
+                'id': 6, 'author': 'assistant', 'content': 'TAIL P',
+                'created_at': '2026-11-09 13:03:00', 'source_kind': 'chat',
+                'thinking': '', 'tool_calls': '', 'branches': '', 'branch_idx': 0,
+                'cache_info': '', 'image_url': '', 'file_url': '', 'file_name': '',
+                'attachments': '[]',
+            },
         ]
         canonical = {raw_uuid: 'RAW'}
         mid_to_event = {raw_user_id: raw_uuid}
@@ -2118,7 +2229,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             raw_uuid: raw_user_id,
             raw_assistant_uuid: raw_assistant_id,
         }
-        mapping_rows = [
+        mapping_rows = []
+        if supplier == 'api_relay':
+            mapping_rows.extend([
             {
                 'event_uuid': raw_uuid,
                 'message_id': raw_user_id,
@@ -2126,7 +2239,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'claude_session_id': 'current-session',
                 'context_id': 7,
                 'context_epoch': 3,
-                'resident_generation': 219,
+                'resident_generation': resident_generation,
                 'jsonl_byte_offset': raw_user_offset,
             },
             {
@@ -2136,56 +2249,17 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'claude_session_id': 'current-session',
                 'context_id': 7,
                 'context_epoch': 3,
-                'resident_generation': 219,
+                'resident_generation': resident_generation,
                 'jsonl_byte_offset': raw_assistant_offset,
             },
-        ]
-        history_registry = None
-        if anchor_mapped and not raw_anchor:
-            history_event_uuid = 'u1' if historical_event_present else 'other-u'
-            history_payload = (
-                json.dumps({
-                    'type': 'user',
-                    'uuid': history_event_uuid,
-                    'sessionId': transcript_session_id,
-                    'parentUuid': None,
-                    'message': {'role': 'user', 'content': 'OLD EVENT'},
-                }, separators=(',', ':')) + '\n'
-            ).encode('utf-8')
-            history_path = os.path.join(tmp_dir, 'old-session.jsonl')
-            Path(history_path).write_bytes(history_payload)
-            history_registry = {
-                'scan_status': 'ready',
-                'transcript_path': history_path,
-                'claude_session_id': registry_session_id,
-                'scan_offset': len(history_payload),
-                'context_id': 7,
-                'context_epoch': 3,
-                'resident_generation': anchor_generation,
-            }
-            anchor_mapping = {
-                'event_uuid': 'u1',
-                'message_id': 1,
-                'role': 'user',
-                'claude_session_id': 'old-session',
-                'context_id': 7,
-                'context_epoch': 3,
-                'resident_generation': anchor_generation,
-                'jsonl_byte_offset': 0,
-            }
-            mapping_rows.append(anchor_mapping)
-            if duplicate_anchor_mapping:
-                mapping_rows.append(dict(anchor_mapping, event_uuid='u1-duplicate'))
-            canonical['u1'] = 'ANCHOR'
-            mid_to_event[1] = 'u1'
-            event_to_mid['u1'] = 1
+            ])
         if raw_anchor:
             canonical['u1'] = 'ANCHOR'
             mid_to_event[1] = 'u1'
             event_to_mid.update({'u1': 1, 'a1': 2})
 
         def get_registry(context_id, generation, **_kwargs):
-            return registry if int(generation) == 219 else history_registry
+            return None if supplier == 'third_party' else registry
 
         with mock.patch(
             'chat.capacity_swap_runtime.get_context_claude_session',
@@ -2239,7 +2313,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
     def test_context_plan_too_large_anchor_does_not_require_event_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_TOO_LARGE',
-            anchor_mapped=False,
         )
         self.assertTrue(result.ok, result.warnings)
         self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_TOO_LARGE)
@@ -2252,7 +2325,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
     def test_context_plan_too_large_raw_anchor_uses_normal_raw_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_TOO_LARGE',
-            anchor_mapped=True,
             raw_anchor=True,
         )
         self.assertTrue(result.ok, result.warnings)
@@ -2263,43 +2335,46 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self.assertEqual(result.candidate.selected_message_ids, (1, 2))
         emit_anchor.assert_not_called()
 
-    def test_context_plan_retained_anchor_missing_mapping_stays_fail_closed(self):
+    def test_context_plan_retained_anchor_uses_database_projection_without_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_RETAINED',
-            anchor_mapped=False,
         )
-        self.assertFalse(result.ok)
+        self.assertTrue(result.ok, (result.error_code, result.warnings))
+        self.assertIn('context_plan_anchor_emitted', result.candidate.warnings)
+        self.assertEqual(result.candidate.anchor_event_uuid, json.loads(
+            result.candidate.serialized_jsonl.splitlines()[0]
+        )['uuid'])
         self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
+            json.loads(result.candidate.serialized_jsonl.splitlines()[0])['message']['content'],
+            'ANCHOR',
         )
-        emit_anchor.assert_not_called()
+        emitted = json.loads(result.candidate.serialized_jsonl.splitlines()[0])
+        expected_uuid = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{result.candidate.candidate_session_id}:anchor:message:1:anchor-hash",
+        ))
+        self.assertEqual(emitted['uuid'], expected_uuid)
+        self.assertEqual(emitted['timestamp'], '2026-11-09T13:00:00.000Z')
+        emit_anchor.assert_called_once()
 
-    def test_context_plan_image_degraded_anchor_missing_mapping_stays_fail_closed(self):
+    def test_context_plan_image_degraded_anchor_uses_database_projection_without_mapping(self):
         result, emit_anchor = self._run_anchor_case(
             status='ANCHOR_IMAGE_DEGRADED',
-            anchor_mapped=False,
         )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
-        )
-        emit_anchor.assert_not_called()
+        self.assertTrue(result.ok, (result.error_code, result.warnings))
+        self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_IMAGE_DEGRADED)
+        emit_anchor.assert_called_once()
 
     def test_context_plan_emits_standalone_anchor_before_selected_raw(self):
         for status in ('ANCHOR_RETAINED', 'ANCHOR_IMAGE_DEGRADED'):
             with self.subTest(status=status):
                 result, emit_anchor = self._run_anchor_case(
                     status=status,
-                    anchor_mapped=True,
-                    anchor_generation=199,
                 )
                 self.assertTrue(result.ok, (result.error_code, result.warnings))
                 candidate = result.candidate
                 self.assertEqual(candidate.anchor_status, AnchorStatus(status))
                 self.assertEqual(candidate.anchor_message_id, 1)
-                self.assertEqual(candidate.anchor_event_uuid, 'u1')
                 self.assertIn('context_plan_anchor_emitted', candidate.warnings)
                 self.assertEqual(candidate.selected_message_ids, (1, 3, 4))
                 self.assertNotIn(14987, candidate.selected_message_ids)
@@ -2312,6 +2387,8 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                     'user', 'user', 'assistant',
                 ])
                 self.assertEqual(events[0]['message']['content'], 'ANCHOR')
+                self.assertEqual(candidate.anchor_event_uuid, events[0]['uuid'])
+                self.assertEqual(events[0]['timestamp'], '2026-11-09T13:00:00.000Z')
                 self.assertEqual(events[1]['message']['content'], 'RAW')
                 self.assertEqual(events[1]['parentUuid'], events[0]['uuid'])
                 self.assertEqual(events[2]['parentUuid'], events[1]['uuid'])
@@ -2321,66 +2398,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 self.assertNotEqual(events[2]['uuid'], 'a2')
                 self.assertEqual(events[2]['message']['content'][0]['text'], 'TAIL')
 
-                source_event = emit_anchor.call_args.args[0]
-                self.assertEqual(source_event.event_uuid, 'u1')
-                self.assertEqual(source_event.session_id, 'old-session')
+                self.assertEqual(emit_anchor.call_args.kwargs['created_at'], '2026-11-09 13:00:00')
                 self.assertEqual(emit_anchor.call_args.kwargs['new_session_id'],
                                  candidate.candidate_session_id)
-                self.assertNotEqual(
-                    emit_anchor.call_args.kwargs['new_event_uuid'], 'u1',
-                )
-
-    def test_context_plan_historical_anchor_without_unique_user_mapping_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            duplicate_anchor_mapping=True,
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_ambiguous',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_mapping_without_event_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            historical_event_present=False,
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_missing',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_mapping_session_mismatch_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            transcript_session_id='another-session',
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_session_mismatch',
-        )
-        emit_anchor.assert_not_called()
-
-    def test_context_plan_historical_registry_session_mismatch_fails_closed(self):
-        result, emit_anchor = self._run_anchor_case(
-            status='ANCHOR_RETAINED',
-            anchor_mapped=True,
-            registry_session_id='another-session',
-        )
-        self.assertFalse(result.ok)
-        self.assertEqual(
-            result.error_code,
-            'context_plan_capacity_anchor_mapping_invalid',
-        )
-        emit_anchor.assert_not_called()
 
     def test_context_plan_anchor_revision_or_hash_mismatch_fails_closed(self):
         for kwargs in (
@@ -2390,7 +2410,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 result, emit_anchor = self._run_anchor_case(
                     status='ANCHOR_RETAINED',
-                    anchor_mapped=True,
                     **kwargs,
                 )
                 self.assertFalse(result.ok)
@@ -2400,6 +2419,121 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 )
                 emit_anchor.assert_not_called()
 
+    def test_context_plan_current_user_in_raw_candidate_still_fails(self):
+        result, _emit_anchor = self._run_anchor_case(
+            status='ANCHOR_RETAINED', current_user_in_candidate=True,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_current_user_in_candidate',
+        )
+
+_CAPACITY_SUPPLIER_CASES = (
+    ('api_relay', True),
+    ('claude_code_p', False),
+    ('pre_mapping_legacy', False),
+    ('third_party', False),
+)
+
+
+def _run_supplier_matrix_case(**kwargs):
+    case = ContextPlanCapacityCarrierTests(
+        'test_context_plan_too_large_anchor_does_not_require_event_mapping',
+    )
+    try:
+        return case._run_anchor_case(status='ANCHOR_RETAINED', **kwargs)
+    finally:
+        case.doCleanups()
+
+
+def _assert_database_anchor(result):
+    assert result.ok, (result.error_code, result.warnings)
+    candidate = result.candidate
+    events = [json.loads(line) for line in candidate.serialized_jsonl.splitlines()]
+    assert events
+    expected_uuid = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{candidate.candidate_session_id}:anchor:message:1:anchor-hash",
+    ))
+    assert candidate.anchor_event_uuid == expected_uuid
+    assert events[0]['uuid'] == expected_uuid
+    assert events[0]['message']['content'] == 'ANCHOR'
+    assert events[0]['timestamp'] == '2026-11-09T13:00:00.000Z'
+    assert not any(
+        'mapping_missing' in str(value) or 'mapping_invalid' in str(value)
+        for value in (result.error_code, *result.warnings)
+    )
+    return events
+
+
+class CapacitySupplierMatrixTests(unittest.TestCase):
+    def test_window_anchor_and_raw_block(self):
+        for supplier, has_complete_mapping in _CAPACITY_SUPPLIER_CASES:
+            with self.subTest(supplier=supplier):
+                result, _emit_anchor = _run_supplier_matrix_case(
+                    supplier=supplier,
+                )
+                events = _assert_database_anchor(result)
+                if has_complete_mapping:
+                    self.assertEqual(
+                        result.candidate.readable_raw_representation_ids, (),
+                    )
+                    self.assertEqual(result.candidate.selected_round_count, 1)
+                    self.assertEqual(len(events), 3)
+                else:
+                    self.assertEqual(
+                        result.candidate.readable_raw_representation_ids,
+                        ('raw:matrix',),
+                    )
+                    self.assertEqual(result.candidate.selected_round_count, 0)
+                    self.assertEqual(len(events), 1)
+
+    def test_survives_two_consecutive_swaps(self):
+        for supplier, has_complete_mapping in _CAPACITY_SUPPLIER_CASES:
+            for generation in (219, 220):
+                with self.subTest(supplier=supplier, generation=generation):
+                    result, _emit_anchor = _run_supplier_matrix_case(
+                        supplier=supplier,
+                        resident_generation=generation,
+                    )
+                    events = _assert_database_anchor(result)
+                    if has_complete_mapping:
+                        self.assertEqual(
+                            result.candidate.readable_raw_representation_ids, (),
+                        )
+                        self.assertEqual(
+                            result.candidate.selected_round_count, 1,
+                        )
+                        self.assertEqual(len(events), 3)
+                    else:
+                        self.assertEqual(
+                            result.candidate.readable_raw_representation_ids,
+                            ('raw:matrix',),
+                        )
+                        self.assertEqual(
+                            result.candidate.selected_round_count, 0,
+                        )
+                        self.assertEqual(len(events), 1)
+
+    def test_mixed_sources_in_one_representation_use_readable_block(self):
+        with self.assertLogs(
+            'chat.capacity_swap_runtime', level='WARNING',
+        ) as captured:
+            result, _emit_anchor = _run_supplier_matrix_case(
+                supplier='api_relay', placement='mixed',
+            )
+        events = _assert_database_anchor(result)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(result.candidate.selected_round_count, 0)
+        self.assertEqual(
+            result.candidate.readable_raw_representation_ids,
+            ('raw:matrix',),
+        )
+        self.assertTrue(any(
+            'representation_id=raw:matrix reason=unmapped' in line
+            for line in captured.output
+        ))
 
 
 if __name__ == '__main__':
