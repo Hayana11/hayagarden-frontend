@@ -430,20 +430,28 @@ def run(
     }
 
 
-def run_formal(**kwargs: Any) -> dict[str, Any]:
-    chat_db_path = kwargs.pop("chat_db_path", DEFAULT_DB_PATH)
+def _formal_background(chat_db_path: str) -> tuple[Any, Callable[[Any, Any], Any]]:
+    """Freeze the formal authority once; the read-only guard encloses that and each model call only.
+
+    While the guard is active it forces the production memories.db read-only, and Candidates
+    (and progress) are written to that same file, so no write may happen inside it."""
     from tools.dayblock_scheduled_runner import _formal_config_read_guard
-    with _formal_config_read_guard(chat_db_path) as formal:
-        _request_cls, generate_background, _authority_cls, token_getter = formal
+    with _formal_config_read_guard(chat_db_path):
         from chat.provider_router import capture_generation_authority
         authority = capture_generation_authority()
-        return run(
-            authority=authority,
-            generate_fn=lambda request, frozen: generate_background(
-                request, frozen, cc_token_getter=token_getter,
-            ),
-            **kwargs,
-        )
+
+    def generate(request: Any, frozen: Any) -> Any:
+        with _formal_config_read_guard(chat_db_path) as formal:
+            _request_cls, generate_background, _authority_cls, token_getter = formal
+            return generate_background(request, frozen, cc_token_getter=token_getter)
+
+    return authority, generate
+
+
+def run_formal(**kwargs: Any) -> dict[str, Any]:
+    chat_db_path = kwargs.pop("chat_db_path", DEFAULT_DB_PATH)
+    authority, generate_fn = _formal_background(chat_db_path)
+    return run(authority=authority, generate_fn=generate_fn, **kwargs)
 
 
 def _since_ms(value: str) -> int:
