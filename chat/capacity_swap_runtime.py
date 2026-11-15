@@ -30,6 +30,7 @@ from chat.claude_transcript_model import (
     SidechainPolicy,
     SummaryPolicy,
     ThinkingPolicy,
+    TranscriptGraph,
     UnknownEventPolicy,
 )
 from chat.claude_transcript_transform import (
@@ -534,6 +535,13 @@ def _native_rows_by_message(
         try:
             row_generation = int(raw.get('resident_generation'))
             if row_generation != int(resident_generation):
+                if mid := int(raw.get('message_id') or 0):
+                    if mid in exact_ids and row_generation < int(resident_generation):
+                        out.setdefault(mid, []).append({
+                            **dict(raw), '_native_generation': False,
+                        })
+                    elif mid in exact_ids and row_generation > int(resident_generation):
+                        raise ValueError(str(raw.get('event_uuid') or ''))
                 continue
             uid = str(raw.get('event_uuid') or '').strip()
             mid = int(raw.get('message_id'))
@@ -541,12 +549,6 @@ def _native_rows_by_message(
             event = graph.by_uuid.get(uid)
             if not uid or uid in seen or mid <= 0:
                 raise ValueError(uid)
-            if mid in exact_ids and str(raw.get('claude_session_id') or '') != str(claude_session_id):
-                if int(raw.get('context_id')) != int(context_id) or int(raw.get('context_epoch')) != int(context_epoch):
-                    raise ValueError(uid)
-                seen.add(uid)
-                out.setdefault(mid, []).append(dict(raw))
-                continue
             if mid in exact_ids and (
                 event is None
                 or str(raw.get('claude_session_id') or '') != str(claude_session_id)
@@ -608,7 +610,15 @@ def _context_plan_raw_transport(
                 for row in rows_by_mid[mid]
             }
             graph_session = str(getattr(graph, 'session_id', '') or '')
-            if len(sessions) != 1 or not graph_session or sessions != {graph_session}:
+            if (
+                len(sessions) != 1
+                or not graph_session
+                or sessions != {graph_session}
+                or any(
+                    row.get('_native_generation') is False
+                    for mid in message_ids for row in rows_by_mid[mid]
+                )
+            ):
                 reason = 'cross_session'
         if reason:
             readable_ids.append(representation_id)
@@ -809,61 +819,63 @@ def prepare_capacity_swap_for_context_plan(
     registry = get_context_claude_session(
         source_ctx, source_gen, db_path=plan.db_path,
     )
-    if registry is None:
-        return _failure('registry_missing')
+    native_available = registry is not None
+    mapping_lag_detail: list[str] = []
 
     from chat import daily_context as dc
 
-    watermark = latest_complete_assistant_watermark(
-        context_id=source_ctx,
-        context_epoch=source_epoch,
-        resident_generation=source_gen,
-        before_message_id=int(plan.user_message_id),
-        db_path=plan.db_path,
-    )
-    if registry_mapping_lags_watermark(registry, watermark):
-        catchup = attempt_mapping_catchup_through(
+    if registry is not None:
+        watermark = latest_complete_assistant_watermark(
             context_id=source_ctx,
             context_epoch=source_epoch,
             resident_generation=source_gen,
-            chat_id=str(getattr(plan, 'chat_id', '') or 'default'),
-            through_assistant_id=int(watermark),
+            before_message_id=int(plan.user_message_id),
             db_path=plan.db_path,
         )
-        registry = get_context_claude_session(
-            source_ctx, source_gen, db_path=plan.db_path,
-        ) or registry
-        if (
-            not catchup.ok
-            or registry_mapping_lags_watermark(registry, watermark)
-        ):
-            return _failure(
-                ERROR_MAPPING_LAG,
-                [
+        if registry_mapping_lags_watermark(registry, watermark):
+            catchup = attempt_mapping_catchup_through(
+                context_id=source_ctx,
+                context_epoch=source_epoch,
+                resident_generation=source_gen,
+                chat_id=str(getattr(plan, 'chat_id', '') or 'default'),
+                through_assistant_id=int(watermark),
+                db_path=plan.db_path,
+            )
+            registry = get_context_claude_session(
+                source_ctx, source_gen, db_path=plan.db_path,
+            ) or registry
+            if (
+                not catchup.ok
+                or registry_mapping_lags_watermark(registry, watermark)
+            ):
+                mapping_lag_detail = [
                     str(catchup.error_code or ERROR_MAPPING_LAG),
                     'watermark=%s' % watermark,
                     'last_mapped=%s' % registry.get('last_mapped_message_id'),
-                ],
-            )
+                ]
 
-    if str(registry.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
-        return _failure('registry_blocked')
+    if registry is not None and str(registry.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
+        native_available = False
 
-    path = str(registry.get('transcript_path') or '').strip()
-    sid = str(registry.get('claude_session_id') or '').strip()
+    path = str((registry or {}).get('transcript_path') or '').strip()
+    sid = str((registry or {}).get('claude_session_id') or '').strip()
     try:
-        scan_offset = int(registry.get('scan_offset') or 0)
+        scan_offset = int((registry or {}).get('scan_offset') or 0)
     except (TypeError, ValueError):
         scan_offset = 0
-    if not path or not sid or scan_offset <= 0:
-        return _failure('source_prefix_unreliable')
-
-    try:
-        source_sha = _snapshot_prefix_sha256(path, scan_offset)
-        graph = read_transcript_range(path, 0, scan_offset)
-    except Exception as exc:
-        logger.info('capacity ContextPlan source read failed: %s', type(exc).__name__)
-        return _failure('source_transcript_unreadable', [type(exc).__name__])
+    if path and sid and scan_offset > 0 and native_available:
+        try:
+            source_sha = _snapshot_prefix_sha256(path, scan_offset)
+            graph = read_transcript_range(path, 0, scan_offset)
+        except Exception as exc:
+            logger.info('capacity ContextPlan source read failed: %s', type(exc).__name__)
+            native_available = False
+            source_sha = sha256_text('')
+            graph = TranscriptGraph(session_id='')
+    else:
+        native_available = False
+        source_sha = sha256_text('')
+        graph = TranscriptGraph(session_id='')
 
     raw_ids = {
         int(mid)
@@ -892,16 +904,48 @@ def prepare_capacity_swap_for_context_plan(
         mapping_rows = _load_mapping_rows_for_messages(
             conn, sorted(set(mids) | raw_ids),
         )
-        rows_by_mid = _native_rows_by_message(
-            mapping_rows,
-            graph=graph,
-            claude_session_id=sid,
-            context_id=source_ctx,
-            context_epoch=source_epoch,
-            resident_generation=source_gen,
-            scan_offset=scan_offset,
-            exact_ids=raw_ids,
-        )
+        current_raw_mappings = [
+            row for row in mapping_rows
+            if int(row.get('message_id') or 0) in raw_ids
+            and int(row.get('resident_generation') or 0) == source_gen
+        ]
+        if mapping_lag_detail and current_raw_mappings:
+            return _failure(ERROR_MAPPING_LAG, mapping_lag_detail)
+        if mapping_lag_detail:
+            native_available = False
+        if native_available:
+            rows_by_mid = _native_rows_by_message(
+                mapping_rows,
+                graph=graph,
+                claude_session_id=sid,
+                context_id=source_ctx,
+                context_epoch=source_epoch,
+                resident_generation=source_gen,
+                scan_offset=scan_offset,
+                exact_ids=raw_ids,
+            )
+        else:
+            if current_raw_mappings:
+                return _failure(
+                    'context_plan_capacity_raw_mapping_invalid',
+                    ['current generation mapping has no readable source transcript'],
+                )
+            if any(
+                int(row.get('message_id') or 0) in raw_ids
+                and int(row.get('resident_generation') or 0) > source_gen
+                for row in mapping_rows
+            ):
+                return _failure(
+                    'context_plan_capacity_raw_mapping_invalid',
+                    ['raw mapping belongs to a future generation'],
+                )
+            rows_by_mid = {}
+            for row in mapping_rows:
+                mid = int(row.get('message_id') or 0)
+                if mid in raw_ids:
+                    rows_by_mid.setdefault(mid, []).append({
+                        **dict(row), '_native_generation': False,
+                    })
         selected_rounds, readable_ids = _context_plan_raw_transport(
             raw_representations, rows_by_mid, graph=graph,
         )
@@ -914,6 +958,7 @@ def prepare_capacity_swap_for_context_plan(
         str(row['event_uuid']): (int(mid), str(row.get('role') or ''))
         for mid, rows in rows_by_mid.items()
         for row in rows
+        if row.get('_native_generation') is not False
     }
     canonical = dict(canonical)
     for round_item in selected_rounds:

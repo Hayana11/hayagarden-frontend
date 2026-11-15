@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Optional
 from unittest import mock
 
+import pytest
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -2033,6 +2035,10 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         *,
         status: str,
         raw_anchor: bool = False,
+        supplier: str = 'api_relay',
+        placement: str = 'single',
+        resident_generation: int = 219,
+        current_user_in_candidate: bool = False,
         actual_revision: str = 'anchor-revision',
         actual_content_hash: str = 'anchor-hash',
     ):
@@ -2070,7 +2076,27 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         raw_assistant_line = (
             json.dumps(raw_assistant, separators=(',', ':')) + '\n'
         ).encode('utf-8')
-        current_bytes = raw_user_line + raw_assistant_line
+        raw_user_2 = {
+            'type': 'user', 'uuid': 'u3', 'sessionId': 'current-session',
+            'parentUuid': None, 'message': {'role': 'user', 'content': 'RAW P'},
+        }
+        raw_assistant_2 = {
+            'type': 'assistant', 'uuid': 'a3', 'sessionId': 'current-session',
+            'parentUuid': 'u3',
+            'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'TAIL P'}]},
+        }
+        second_lines = [
+            (json.dumps(item, separators=(',', ':')) + '\n').encode('utf-8')
+            for item in (raw_user_2, raw_assistant_2)
+        ]
+        current_bytes = raw_user_line + raw_assistant_line + b''.join(second_lines)
+        if supplier == 'third_party':
+            unrelated = {
+                'type': 'system', 'uuid': 'third-party-placeholder',
+                'sessionId': 'current-session', 'parentUuid': None,
+                'content': 'No native provider transcript',
+            }
+            current_bytes = (json.dumps(unrelated, separators=(',', ':')) + '\n').encode('utf-8')
         current_path = os.path.join(tmp_dir, 'current-session.jsonl')
         Path(current_path).write_bytes(current_bytes)
         raw_user_offset = 0
@@ -2086,6 +2112,13 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             span_end=None,
             branch_id='active',
         )
+        raw_members = [raw_member]
+        if placement == 'mixed':
+            raw_members.append(types.SimpleNamespace(
+                seq=2, source_ref='turn:5:6', source_revision='raw-p-revision',
+                source_kind='completed_turn', content_hash='raw-p-hash',
+                span_start=None, span_end=None, branch_id='active',
+            ))
         context_plan = types.SimpleNamespace(
             plan_hash='plan-hash-%s' % status,
             window_anchor=types.SimpleNamespace(
@@ -2100,14 +2133,15 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             window_anchor_raw_satisfied=raw_anchor,
             representations=(types.SimpleNamespace(
                 kind='raw',
-                source_members=(raw_member,),
+                representation_id='raw:matrix',
+                source_members=tuple(raw_members),
             ),),
         )
         plan = types.SimpleNamespace(
             context_id=7,
             context_epoch=3,
-            resident_generation=219,
-            user_message_id=14987,
+            resident_generation=resident_generation,
+            user_message_id=raw_user_id if current_user_in_candidate else 14987,
             cursor_before=10,
             db_path='db',
             chat_id='default',
@@ -2121,7 +2155,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             'last_mapped_message_id': 10,
             'context_id': 7,
             'context_epoch': 3,
-            'resident_generation': 219,
+            'resident_generation': resident_generation,
         }
         formal = [
             {
@@ -2156,6 +2190,20 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'file_name': '',
                 'attachments': '[]',
             },
+            {
+                'id': 5, 'author': 'hayana', 'content': 'RAW P',
+                'created_at': '2026-11-09 13:02:00', 'source_kind': 'chat',
+                'thinking': '', 'tool_calls': '', 'branches': '', 'branch_idx': 0,
+                'cache_info': '', 'image_url': '', 'file_url': '', 'file_name': '',
+                'attachments': '[]',
+            },
+            {
+                'id': 6, 'author': 'assistant', 'content': 'TAIL P',
+                'created_at': '2026-11-09 13:03:00', 'source_kind': 'chat',
+                'thinking': '', 'tool_calls': '', 'branches': '', 'branch_idx': 0,
+                'cache_info': '', 'image_url': '', 'file_url': '', 'file_name': '',
+                'attachments': '[]',
+            },
         ]
         canonical = {raw_uuid: 'RAW'}
         mid_to_event = {raw_user_id: raw_uuid}
@@ -2163,7 +2211,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             raw_uuid: raw_user_id,
             raw_assistant_uuid: raw_assistant_id,
         }
-        mapping_rows = [
+        mapping_rows = []
+        if supplier == 'api_relay':
+            mapping_rows.extend([
             {
                 'event_uuid': raw_uuid,
                 'message_id': raw_user_id,
@@ -2171,7 +2221,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'claude_session_id': 'current-session',
                 'context_id': 7,
                 'context_epoch': 3,
-                'resident_generation': 219,
+                'resident_generation': resident_generation,
                 'jsonl_byte_offset': raw_user_offset,
             },
             {
@@ -2181,17 +2231,17 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 'claude_session_id': 'current-session',
                 'context_id': 7,
                 'context_epoch': 3,
-                'resident_generation': 219,
+                'resident_generation': resident_generation,
                 'jsonl_byte_offset': raw_assistant_offset,
             },
-        ]
+            ])
         if raw_anchor:
             canonical['u1'] = 'ANCHOR'
             mid_to_event[1] = 'u1'
             event_to_mid.update({'u1': 1, 'a1': 2})
 
         def get_registry(context_id, generation, **_kwargs):
-            return registry
+            return None if supplier == 'third_party' else registry
 
         with mock.patch(
             'chat.capacity_swap_runtime.get_context_claude_session',
@@ -2351,6 +2401,94 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 )
                 emit_anchor.assert_not_called()
 
+    def test_context_plan_current_user_in_raw_candidate_still_fails(self):
+        result, _emit_anchor = self._run_anchor_case(
+            status='ANCHOR_RETAINED', current_user_in_candidate=True,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_current_user_in_candidate',
+        )
+
+_CAPACITY_SUPPLIER_CASES = (
+    ('api_relay', True),
+    ('claude_code_p', False),
+    ('pre_mapping_legacy', False),
+    ('third_party', False),
+)
+
+
+def _run_supplier_matrix_case(**kwargs):
+    case = ContextPlanCapacityCarrierTests(
+        'test_context_plan_too_large_anchor_does_not_require_event_mapping',
+    )
+    try:
+        return case._run_anchor_case(status='ANCHOR_RETAINED', **kwargs)
+    finally:
+        case.doCleanups()
+
+
+def _assert_database_anchor(result):
+    assert result.ok, (result.error_code, result.warnings)
+    candidate = result.candidate
+    events = [json.loads(line) for line in candidate.serialized_jsonl.splitlines()]
+    assert events
+    expected_uuid = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{candidate.candidate_session_id}:anchor:message:1:anchor-hash",
+    ))
+    assert candidate.anchor_event_uuid == expected_uuid
+    assert events[0]['uuid'] == expected_uuid
+    assert events[0]['message']['content'] == 'ANCHOR'
+    assert events[0]['timestamp'] == '2026-11-09T13:00:00.000Z'
+    assert not any(
+        'mapping_missing' in str(value) or 'mapping_invalid' in str(value)
+        for value in (result.error_code, *result.warnings)
+    )
+    return events
+
+
+@pytest.mark.parametrize(('supplier', 'has_complete_mapping'), _CAPACITY_SUPPLIER_CASES)
+def test_capacity_swap_supplier_matrix_window_anchor_and_raw_block(supplier, has_complete_mapping):
+    result, _emit_anchor = _run_supplier_matrix_case(supplier=supplier)
+    events = _assert_database_anchor(result)
+    if has_complete_mapping:
+        assert result.candidate.readable_raw_representation_ids == ()
+        assert result.candidate.selected_round_count == 1
+        assert len(events) == 3
+    else:
+        assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
+        assert result.candidate.selected_round_count == 0
+        assert len(events) == 1
+
+
+@pytest.mark.parametrize(('supplier', 'has_complete_mapping'), _CAPACITY_SUPPLIER_CASES)
+def test_capacity_swap_supplier_matrix_survives_two_consecutive_swaps(supplier, has_complete_mapping):
+    for generation in (219, 220):
+        result, _emit_anchor = _run_supplier_matrix_case(
+            supplier=supplier, resident_generation=generation,
+        )
+        events = _assert_database_anchor(result)
+        if has_complete_mapping:
+            assert result.candidate.readable_raw_representation_ids == ()
+            assert result.candidate.selected_round_count == 1
+            assert len(events) == 3
+        else:
+            assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
+            assert result.candidate.selected_round_count == 0
+            assert len(events) == 1
+
+
+def test_capacity_swap_mixed_sources_in_one_representation_use_readable_block(caplog):
+    result, _emit_anchor = _run_supplier_matrix_case(
+        supplier='api_relay', placement='mixed',
+    )
+    events = _assert_database_anchor(result)
+    assert len(events) == 1
+    assert result.candidate.selected_round_count == 0
+    assert result.candidate.readable_raw_representation_ids == ('raw:matrix',)
+    assert 'representation_id=raw:matrix reason=partial' in caplog.text
 
 
 if __name__ == '__main__':
