@@ -338,7 +338,7 @@ class DailyMemoryDehydratorTest(unittest.TestCase):
         self.assertIn('cp -a "$PROFILE_CRON_BACKUP" "$PROFILE_CRON_PATH"', deploy)
         self.assertIn('cp -a "$DEHYDRATOR_CRON_BACKUP" "$DEHYDRATOR_CRON_PATH"', deploy)
         self.assertIn('rm -f "$DEHYDRATOR_CRON_PATH"', deploy)
-        self.assertIn('rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"', deploy)
+        self.assertIn('rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$MAIL_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"', deploy)
         crontab_lines = [
             "40 5 * * * /usr/bin/python3.11 /opt/frontend/tools/fact_extractor.py >> /var/log/fact_extractor.log 2>&1",
             "0 6 * * * /usr/bin/python3.11 /opt/frontend/tools/daily_summary.py >> /var/log/daily_summary.log 2>&1",

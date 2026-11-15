@@ -1,0 +1,3 @@
+CRON_TZ=UTC
+# Penpal mail archive -> memory Candidates (#689). Reads the ai-penpal-mail /readonly HTTP surface.
+45 19 * * * root cd /opt/frontend && /usr/bin/flock -n /run/lock/hayagarden-mail-memory-dehydrator.lock /usr/bin/python3.11 -m tools.mail_memory_dehydrator >> /var/log/hayagarden-mail-memory-dehydrator.log 2>&1
