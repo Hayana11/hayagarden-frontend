@@ -41,6 +41,8 @@ node gate.mjs
 
 看到“opencli-gate 已启动”就行。窗口不要关；关了门卫就下线。
 
+第一次运行时，Windows 防火墙可能弹窗问是否允许 Node.js 访问网络：勾选“专用网络”，点“允许”。不允许的话，VPS 那边连不进来。
+
 ### 开机自启（可选）
 
 用“任务计划程序”新建任务：触发器选“登录时”；操作选“启动程序”，程序填 `node` 的完整路径（`where.exe node` 查看），参数填 `gate.mjs`，起始于填 `opencli-gate` 目录的完整路径。注意要在**登录后**运行（OpenCLI 需要桌面里的 Chrome）。
@@ -48,11 +50,12 @@ node gate.mjs
 ## 4. 在电脑上自测
 
 ```powershell
-curl.exe -H "Authorization: Bearer 你的token" http://100.x.y.z:19830/status
-curl.exe -X POST -H "Authorization: Bearer 你的token" -H "Content-Type: application/json" -d "{\"command\":\"feed\",\"limit\":3}" http://100.x.y.z:19830/xhs
+$h = @{ Authorization = "Bearer 你的token" }
+Invoke-RestMethod -Headers $h http://100.x.y.z:19830/status
+Invoke-RestMethod -Method Post -Headers $h -ContentType "application/json" -Body '{"command":"feed","limit":3}' http://100.x.y.z:19830/xhs | ConvertTo-Json -Depth 6
 ```
 
-第一条返回 `{"ok":true,...}` 说明 OpenCLI 自检通过；第二条能看到几条首页笔记就通了。
+第一条返回 `ok : True` 说明 OpenCLI 自检通过；第二条能看到几条首页笔记就通了。
 
 ## 5. VPS 那边要配什么
 
