@@ -123,7 +123,7 @@ class ReviewOmbre(Protocol):
 
 
 class RuntimeReviewOmbre:
-    """ReviewOmbre over the projection worker. Op names are UNVERIFIED for analyze/judge."""
+    """ReviewOmbre over the projection worker (analyze / search / judge_same_event ops)."""
 
     def __init__(self, runtime: projection.OmbreRuntime):
         self.runtime = runtime
