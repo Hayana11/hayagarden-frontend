@@ -10,7 +10,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 ```
 
 - Candidate 行不会被改写，只有 `status` 列会变。判定、依据和决定人都写在单独的 `memory_candidate_reviews`。
-- `python3 -m tools.memory_review [--dry-run] [--limit N] [--status]`。`--limit` 默认 50；`--status` 只打印健康信息。
+- `python3 -m tools.memory_review [--dry-run] [--limit N] [--status] [--requeue-policy-rejected]`。`--limit` 默认 50；`--status` 只打印健康信息；`--requeue-policy-rejected` 见下文“规则改动后重排队”。
 - **`--dry-run`**：跑完整条流水线，写 `dry_run=1` 的判定行，**不写 Kernel，不改 Candidate 状态**。定时任务目前只跑 dry-run（`deploy/cron.d/hayagarden-memory-review`，20:15 UTC = 北京 04:15，在 19:15 和 19:45 两个脱水任务之后）。dry-run 的判定行会被之后的正式运行覆盖；已经正式判定的行不会被 dry-run 改写。
 - 顺序：priority 高的先，同级按创建时间从早到晚。
 
@@ -35,7 +35,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
    | ≥ 0.85（`SAME_EVENT_REVIEW`） | `needs_review`，建议动作 `revise` |
    | 0.60 – 0.85（`SAME_EVENT_UNCERTAIN`） | `needs_review`，建议动作 `uncertain` |
    | < 0.60 或没有命中 | 继续 |
-8. **归属保护**：邮件 Candidate 的 `attribution='penpal'` 且内容提到费奥多尔 / 费佳 / 哈娅 / 哈雅娜（或 Fedya / Haya）→ `needs_review`，不自动提交。
+8. **归属保护**：邮件 Candidate 的 `attribution='penpal'` 且内容提到费奥多尔 / 费佳 / 哈娅 / 哈雅娜（或 Fedya / Haya）→ `needs_review`，不自动提交。`attribution='haya'`（哈娅自己写给费奥多尔的信）不走这条保护。
 9. **自动创建**：以上都通过 → `committed_new`（`decision_by='policy'`），写入 Kernel。
 
 ## 判定与状态
@@ -57,9 +57,23 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 - 每个 `source_ref` 一条 Evidence（`source_type` 取 ref 前缀，`source_ref` 原样，`content` 是读到的原文，媒体另带 `content_ref`，`origin_kind=source`），然后 `create_state` 带全部 Evidence **在同一个 Kernel 事务里**提交，失败整体回滚。
 - ID 由 `candidate_id` 的哈希确定：`lin:rev:<h>`、`st:rev:<h>:v1`、`dl:rev:<h>:formation`、`ev:rev:<h>:<ref 哈希>`。重复调用发现 State 已存在就什么都不做。
 - State 的 `structured_value` 与 `remember()` 同形：`title`（Ombre 的 suggested_name）、`domain`、`tags`、`importance`、`valence`、`arousal`、`memory`，另带 `review`（candidate_id、producer、attribution、why_remembered、support_reason），所以投影到 Ombre 时用的是真实分析值而不是默认值。Delta 的 `review_status='accepted_by_review'`。
-- 归属对应 `epistemic_status`：`fedya`→`asserted_by_companion`（沿用现有“同伴自述”取值）；`penpal`→`asserted_by_correspondent`；`mutual`→`mutually_confirmed`；无归属→`derived_from_evidence`。`participants` 取证据作者与 Candidate 的 counterparts（`fedya` / `mutual` 加 `Fedya`）。
+- 归属对应 `epistemic_status`：`fedya`→`asserted_by_companion`（沿用现有“同伴自述”取值）；`penpal`→`asserted_by_correspondent`；`mutual`→`mutually_confirmed`；`haya`→`derived_from_evidence`（哈娅自己的话，与聊天里 user 发言产生的 Candidate 同一语义，目前没有单独的取值）；无归属→`derived_from_evidence`。`participants` 取证据作者与 Candidate 的 counterparts（`fedya` / `mutual` 加 `Fedya`）。
 - 不经过 `memory_tool.save_memory`。写入 Kernel 之后的 Ombre 投影仍由现有定时 `sync()` 负责。
 - 预留钩子：`commit_candidate(..., media_link=fn)` 在提交后以 `(state_id, 媒体 refs)` 调用；默认不连接，**不做任何跨库写入**，留给以后的 memory_media。
+
+## 发言人标注（支持度检查）
+
+支持度检查模型看不到“谁在说话”时，会把 `author=assistant` 当成“笔友/对方”，或抱怨证据里“没有出现哈娅这个名字”。所以每段证据现在带一个显式标签：
+
+- 聊天：`author` 为 `hayana` / `haya` / `user` → `发言人：哈娅`；`assistant` → `发言人：费奥多尔`；其他作者保留原始值。
+- 邮件：`direction=outgoing` → `发言人：费奥多尔`；incoming 若上游给了署名则用署名，否则标 `incoming 来信人`并附上 Candidate 的 counterparts（哈娅的信在 Mail Dehydrator 里已把 counterpart 名写成“哈娅”）。
+- 图片：标 `机器标注，不是任何人说的话`。
+
+support 的 system prompt 同时写明：聊天记录里 user/哈娅 的发言是哈娅说的，assistant 的发言是费奥多尔说的；邮件里 outgoing 是费奥多尔写的，incoming 是署名的写信人写的（若标注为哈娅则是哈娅写的）。`attribution=haya` 表示哈娅自己说的话或写给费奥多尔的信。
+
+## 规则改动后重排队
+
+`python3 -m tools.memory_review --requeue-policy-rejected`：把“最近一次正式（非 dry-run）审核为 `rejected_unsupported`、`decision_by='policy'`、状态为 `rejected`”的 Candidate 改回 `pending`，打印 `{"requeued": N}` 后退出（不需要 Ombre，不写 Kernel）。已经是 `pending` 的不动；人工拒绝（`decision_by` 为 fedya / haya）、已提交、重复、`needs_review` 的都不碰。只有 dry-run 审核时 Candidate 本来就是 `pending`，结果为 0。因为一条 Candidate 只有一行审核记录，被重排队的那一行保留但 `outcome` 改成 `requeued`（`decision` / `decision_by` 清空，原因前缀 `requeued_from_rejected_unsupported:`），否则它会被当作“已决定”而不再重审；下次运行会用新结果覆盖这一行。
 
 ## 健康记录
 

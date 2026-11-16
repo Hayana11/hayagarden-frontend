@@ -484,6 +484,122 @@ class ResolverTest(ReviewTestCase):
             review.resolve_gmail_message("gmail_message:abc", reader=http_error(502))
 
 
+class SpeakerAndHayaTest(ReviewTestCase):
+    def test_support_prompt_labels_chat_and_mail_speakers(self):
+        self.evidence["chat_messages:1"] = review.Resolved(
+            "chat_messages:1", "chat_messages", "[hayana] 我想去札幌", None, ("hayana",), speaker=review.chat_speaker("hayana"))
+        self.evidence["chat_messages:2"] = review.Resolved(
+            "chat_messages:2", "chat_messages", "[assistant] 好", None, ("assistant",), speaker=review.chat_speaker("assistant"))
+        self.evidence["chat_messages:3"] = review.Resolved(
+            "chat_messages:3", "chat_messages", "[bot9] x", None, ("bot9",), speaker=review.chat_speaker("bot9"))
+        self.evidence["gmail_message:o"] = review.Resolved("gmail_message:o", "gmail_message", "subject: a", None, speaker="费奥多尔")
+        self.evidence["gmail_message:i"] = review.Resolved("gmail_message:i", "gmail_message", "subject: b", None, speaker=review.INCOMING_UNNAMED)
+        self.evidence["media_asset:m"] = review.Resolved("media_asset:m", "media_asset", "猫", None)
+        refs = ("chat_messages:1", "chat_messages:2", "chat_messages:3", "gmail_message:o", "gmail_message:i", "media_asset:m")
+        self.add("哈娅想去札幌。", refs=refs, counterparts=[{"name": "哈娅"}])
+        self.run_review(dry_run=True)
+        request = self.gen.calls[0]
+        self.assertIn("assistant 的发言是费奥多尔说的", request.system_text)
+        self.assertIn("outgoing 是费奥多尔写的", request.system_text)
+        prompt = request.prompt_text
+        for expected in ("[chat_messages:1][发言人：哈娅]", "[chat_messages:2][发言人：费奥多尔]",
+                         "[chat_messages:3][发言人：bot9]", "[gmail_message:o][发言人：费奥多尔]",
+                         "[gmail_message:i][发言人：哈娅]",
+                         "[media_asset:m][机器标注，不是任何人说的话]"):
+            self.assertIn(expected, prompt)
+
+    def test_chat_resolver_sets_speaker(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, created_at TEXT)")
+        conn.executemany("INSERT INTO chat_messages VALUES (?,?,?,?)",
+                         [(1, "hayana", "a", "2026-11-01 09:00:00"), (2, "assistant", "b", "2026-11-01 09:01:00")])
+        conn.commit()
+        conn.close()
+        self.assertEqual(["哈娅", "费奥多尔"], [review.resolve_chat_message(f"chat_messages:{i}", db_path=self.db).speaker for i in (1, 2)])
+
+    def test_gmail_resolver_sets_speaker_from_direction(self):
+        out = review.resolve_gmail_message("gmail_message:a", reader=lambda path: {"direction": "outgoing", "text": "x"})
+        inc = review.resolve_gmail_message("gmail_message:a", reader=lambda path: {"direction": "incoming", "text": "x"})
+        self.assertEqual(("费奥多尔", review.INCOMING_UNNAMED), (out.speaker, inc.speaker))
+
+    def test_gmail_resolver_reads_production_from_list_shape(self):
+        # Production /readonly/messages/<id>: no direction, from = [{"name": ...}].
+        fedya = review.resolve_gmail_message("gmail_message:o", reader=lambda path: {
+            "from": [{"name": "费奥多尔"}], "to": [{"name": "阿蒂尔"}], "text": "x"})
+        haya = review.resolve_gmail_message("gmail_message:h", reader=lambda path: {
+            "from": [{"name": "Hayana（未备注 · AB12）"}], "to": [{"name": "费奥多尔"}], "text": "y"})
+        self.assertEqual("费奥多尔", fedya.speaker)
+        self.assertEqual(review.INCOMING_UNNAMED, haya.speaker)  # raw display name is not trusted
+        self.assertEqual("发言人：费奥多尔", review._speaker_label(fedya, ("阿蒂尔",)))
+        self.assertEqual("发言人：哈娅", review._speaker_label(haya, ("哈娅",)))
+        self.assertEqual("发言人：阿蒂尔", review._speaker_label(haya, ("阿蒂尔",)))
+        self.assertEqual(f"发言人：{review.INCOMING_UNNAMED}（本线程对方：阿蒂尔、皮若尼耶）",
+                         review._speaker_label(haya, ("阿蒂尔", "皮若尼耶")))
+
+    def test_haya_mail_in_production_shape_reaches_support_prompt_as_haya(self):
+        self.evidence["gmail_message:h"] = review.resolve_gmail_message(
+            "gmail_message:h", reader=lambda path: {"from": [{"name": "Hayana（未备注 · AB12）"}],
+                                                     "to": [{"name": "费奥多尔"}], "text": "我想你了"})
+        self.add("哈娅在信里说她想费奥多尔。", refs=("gmail_message:h",), attribution="haya",
+                 counterparts=[{"contact_id": "c_x", "name": "哈娅"}])
+        self.run_review(dry_run=True)
+        prompt = self.gen.calls[0].prompt_text
+        self.assertIn("[gmail_message:h][发言人：哈娅]", prompt)
+        self.assertNotIn("未备注", prompt.split("[gmail_message:h]")[1].split("]")[0])
+
+    def test_haya_attribution_skips_penpal_guard_and_maps_epistemic_status(self):
+        haya = self.add("哈娅说费奥多尔是她最信任的人。", attribution="haya")
+        penpal = self.add("阿蒂尔说哈娅是个温柔的人。", attribution="penpal")
+        self.run_review()
+        self.assertEqual(("committed_new", "needs_review"), (self.row(haya)["outcome"], self.row(penpal)["outcome"]))
+        state = MemoryKernel(self.kernel_db).get_state(review.candidate_ids(haya)["state"])
+        self.assertEqual("derived_from_evidence", state.epistemic_status)
+        self.assertEqual("haya", state.structured_value["review"]["attribution"])
+        self.assertIn("haya 表示", self.gen.calls[0].system_text)
+
+
+class RequeueTest(ReviewTestCase):
+    def test_policy_rejected_goes_back_to_pending_and_is_reviewed_again(self):
+        policy = self.add("甲。")
+        self.gen.supported = False
+        self.run_review()
+        self.assertEqual("rejected", self.status(policy))
+        human = self.add("乙。")
+        committed = self.add("丙。")
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO memory_candidate_reviews (candidate_id, outcome, decision, decision_by, dry_run, created_at) "
+                     "VALUES (?, 'suppressed_rejected', 'rejected', 'fedya', 0, 'x')", (human,))
+        conn.execute("UPDATE memory_candidates SET status='rejected' WHERE candidate_id=?", (human,))
+        conn.execute("INSERT INTO memory_candidate_reviews (candidate_id, outcome, decision, decision_by, dry_run, created_at) "
+                     "VALUES (?, 'committed_new', 'accepted', 'policy', 0, 'x')", (committed,))
+        conn.execute("UPDATE memory_candidates SET status='committed' WHERE candidate_id=?", (committed,))
+        conn.commit()
+        conn.close()
+        kernel_before = [self.kernel_count(t) for t in ("evidence", "state", "delta")]
+        self.assertEqual(1, review.requeue_policy_rejected(self.db))
+        self.assertEqual(("pending", "rejected", "committed"), tuple(self.status(c) for c in (policy, human, committed)))
+        self.assertEqual("fedya", self.row(human)["decision_by"])
+        self.assertEqual(kernel_before, [self.kernel_count(t) for t in ("evidence", "state", "delta")])
+        self.assertEqual(0, review.requeue_policy_rejected(self.db))
+        self.gen.supported = True
+        result = self.run_review()
+        self.assertEqual({"committed_new": 1}, result["outcomes"])
+        self.assertEqual("committed", self.status(policy))
+
+    def test_dry_run_only_reviews_change_nothing(self):
+        cid = self.add("甲。")
+        self.gen.supported = False
+        self.run_review(dry_run=True)
+        self.assertEqual("pending", self.status(cid))
+        self.assertEqual(0, review.requeue_policy_rejected(self.db))
+
+    def test_cli_flag_prints_count_without_ombre(self):
+        self.add("甲。")
+        with mock.patch("builtins.print") as shown:
+            self.assertEqual(0, review.main(["--requeue-policy-rejected", "--db", self.db]))
+        self.assertIn('"requeued": 0', shown.call_args[0][0])
+
+
 class OmbreAdapterTest(unittest.TestCase):
     class Runtime:
         def __init__(self, ops, results=None, dehydrator=None):
