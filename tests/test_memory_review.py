@@ -801,11 +801,16 @@ class ContextAndTrimTest(ReviewTestCase):
         cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
         self.script({"supported": False, "reason": "日期不是双方商定", "extra_evidence_ids": [11],
                      "supported_rewrite": "费奥多尔下个月搬去札幌。"},
-                    {"supported": True, "reason": "核心被支持", "supported_rewrite": "忽略我"})
+                    {"supported": True, "rewrite_faithful": True, "reason": "核心被支持", "supported_rewrite": "忽略我"})
         result = self.run_review()
         self.assertEqual({"committed_new": 1}, result["outcomes"])
         self.assertEqual(2, len(self.gen.calls))
-        self.assertIn("费奥多尔下个月搬去札幌。", self.gen.calls[1].prompt_text.split("=== 证据原文")[0])
+        second_head = self.gen.calls[1].prompt_text.split("=== 证据原文")[0]
+        self.assertIn("原始候选：\n费奥多尔下个月搬去札幌，双方商定了日期。", second_head)
+        self.assertIn("待核对的删减版", second_head)
+        self.assertIn("费奥多尔下个月搬去札幌。", second_head)
+        self.assertIn("rewrite_faithful", self.gen.calls[1].system_text)
+        self.assertNotIn("原始候选", self.gen.calls[0].prompt_text)
         self.assertIn("[chat_messages:11]", self.gen.calls[1].prompt_text.split("上下文（未被引用")[0])
         ids = review.candidate_ids(cid)
         kernel = MemoryKernel(self.kernel_db)
@@ -831,7 +836,7 @@ class ContextAndTrimTest(ReviewTestCase):
     def test_trimmed_rewrite_failing_second_check_is_rejected(self):
         cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
         self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
-                    {"supported": False, "reason": "仍不支持", "supported_rewrite": "再来一次"})
+                    {"supported": False, "rewrite_faithful": True, "reason": "仍不支持", "supported_rewrite": "再来一次"})
         result = self.run_review()
         self.assertEqual({"rejected_unsupported": 1}, result["outcomes"])
         self.assertEqual(2, len(self.gen.calls))
@@ -850,7 +855,7 @@ class ContextAndTrimTest(ReviewTestCase):
         head = self.seed_head("费奥多尔下个月搬去札幌。")
         cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
         self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
-                    {"supported": True, "reason": "ok"})
+                    {"supported": True, "rewrite_faithful": True, "reason": "ok"})
         self.assertEqual({"exact_duplicate": 1}, self.run_review()["outcomes"])
         self.assertEqual(head["lineage_id"], self.row(cid)["matched_lineage_id"])
 
@@ -866,7 +871,7 @@ class ContextAndTrimTest(ReviewTestCase):
         self.assertEqual({"needs_review": 1}, result["outcomes"])
         row = self.row(cid)
         self.assertEqual("needs_review", row["outcome"])
-        self.assertTrue(row["decision_reason"].startswith("repeated_errors:JSONDecodeError"))
+        self.assertTrue(row["decision_reason"].startswith("repeated_errors:SupportOutputError:JSONDecodeError"))
         self.assertEqual("needs_review", self.status(cid))
         self.assertEqual(0, self.kernel_count("state"))
 
@@ -905,6 +910,73 @@ class ContextAndTrimTest(ReviewTestCase):
         self.assertEqual(2, self.row(cid)["error_count"])
         self.assertEqual({"committed_new": 1}, self.run_review()["outcomes"])
         self.assertEqual(0, self.row(cid)["error_count"])
+
+    def test_rewrite_that_swaps_in_another_context_fact_is_rejected_even_if_that_fact_is_supported(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE chat_messages SET content='哈娅今天买了一只蓝色杯子。' WHERE id=11")
+        conn.commit()
+        conn.close()
+        cid = self.add("费奥多尔下个月搬去札幌，并且双方已经商定日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "没有搬家的依据", "extra_evidence_ids": [11],
+                     "supported_rewrite": "哈娅今天买了一只蓝色杯子。"},
+                    {"supported": True, "rewrite_faithful": False, "reason": "这是另一件事，不是原候选的删减"})
+        result = self.run_review()
+        self.assertEqual({"rejected_unsupported": 1}, result["outcomes"])
+        self.assertEqual(2, len(self.gen.calls))  # no third model call
+        self.assertEqual(0, self.kernel_count("state"))
+        self.assertEqual([], [c for c in self.ombre.calls if c[0] == "analyze"])
+        row = self.row(cid)
+        self.assertEqual(("rejected_unsupported", "policy", "rejected"),
+                         (row["outcome"], row["decision_by"], self.status(cid)))
+        self.assertTrue(row["decision_reason"].startswith("rewrite_not_faithful:"))
+        check = json.loads(row["support_check_json"])["rewrite_check"]
+        self.assertEqual((True, False), (check["supported"], check["rewrite_faithful"]))
+        self.assertIn("原始候选：\n费奥多尔下个月搬去札幌", self.gen.calls[1].prompt_text)
+
+    def test_second_check_must_answer_rewrite_faithful(self):
+        cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
+                    {"supported": True, "reason": "没有回答忠实度"})
+        result = self.run_review()
+        self.assertEqual("partial_failure", result["status"])
+        row = self.row(cid)
+        self.assertEqual(("error", 1, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+        self.assertIn("missing_rewrite_faithful", row["error"])
+        self.assertEqual(0, self.kernel_count("state"))
+
+    def test_kernel_faults_never_escalate_to_human_review(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        real_insert = MemoryKernel._insert
+
+        def failing(conn, record):
+            if type(record).__name__ == "Delta":
+                raise RuntimeError("disk full")
+            return real_insert(conn, record)
+
+        with mock.patch.object(MemoryKernel, "_insert", staticmethod(failing)):
+            for _ in range(4):
+                self.assertEqual("partial_failure", self.run_review()["status"])
+                row = self.row(cid)
+                self.assertEqual(("error", 0, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+                self.assertIn("disk full", row["error"])
+        self.assertEqual(0, self.kernel_count("state"))
+        self.assertEqual({"committed_new": 1}, self.run_review()["outcomes"])  # recovers once the fault is gone
+        self.assertEqual(("committed", 0), (self.status(cid), self.row(cid)["error_count"]))
+
+    def test_infrastructure_errors_do_not_reset_or_advance_the_content_error_count(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script("", "")
+        self.run_review()
+        self.run_review()
+        self.assertEqual(2, self.row(cid)["error_count"])
+        self.gen = FakeGenerator()
+        self.gen.fail = ConnectionError("relay down")  # transport fault, not an unusable reply
+        self.run_review()
+        row = self.row(cid)
+        self.assertEqual(("error", 2, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+        self.script("")
+        self.assertEqual({"needs_review": 1}, self.run_review()["outcomes"])
+        self.assertTrue(self.row(cid)["decision_reason"].startswith("repeated_errors:SupportOutputError"))
 
     def test_schema_upgrade_adds_error_count_idempotently(self):
         conn = sqlite3.connect(self.db)
