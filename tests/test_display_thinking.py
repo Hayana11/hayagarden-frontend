@@ -485,6 +485,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         )
         self.assertEqual(
             {
+                '_run_proactive_cold_wake_turn',
                 '_run_unified_normal_main_chat_turn',
                 '_stream_cc_daily_soft_window',
                 'gen_cc',

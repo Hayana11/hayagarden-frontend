@@ -5679,6 +5679,262 @@ def _retire_shared_resident_after_observation_failure(
         return False
 
 
+_PROACTIVE_COLD_REASONS = ('no_local_binding', 'resident_not_hot')
+
+
+def _proactive_cold_start_allowed(mode, reason) -> bool:
+    """Boundary gate for starting a proactive round on a cold shared resident."""
+    from wake.unified_modes import UNIFIED_MAIN_CHAT_WAKE_MODES
+    try:
+        enabled = {
+            item.strip() for item in str(
+                config_store.get('PROACTIVE_COLD_START_MODES', '') or ''
+            ).split(',') if item.strip()
+        } & set(UNIFIED_MAIN_CHAT_WAKE_MODES)
+        context_plan_on = str(
+            config_store.get('CONTEXT_PLAN_CONSUMER_ENABLED', '0') or ''
+        ).strip() == '1'
+    except Exception:
+        return False
+    reason = str(reason or '')
+    return bool(
+        (str(mode or '').strip() or 'normal') in enabled
+        and context_plan_on
+        and (reason in _PROACTIVE_COLD_REASONS or reason.startswith('resident_stale:'))
+    )
+
+
+def _proactive_cold_abort(main_turn, error_code):
+    """Post-flush failure of a finished cold round: kill the resident, clear binding, new generation."""
+    from chat import daily_runtime as _rt
+    try:
+        _rt.abort_daily_turn(
+            main_turn['_proactive_cold_plan'], error_code=error_code,
+            resident=_CC_RESIDENT, respawn=True,
+        )
+    except Exception:
+        app.logger.exception('[proactive_cold] abort cleanup failed')
+
+
+def _proactive_cold_finalize(main_turn, exec_out) -> bool:
+    """After the executor delivered: spoken -> cursor/last-good/receipt, silent -> retire. True = receipt committed."""
+    from chat import daily_runtime as _rt
+    from chat.unified_heartbeat_a1 import retire_shared_resident_after_failed_internal_turn
+    plan, fence = main_turn['_proactive_cold_plan'], main_turn.get('_shared_delivery_fence')
+    try:
+        if main_turn.get('silent'):
+            # No assistant row, so no anchor a hot proof could stand on.
+            retire_shared_resident_after_failed_internal_turn(
+                window_identity=dict(context_id=plan.context_id, context_epoch=plan.context_epoch,
+                                     resident_generation=plan.resident_generation),
+                delivery_token=getattr(fence, 'token', None), reason='proactive_cold_silent',
+            )
+            raise RuntimeError('proactive_cold_silent_retired')
+        if _rt.finalize_proactive_cold_wake(
+            plan, assistant_message_id=int(exec_out['assistant_message_id']),
+            binding=main_turn['native_transcript_binding'],
+        ):
+            return True
+    except Exception as exc:
+        app.logger.warning('[proactive_cold] not finalized: %s', exc)
+    _proactive_cold_abort(main_turn, 'proactive_cold_not_finalized')
+    return False
+
+
+def _run_proactive_cold_wake_turn(
+    *,
+    wake_run_id: str,
+    window_identity=None,
+    now: datetime.datetime,
+    t2_hours: float,
+    t_hours: float,
+    observation_bundle=None,
+    observation_transcript_skip=None,
+    mode: str = 'normal',
+    last_user_at=None,
+    activity_desc: str = '',
+    self_trigger_note: str = '',
+) -> dict:
+    """One proactive round on a cold shared resident, through the Chat runtime."""
+    import hashlib
+    from chat import daily_runtime as _rt
+    from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
+    from chat.cc_auth import build_cc_provider_env
+    from chat.cc_history_rewrite import guard_cc_generation
+    from chat.display_thinking import (
+        filter_display_thinking_events,
+        get_display_thinking_snapshot,
+        prepare_daily_display_thinking_plan,
+    )
+    from chat.provider_router import capture_generation_authority
+    from chat.system_builder import build_cc_daily_static_parts, build_cc_one_shot
+    from chat.unified_heartbeat_a1 import begin_shared_wake_delivery_fence
+
+    resident = _CC_RESIDENT
+    rid = str(wake_run_id or '')
+    mode_name = str(mode or 'normal')
+    _wake_live_trace(rid, 'PROACTIVE_COLD_START', mode=mode_name)
+    lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+    _wake_live_trace(rid, 'GEN_LOCK_ACQUIRED', lock_acquired=(lock_mode == 'own'), lock_mode=lock_mode)
+    if lock_mode != 'own':
+        raise UnifiedNormalWakeSharedUnavailable('generation_lock_unavailable')
+    plan = None
+    fence = None
+    cache_info = {
+        'provider': 'claude_code', 'source': 'wake', 'wake_run_id': rid,
+        'b3_authority': True, 'unified_chat_resident': True,
+        'unified_main_chat_proactive': True, 'proactive_cold_start': True,
+    }
+    try:
+        authority = capture_generation_authority(provider='claude_code')
+        env = build_cc_provider_env(
+            authority.provider, authority.model_identity, token_getter=lambda: CC_TOKEN,
+        )
+        static_parts = build_cc_daily_static_parts()
+        full_system = static_parts['full_system']
+        display_mode, display_prompt = get_display_thinking_snapshot()
+        plan = _rt.prepare_proactive_cold_turn(
+            wake_run_id=rid,
+            trigger_text=_build_normal_wake_main_chat_trigger(
+                now=now, t2_hours=t2_hours, t_hours=t_hours,
+                observation_bundle=observation_bundle, mode=mode,
+                last_user_at=last_user_at, activity_desc=activity_desc,
+                self_trigger_note=self_trigger_note,
+            ),
+            now=now,
+            db_path=DB_PATH,
+            resident=resident,
+            static_system=full_system,
+            static_system_sha256=hashlib.sha256((full_system or '').encode('utf-8')).hexdigest(),
+            persona_sha256=hashlib.sha256((static_parts.get('persona') or '').encode('utf-8')).hexdigest(),
+            provider=authority.provider,
+            model=authority.model_identity,
+        )
+        key = plan.resident_key
+        plan._resident_close_fn = lambda: _rt.close_local_resident_if_bound(resident, expected_key=key)
+        plan._presend_heartbeat_sec = 0  # no SSE client to keep alive
+        prepare_daily_display_thinking_plan(plan, display_mode, display_prompt)
+        plan._jsonl_finality_profile = 'unified_normal_wake'
+        # Same pending-mail one-shot as Chat; consumed only after the receipt commits.
+        one_shot = build_cc_one_shot(include_wake=False)
+        plan.assembly['pending_mail_notice'] = str(one_shot.get('pending_mail_notice') or '')
+        plan.assembly['pending_mail_ids'] = list(one_shot.get('pending_mail_ids') or [])
+        cache_info.update({
+            'history_anchor_message_id': _rt._history_anchor(plan),
+            'wake_request_ref': _rt._request_identity(plan)[1],
+        })
+        fence = begin_shared_wake_delivery_fence(gateway=_sys.modules[__name__], resident=resident)
+        events = _rt.stream_daily_resident_turn(
+            plan, resident=resident, env=env, static_system=full_system,
+        )
+        text_acc, think_acc, state_acc, tool_calls = [], [], [], []
+        segments = DisplaySegmentAccumulator()
+        usage, claims, saw_done = {}, {}, False
+        for evt, payload in filter_display_thinking_events(
+            guard_cc_generation(events),
+            lambda: _resident_display_thinking_mode(display_mode),
+        ):
+            if evt == 'text':
+                text_acc.append(str(payload or ''))
+                segments.append_text(str(payload or ''))
+            elif evt == 'think':
+                think_acc.append(str(payload or ''))
+                segments.append_thinking(str(payload or ''))
+            elif evt == 'self_state':
+                state_acc.append(str(payload or ''))
+                segments.append_self_state(str(payload or ''))
+            elif evt == 'tool_use' and isinstance(payload, dict):
+                tool_calls.append({
+                    'id': payload.get('id'), 'name': payload.get('name'),
+                    'args': payload.get('args'), 'result': '', 'success': True,
+                })
+                segments.append_tool(len(tool_calls) - 1)
+            elif evt == 'tool_result' and isinstance(payload, dict):
+                call = next((c for c in reversed(tool_calls) if c.get('id') == payload.get('tool_use_id')), None)
+                if call is not None:
+                    call['result'] = payload.get('result', '')
+                    call['success'] = not payload.get('is_error')
+            elif evt == 'done':
+                saw_done = True
+                if isinstance(payload, tuple) and len(payload) >= 3:
+                    usage = dict(payload[2]) if isinstance(payload[2], dict) else {}
+                    claims = dict(payload[3]) if len(payload) >= 4 and isinstance(payload[3], dict) else {}
+                    text_acc, think_acc = [str(payload[0] or '')], [str(payload[1] or '')]
+        if not saw_done:
+            raise RuntimeError('proactive_cold_missing_done')
+        text, silent = _split_wake_silence(''.join(text_acc))
+        if not text and not silent:
+            raise RuntimeError('proactive_cold_empty_response')
+        finality = usage.get('jsonl_usage')
+        finality = finality if isinstance(finality, dict) else {}
+        _wake_live_trace(rid, 'JSONL_FINALITY', stream_totals_match=finality.get('stream_totals_match'),
+                         finality_state=finality.get('finality_state'))
+        if finality.get('stream_totals_match') is not True:
+            raise RuntimeError('proactive_cold_jsonl_not_final')
+        cache_info.update(usage)
+        cache_info['transcript_finality'] = dict(finality)
+        cache_info.update({
+            'tool_calls': tool_calls,
+            'thinking': ''.join(think_acc),
+            'self_state': ''.join(state_acc),
+            'display_segments': segments.to_json(),
+        })
+        _wake_live_trace(rid, 'PROACTIVE_COLD_STREAM_DONE', silent=silent)
+        return {
+            'text': text,
+            'silent': silent,
+            'thinking': ''.join(think_acc),
+            'self_state': ''.join(state_acc),
+            'display_segments': segments.to_json(),
+            'tool_calls': tool_calls,
+            'one_shot_claims': claims,
+            'provider': 'claude_code',
+            'model_identity': str(
+                getattr(resident, '_model_identity', None) or 'claude-code:shared-resident'
+            ),
+            'cache_info': cache_info,
+            'native_transcript_binding': None,
+            '_shared_delivery_fence': fence,
+            # Hand-off to the 2b finalizer.
+            'proactive_cold_start': True,
+            '_proactive_cold_plan': plan,
+            '_proactive_cold_stream': {'usage': usage, 'jsonl_finality': finality, 'saw_done': True},
+            '_proactive_cold_transcript': {
+                'start_offset': plan.transcript_start_offset,
+                'end_offset': plan.transcript_end_offset,
+                'path': plan.transcript_path,
+                'session_id': plan.transcript_claude_session_id,
+                'process_generation': plan.transcript_process_generation,
+                'error_code': plan.transcript_observation_error_code,
+            },
+        }
+    except Exception as exc:
+        flushed = plan is not None and bool(
+            getattr(plan, '_current_user_stdin_flushed', False)
+            or getattr(plan, '_current_user_stdin_write_started', False)
+        )
+        if plan is not None:
+            try:
+                # Pre-flush: back to the pre-start state (no generation bump).
+                _rt.abort_daily_turn(
+                    plan, error_code='proactive_cold_failed', resident=resident, respawn=flushed,
+                )
+            except Exception:
+                app.logger.exception('[proactive_cold] cleanup failed')
+        if fence is not None:
+            fence.finish(False, cache_info=cache_info, window_identity=window_identity,
+                         reason='proactive_cold_failed')
+        else:
+            _gen_release(None)
+        _wake_live_trace(
+            rid, 'FAILED', exception_type=type(exc).__name__,
+            error_code='normal_wake_main_chat_failed' if flushed else 'normal_wake_pre_model_failed',
+        )
+        if not flushed:
+            raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
+        raise
+
+
 def _run_unified_normal_main_chat_turn(
     *,
     wake_run_id: str,
@@ -5726,6 +5982,7 @@ def _run_unified_normal_main_chat_turn(
     except Exception as exc:
         raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
     acquired = False
+    cold_routed = False
     shared_started = False
     watermark = None
     delivery_fence = None
@@ -5757,7 +6014,23 @@ def _run_unified_normal_main_chat_turn(
             **_wake_live_resident_fields(resident),
         )
         if not ready:
-            raise UnifiedNormalWakeSharedUnavailable(reason)
+            if not _proactive_cold_start_allowed(mode, reason):
+                raise UnifiedNormalWakeSharedUnavailable(reason)
+            # Cold path owns its lock, fence and cleanup; skip the hot handlers.
+            cold_routed = True
+            return _run_proactive_cold_wake_turn(
+                wake_run_id=wake_run_id,
+                window_identity=window_identity,
+                now=now,
+                t2_hours=t2_hours,
+                t_hours=t_hours,
+                observation_bundle=observation_bundle,
+                observation_transcript_skip=observation_transcript_skip,
+                mode=mode,
+                last_user_at=last_user_at,
+                activity_desc=activity_desc,
+                self_trigger_note=self_trigger_note,
+            )
 
         try:
             lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
@@ -6086,6 +6359,8 @@ def _run_unified_normal_main_chat_turn(
             '_shared_delivery_fence': delivery_fence,
         }
     except UnifiedNormalWakeSharedUnavailable as exc:
+        if cold_routed:
+            raise
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
@@ -6107,6 +6382,8 @@ def _run_unified_normal_main_chat_turn(
         )
         raise
     except Exception as exc:
+        if cold_routed:
+            raise
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
@@ -10207,6 +10484,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         main_turn = None
         main_turn_entered = False
         observation_committed = False
+        cold_turn = False
         try:
             observation = collect_wake_read_observation(
                 wake_run_id=wake_run_id,
@@ -10266,6 +10544,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 main_cache_info['observation_transcript_skip'] = dict(
                     observation_skip
                 )
+            cold_turn = bool(main_turn.get('proactive_cold_start'))
+            if cold_turn:
+                from chat import daily_runtime as _rt
+                cold_round = _rt.prepare_proactive_cold_wake_round(
+                    main_turn['_proactive_cold_plan'], resident=_CC_RESIDENT,
+                    silent=bool(main_turn.get('silent')),
+                    jsonl_finality=main_turn['_proactive_cold_stream']['jsonl_finality'],
+                )
+                if main_turn.get('silent'):
+                    if cold_round is not None:
+                        main_cache_info['transcript_skip'] = cold_round
+                else:
+                    main_turn['native_transcript_binding'] = cold_round
             exec_out = _wake_exec(
                 wake_action,
                 str(main_turn.get('thinking') or ''),
@@ -10344,6 +10635,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     'wake_run_id': wake_run_id,
                 })
             if isinstance(main_turn, dict):
+                if cold_turn:
+                    _proactive_cold_abort(main_turn, 'proactive_cold_failed_after_stream')
                 failed_fence = main_turn.get('_shared_delivery_fence')
                 if failed_fence is not None:
                     failed_fence.finish(
@@ -10376,6 +10669,15 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         delivery_succeeded = bool(
             isinstance(exec_out, dict) and exec_out.get('delivered')
         )
+        cold_receipt = True
+        if cold_turn:
+            # Still inside the delivery fence: no Chat can slip in before the cursor moves.
+            cold_receipt = delivery_succeeded and _proactive_cold_finalize(main_turn, exec_out)
+            if not delivery_succeeded:
+                _proactive_cold_abort(main_turn, 'proactive_cold_delivery_rejected')
+            if not cold_receipt:
+                main_turn['one_shot_claims'] = {}   # kept: the session that saw it is gone
+            _wake_live_trace(wake_run_id, 'PROACTIVE_COLD_FINALIZED', receipt_committed=cold_receipt)
         if delivery_fence is not None:
             delivery_fence.finish(
                 delivery_succeeded,

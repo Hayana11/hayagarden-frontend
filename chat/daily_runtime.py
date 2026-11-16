@@ -167,7 +167,7 @@ class DailyTurnPlan:
     context_epoch: int
     resident_generation: int
     resident_key: str
-    user_message_id: int
+    user_message_id: Optional[int]
     epoch_token: dict[str, Any]
     lease_owner: str
     is_cold: bool
@@ -177,6 +177,12 @@ class DailyTurnPlan:
     manifest: dict[str, Any]
     feedback_lines: tuple[str, ...] = ()
     feedback_ids: tuple[int, ...] = ()
+    # History cut-off number (numeric only); request identity stays user_message_id.
+    history_anchor_message_id: Optional[int] = None
+    # Request identity of a proactive (wake) turn; Chat keeps the defaults.
+    turn_mode: str = 'chat'
+    wake_run_id: Optional[str] = None
+    request_content_sha256: str = ''
     user_content: str = ''
     user_image_url: str = ''
     user_attachments: tuple[dict[str, str], ...] = ()
@@ -225,6 +231,53 @@ class DailyTurnPlan:
     # 0-or-1 surfaced memory for this turn (tools.memory_surface); None = not decided.
     memory_recall: Optional[dict[str, Any]] = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
+
+
+def _require_request_message_id(plan: 'DailyTurnPlan') -> int:
+    """Request identity for Chat turns; a request-less (proactive) plan has none."""
+    value = plan.user_message_id
+    if value is None:
+        raise DailyRuntimeError(
+            'turn has no request message id',
+            error_code='request_message_id_missing',
+        )
+    return int(value)
+
+
+def _request_identity(plan: 'DailyTurnPlan') -> tuple[str, str]:
+    """(kind, source_ref) of the current request; branches on identity only."""
+    rid = str(getattr(plan, 'wake_run_id', None) or '').strip()
+    mode = getattr(plan, 'turn_mode', 'chat')
+    if mode == 'wake' and rid:
+        return 'wake', 'wake_request:%s' % rid
+    if mode != 'chat' or rid:
+        raise DailyRuntimeError(
+            'turn request identity is inconsistent',
+            error_code='request_identity_missing',
+        )
+    return 'message', 'message:%d' % _require_request_message_id(plan)
+
+
+def _wake_current_request(plan: 'DailyTurnPlan') -> dict[str, Any]:
+    """Value object for the wake request section; there is no message row."""
+    from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
+    return {
+        'source_ref': _request_identity(plan)[1],
+        'source_revision': str(plan.wake_run_id),
+        'content_hash': str(plan.request_content_sha256),
+        'estimated_tokens': int(
+            estimate_tokens_heuristic_cjk1_ascii4_v1(str(plan.user_content or ''))
+        ),
+        'history_cut': _history_anchor(plan),
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+    }
+
+
+def _history_anchor(plan: 'DailyTurnPlan') -> int:
+    """Numeric history cut-off; Chat plans fall back to their request id."""
+    value = getattr(plan, 'history_anchor_message_id', None)
+    return int(plan.user_message_id if value is None else value)
 
 
 _LOCAL_BINDING: Optional[LocalResidentBinding] = None
@@ -1745,7 +1798,11 @@ def _build_production_context_plan(
         source_db_path=store_path,
         shadow_store_path=store_path,
         continuity_store_path=store_path,
-        current_user_message_id=int(plan.user_message_id),
+        current_user_message_id=plan.user_message_id,
+        current_request=(
+            _wake_current_request(plan)
+            if _request_identity(plan)[0] == 'wake' else None
+        ),
         budget_policy=policy,
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
@@ -1949,7 +2006,7 @@ def _conditionally_seal_cold_bridge(
 
     bridge_members = tuple(detection.source_members)
     if any(
-        int(plan.user_message_id) in _context_source_message_ids(
+        plan.user_message_id in _context_source_message_ids(
             str(getattr(member, 'source_ref', '') or '')
         )
         for member in bridge_members
@@ -2148,7 +2205,7 @@ def _project_context_plan_history(
                     error_code='context_plan_source_unavailable',
                 )
             for message_id in ids:
-                if message_id == int(plan.user_message_id) or message_id in seen_ids:
+                if message_id == plan.user_message_id or message_id in seen_ids:
                     continue
                 row = rows.get(message_id)
                 if row is None:
@@ -2613,6 +2670,13 @@ def _hot_native_tail_proof(
         member for member in members
         if str(getattr(member, 'source_kind', '') or '') == 'current_request'
     )
+    if any(
+        str(getattr(m, 'source_ref', '') or '').startswith('wake_request:')
+        for m in request_members
+    ):
+        return _hot_wake_tail_proof(
+            plan, frozen=frozen, registry=registry, request_members=request_members,
+        )
     if len(request_members) > 1:
         return {'status': 'ambiguous', 'reason': 'multiple_current_request_members'}
     if not request_members:
@@ -2625,7 +2689,7 @@ def _hot_native_tail_proof(
             'reason': 'current_request_source_ambiguous' if request_source_ref
                 else 'current_request_source_missing',
         }
-    if int(user_message_id) >= int(plan.user_message_id):
+    if int(user_message_id) >= _history_anchor(plan):
         return {'status': 'ambiguous', 'reason': 'current_request_is_not_previous'}
     try:
         watermark = int(frozen['receipt'].installed_source_watermark)
@@ -2868,6 +2932,124 @@ def _hot_native_tail_proof(
     }
 
 
+def _hot_wake_tail_proof(
+    plan: DailyTurnPlan,
+    *,
+    frozen: dict[str, Any],
+    registry: Optional[dict[str, Any]],
+    request_members: tuple[Any, ...],
+) -> dict[str, Any]:
+    """Prove the previous receipt request (a proactive Wake) + its reply W is the live native tail.
+
+    Runs after _hot_live_identity_decision PASSed (epoch, binding, process, session, system
+    fingerprint, owner, receipt identity, three cursors == receipt watermark).
+    """
+    from continuity.sources import build_source_members, derive_autonomous_events
+    from continuity.store import open_continuity_read_only
+
+    def fail(status: str, reason: str) -> dict[str, Any]:
+        return {'status': status, 'reason': reason}
+
+    ref = str(request_members[0].source_ref or '') if len(request_members) == 1 else ''
+    rid = ref.split(':', 1)[1].strip() if ref.startswith('wake_request:') else ''
+    if len(request_members) != 1:
+        return fail('ambiguous', 'wake_request_proof_ambiguous')
+    if not rid:
+        return fail('missing', 'wake_request_proof_missing')
+    try:
+        w = int(frozen['receipt'].installed_source_watermark)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return fail('missing', 'receipt_watermark_invalid')
+    if w <= 0 or w >= _history_anchor(plan):
+        return fail('ambiguous', 'wake_tail_is_not_previous')
+    if registry is None or str(registry.get('scan_status') or '') != 'READY':
+        return fail('missing', 'session_registry_not_ready')
+    ctx = (int(plan.context_id), int(plan.context_epoch), int(plan.resident_generation))
+    try:
+        conn = open_continuity_read_only(_production_continuity_store_path(plan))
+        try:
+            row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (w,)).fetchone()
+            dmc = conn.execute(
+                'SELECT context_id, context_epoch, resident_generation, role '
+                'FROM daily_message_contexts WHERE message_id=?', (w,),
+            ).fetchone()
+            logs = conn.execute(
+                'SELECT context_id, context_epoch, resident_generation '
+                'FROM wake_log WHERE wake_run_id=?', (rid,),
+            ).fetchall()
+            events = conn.execute(
+                'SELECT event_uuid, role, claude_session_id, context_id, context_epoch, '
+                'resident_generation, jsonl_byte_offset FROM chat_message_claude_events '
+                'WHERE message_id=? ORDER BY jsonl_byte_offset ASC', (w,),
+            ).fetchall()
+            cache = json.loads(dict(row).get('cache_info') or '') if row is not None else {}
+            h = cache.get('history_anchor_message_id') if isinstance(cache, dict) else None
+            foreign = None if not isinstance(h, int) or isinstance(h, bool) else conn.execute(
+                'SELECT COUNT(*) FROM chat_messages WHERE id>? AND id<?', (h, w),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return fail('missing', 'wake_tail_rows_unavailable')
+    if row is None or dmc is None or not isinstance(cache, dict) or (
+        cache.get('source') != 'wake' or cache.get('wake_run_id') != rid
+        or any(cache.get(k) is not True for k in (
+            'unified_chat_resident', 'canonical_chat_history', 'proactive_cold_start'))
+        or tuple(map(int, dmc[:3])) != ctx or str(dmc[3]) != 'assistant'
+    ):
+        return fail('missing', 'wake_tail_anchor_mismatch')
+    if not any(tuple(int(v or 0) for v in r) == ctx for r in logs):
+        return fail('missing', 'wake_tail_log_missing')
+    if foreign is None or h >= w or foreign:
+        return fail('missing', 'wake_tail_foreign_rows')
+
+    sid = str(registry.get('claude_session_id') or '')
+    last_good = get_same_context_last_good(ctx[0], ctx[1])
+    try:
+        if not isinstance(last_good, dict) or (
+            int(last_good.get('context_id') or 0), int(last_good.get('context_epoch') or 0),
+            int(last_good.get('resident_generation') or 0),
+        ) != ctx or str(last_good.get('claude_session_id') or '') != sid:
+            return fail('missing', 'same_context_last_good_identity_mismatch')
+        end, reg_offset = int(last_good['transcript_end_offset']), int(registry['scan_offset'])
+    except (KeyError, TypeError, ValueError):
+        return fail('missing', 'native_tail_offset_missing')
+    skips = 0
+    if reg_offset != end:
+        chain_end, skips = _hot_wake_skip_chain_end(plan, start_offset=end)
+        if skips <= 0 or chain_end != reg_offset:
+            return fail('missing', 'native_tail_offset_mismatch')
+    if end <= 0:
+        return fail('missing', 'native_tail_offset_mismatch')
+
+    try:
+        by_role = {r: [e['jsonl_byte_offset'] for e in events if str(e['role']) == r]
+                   for r in ('provider_input', 'assistant')}
+        offsets = [e['jsonl_byte_offset'] for e in events]
+        uuids = [str(e['event_uuid'] or '').strip() for e in events]
+        if not by_role['provider_input'] or not by_role['assistant']:
+            return fail('missing', 'wake_tail_mapping_incomplete')
+        if any(isinstance(o, bool) or not isinstance(o, int) for o in offsets):
+            return fail('ambiguous', 'wake_tail_mapping_offset_corrupt')
+        if not all(uuids) or len(set(uuids)) != len(uuids) or len(set(offsets)) != len(offsets):
+            return fail('ambiguous', 'wake_tail_mapping_duplicate')
+        if any(str(e['claude_session_id']) != sid or tuple(map(int, e[3:6])) != ctx for e in events):
+            return fail('missing', 'wake_tail_mapping_session_mismatch')
+        if max(by_role['provider_input']) >= min(by_role['assistant']):
+            return fail('missing', 'wake_tail_mapping_order_invalid')
+        if max(by_role['assistant']) >= end:
+            return fail('missing', 'wake_tail_mapping_offset_invalid')
+        members = tuple(build_source_members((), derive_autonomous_events([dict(row)])))
+    except Exception:
+        return fail('ambiguous', 'wake_tail_mapping_corrupt')
+    if len(members) != 1 or str(members[0].source_ref) != 'wake:%d' % w:
+        return fail('missing' if not members else 'ambiguous', 'wake_tail_member_mismatch')
+    return {
+        'status': 'pass', 'reason': None, 'source_member': members[0],
+        'assistant_message_id': w, 'transcript_end_offset': end, 'wake_skip_count': skips,
+    }
+
+
 def _hot_wake_skip_chain_end(
     plan: DailyTurnPlan,
     *,
@@ -2901,6 +3083,14 @@ def _hot_wake_skip_chain_end(
                 'ORDER BY id ASC',
                 (context_id, context_epoch, resident_generation),
             ).fetchall()
+            mapped = {
+                int(r[0]): (int(r[1]), int(r[2])) for r in conn.execute(
+                    'SELECT message_id, MIN(jsonl_byte_offset), MAX(jsonl_byte_offset) '
+                    'FROM chat_message_claude_events WHERE context_id=? '
+                    'AND context_epoch=? AND resident_generation=? GROUP BY message_id',
+                    (context_id, context_epoch, resident_generation),
+                )
+            }
         finally:
             conn.close()
     except (OSError, ValueError, sqlite3.Error):
@@ -2921,7 +3111,7 @@ def _hot_wake_skip_chain_end(
             continue
 
         observation_present = 'observation_transcript_skip' in cache
-        main_present = 'transcript_skip' in cache
+        main_present = 'transcript_skip' in cache or 'native_transcript_range' in cache
         if observation_present and not main_present:
             return None, 0
 
@@ -2929,13 +3119,23 @@ def _hot_wake_skip_chain_end(
         for field, requires_epoch in (
             ('observation_transcript_skip', True),
             ('transcript_skip', False),
+            ('native_transcript_range', True),
         ):
             if field not in cache:
                 continue
             skip = cache.get(field)
             if not isinstance(skip, dict):
                 return None, 0
-            if skip.get('skipped_provider_round') is not True:
+            if field == 'native_transcript_range':
+                # A spoken Wake's range counts only when its mapping proves it.
+                span = mapped.get(strict_int(skip.get('message_id')))
+                if span is None or not (
+                    strict_int(skip.get('start_offset')) is not None
+                    and strict_int(skip.get('end_offset')) is not None
+                    and skip['start_offset'] <= span[0] and span[1] < skip['end_offset']
+                ):
+                    return None, 0
+            elif skip.get('skipped_provider_round') is not True:
                 return None, 0
             skip_context_id = strict_int(skip.get('context_id'))
             skip_epoch = strict_int(skip.get('context_epoch'))
@@ -4437,10 +4637,10 @@ def _validate_production_context_install(
         section for section in context_plan.ordered_sections
         if str(getattr(section, 'kind', '') or '') == 'current_request'
     )
+    request_kind, request_ref = _request_identity(plan)
     if (
         len(current_sections) != 1
-        or str(current_sections[0].source_ref or '')
-            != 'message:%d' % int(plan.user_message_id)
+        or str(current_sections[0].source_ref or '') != request_ref
     ):
         raise DailyRuntimeError(
             'ContextPlan current-request proof is invalid',
@@ -4448,23 +4648,31 @@ def _validate_production_context_install(
         )
     try:
         from continuity.sources import evidence_ref
-        current_row = _load_context_source_rows(
-            {int(plan.user_message_id)},
-            db_path=_production_continuity_store_path(plan),
-        ).get(int(plan.user_message_id))
-        if current_row is None:
-            raise ValueError('current request source row is unavailable')
-        current_evidence = evidence_ref(current_row, prefix='message')
         current_identity = (
             str(current_sections[0].source_ref or ''),
             str(current_sections[0].content_hash or ''),
             int(current_sections[0].estimated_tokens or 0),
         )
-        expected_current_identity = (
-            str(current_evidence.source_ref),
-            str(current_evidence.content_hash),
-            int(current_evidence.logical_size),
-        )
+        if request_kind == 'wake':
+            wake_request = _wake_current_request(plan)
+            expected_current_identity = (
+                wake_request['source_ref'],
+                str(plan.request_content_sha256),
+                wake_request['estimated_tokens'],
+            )
+        else:
+            current_row = _load_context_source_rows(
+                {_require_request_message_id(plan)},
+                db_path=_production_continuity_store_path(plan),
+            ).get(_require_request_message_id(plan))
+            if current_row is None:
+                raise ValueError('current request source row is unavailable')
+            current_evidence = evidence_ref(current_row, prefix='message')
+            expected_current_identity = (
+                str(current_evidence.source_ref),
+                str(current_evidence.content_hash),
+                int(current_evidence.logical_size),
+            )
     except Exception as exc:
         raise DailyRuntimeError(
             'ContextPlan current-request source is unavailable',
@@ -4747,7 +4955,7 @@ def _validate_production_context_install(
                 'Capacity current request has a second history carrier',
                 error_code='context_plan_current_request_parity_failed',
             )
-        current_source_ref = 'message:%d' % int(plan.user_message_id)
+        current_source_ref = request_ref
         if (
             plan.manifest.get('capacity_context_current_user_in_candidate')
             is not False
@@ -5088,7 +5296,7 @@ def _assemble_plan(
     chat_id: str,
     local_day: str,
     refreshed: dict[str, Any],
-    user_message_id: int,
+    user_message_id: Optional[int],
     user_content: str,
     is_cold: bool,
     is_respawn: bool,
@@ -5111,7 +5319,10 @@ def _assemble_plan(
     user_attachments: Optional[list[dict[str, str]]] = None,
     feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
     turn_timing: Optional[dict[str, Any]] = None,
+    wake: Optional[dict[str, Any]] = None,
 ) -> DailyTurnPlan:
+    # ``wake`` (rid, history anchor) marks a proactive turn: no request row.
+    anchor = int(wake['anchor']) if wake else int(user_message_id)
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
     resident_generation = int(refreshed['resident_generation'])
@@ -5143,7 +5354,8 @@ def _assemble_plan(
         assembly = dh.build_daily_window_context(
             chat_id=chat_id,
             daily_context=refreshed,
-            current_user_message_id=int(user_message_id),
+            current_user_message_id=None if wake else int(user_message_id),
+            history_anchor_message_id=anchor,
             static_system=static_system,
             is_cold=is_cold,
             is_respawn=is_respawn,
@@ -5182,12 +5394,15 @@ def _assemble_plan(
     if task_feedback:
         assembly['task_feedback'] = task_feedback
     with turn_birth.phase(turn_timing, 'memory', '想起记忆') as timing_box:
-        memory_recall = _surface_memory_for_turn(
-            user_message_id=int(user_message_id),
-            user_content=user_content,
-            assembly=assembly,
-            static_system=static_system,
-            db_path=db_path,
+        memory_recall = (
+            {'decision': 'skipped', 'reason': 'wake', 'mode': 'skipped_wake', 'ref': None}
+            if wake else _surface_memory_for_turn(
+                user_message_id=int(user_message_id),
+                user_content=user_content,
+                assembly=assembly,
+                static_system=static_system,
+                db_path=db_path,
+            )
         )
         timing_box['detail'] = _memory_timing_detail(memory_recall)
     _apply_memory_recall(assembly, memory_recall)
@@ -5209,7 +5424,11 @@ def _assemble_plan(
         context_epoch=context_epoch,
         resident_generation=resident_generation,
         resident_key=resident_key,
-        user_message_id=int(user_message_id),
+        user_message_id=None if wake else int(user_message_id),
+        history_anchor_message_id=anchor,
+        turn_mode='wake' if wake else 'chat',
+        wake_run_id=str(wake['rid']) if wake else None,
+        request_content_sha256=_sha256_text(user_content) if wake else '',
         epoch_token=epoch_token,
         lease_owner=owner,
         is_cold=is_cold,
@@ -5233,9 +5452,9 @@ def _assemble_plan(
     observation_sink: list[Any] = []
     hidden_plan = _prepare_hidden_flow_plan(
         provider=provider,
-        turn_kind=turn_kind,
+        turn_kind='wake' if wake else turn_kind,
         chat_id=chat_id,
-        user_message_id=int(user_message_id),
+        user_message_id=0 if wake else int(user_message_id),
         db_path=db_path,
         observation_sink=observation_sink,
     )
@@ -5315,7 +5534,9 @@ def prepare_daily_turn(
     _feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
     _cold_reprepare: bool = False,
     _capacity_swap_reprepare: bool = False,
+    _wake: Optional[dict[str, Any]] = None,
 ) -> DailyTurnPlan:
+    """Chat entry; ``_wake`` ({rid, anchor, content}) makes it a proactive turn."""
     if not dc.enabled():
         raise DailyRuntimeError('DAILY_SOFT_WINDOW_ENABLED=0', error_code='daily_disabled')
 
@@ -5330,20 +5551,30 @@ def prepare_daily_turn(
         'request_received_at': round(time.time(), 6),
         'generation_records': [],
     }
-    owner = str(lease_owner or req_id)
+    wake = _wake
+    anchor = int(wake['anchor']) if wake else int(user_message_id)
+    owner = str(lease_owner or ('wake:' + str(wake['rid']) if wake else req_id))
     turn_lease = (
         copy.deepcopy(_turn_lease)
         if _turn_lease is not None
         else issue_turn_lease(
-            turn_id=req_id,
-            turn_mode='chat',
+            turn_id=('uh-a1-cold:' + str(wake['rid'])) if wake else req_id,
+            turn_mode='wake' if wake else 'chat',
             issued_from='default_policy',
         )
     )
-    user_row = _fetch_user_message(user_message_id, db_path=db_path)
-    user_created_at = _parse_message_created_at(user_row.get('created_at') or '')
+    user_row = (
+        {'content': str(wake['content']), 'created_at': ''}
+        if wake else _fetch_user_message(user_message_id, db_path=db_path)
+    )
+    user_created_at = (
+        None if wake
+        else _parse_message_created_at(user_row.get('created_at') or '')
+    )
     if now is not None:
         user_created_at = now
+    if user_created_at is None:
+        raise DailyRuntimeError('proactive turn needs now', error_code='wake_now_missing')
     origin_day = str(origin_local_day or chat_day_for_timestamp(user_created_at))
     turn_started_at = user_created_at
     lease_now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
@@ -5450,7 +5681,7 @@ def prepare_daily_turn(
                 context_id=context_id,
                 expected_context_epoch=context_epoch,
                 worker_id=WORKER_ID,
-                request_message_id=int(user_message_id),
+                request_message_id=anchor,
                 lease_owner=owner,
                 resident_key=resident_key,
                 bound_cursor_message_id=db_cursor,
@@ -5482,21 +5713,23 @@ def prepare_daily_turn(
             resident_key = str(claim['resident_key'])
         lease_generation = resident_generation
 
-        dc.record_daily_message_context(
-            int(user_message_id),
-            context_id=context_id,
-            context_epoch=context_epoch,
-            resident_generation=resident_generation,
-            role='user',
-            db_path=db_path,
-        )
+        if not wake:
+            dc.record_daily_message_context(
+                int(user_message_id),
+                context_id=context_id,
+                context_epoch=context_epoch,
+                resident_generation=resident_generation,
+                role='user',
+                db_path=db_path,
+            )
 
         is_cold = not _can_hot_turn(
             plan=DailyTurnPlan(
                 request_id=req_id, chat_id=chat_id, local_day=origin_day,
                 context_id=context_id, context_epoch=context_epoch,
                 resident_generation=resident_generation, resident_key=resident_key,
-                user_message_id=int(user_message_id), epoch_token={},
+                user_message_id=None if wake else int(user_message_id),
+                history_anchor_message_id=anchor, epoch_token={},
                 lease_owner=owner, is_cold=True, is_respawn=False,
                 cursor_before=db_cursor, assembly={}, manifest={},
                 db_path=db_path, tool_profile=DAILY_TOOL_PROFILE,
@@ -5506,6 +5739,12 @@ def prepare_daily_turn(
             resident=resident or object(),
             db_cursor=db_cursor,
         )
+        if wake and not is_cold and not (_cold_reprepare or _capacity_swap_reprepare):
+            # The caller proved the resident cold; it turned hot meanwhile.
+            raise DailyRuntimeError(
+                'proactive cold turn found a hot resident',
+                error_code='proactive_cold_resident_became_hot',
+            )
         if _capacity_swap_reprepare:
             # Same-context Capacity Swap: forged transcript already carries history.
             # Force hot-like assembly (no cold history / carryover / handoff replay).
@@ -5527,7 +5766,8 @@ def prepare_daily_turn(
             chat_id=chat_id,
             local_day=context_local_day,
             refreshed=refreshed,
-            user_message_id=int(user_message_id),
+            user_message_id=None if wake else int(user_message_id),
+            wake=wake,
             user_content=str(user_row.get('content') or ''),
             user_image_url=str(user_row.get('image_url') or ''),
             user_attachments=list(user_row.get('attachments') or []),
@@ -5564,6 +5804,56 @@ def prepare_daily_turn(
                 db_path=db_path,
             )
         raise
+
+
+def prepare_proactive_cold_turn(
+    *,
+    wake_run_id: str,
+    trigger_text: str,
+    now: datetime.datetime,
+    history_anchor_message_id: Optional[int] = None,
+    db_path: Optional[str] = None,
+    **kwargs: Any,
+) -> DailyTurnPlan:
+    """Proactive-round entry onto the shared Chat core (no request row, no user record)."""
+    anchor = history_anchor_message_id
+    if anchor is None:
+        conn = dc._connect(db_path)
+        try:
+            row = conn.execute('SELECT MAX(id) FROM chat_messages').fetchone()
+        finally:
+            conn.close()
+        anchor = int((row[0] if row else 0) or 0)
+    return prepare_daily_turn(
+        user_message_id=None,
+        db_path=db_path,
+        now=now,
+        _wake={'rid': str(wake_run_id), 'anchor': int(anchor), 'content': str(trigger_text)},
+        **kwargs,
+    )
+
+
+def _reprepare_same_request(plan: DailyTurnPlan, **kwargs: Any) -> DailyTurnPlan:
+    """Re-run prepare for the same request identity (Chat message or wake rid)."""
+    common = dict(
+        chat_id=plan.chat_id,
+        request_id=plan.request_id,
+        db_path=plan.db_path,
+        now=plan.user_created_at,
+        origin_local_day=plan.origin_local_day or plan.local_day,
+        lease_owner=plan.lease_owner,
+        _turn_lease=plan.turn_lease,
+        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
+        **kwargs,
+    )
+    if _request_identity(plan)[0] == 'wake':
+        return prepare_proactive_cold_turn(
+            wake_run_id=str(plan.wake_run_id),
+            trigger_text=plan.user_content,
+            history_anchor_message_id=_history_anchor(plan),
+            **common,
+        )
+    return prepare_daily_turn(user_message_id=_require_request_message_id(plan), **common)
 
 
 def _registered_generation_requires_respawn(
@@ -5669,7 +5959,7 @@ def reprepare_after_capacity_swap(
     watermark = cursor_watermark if cursor_watermark is not None else plan.cursor_before
     if watermark is None:
         # No prior cursor (rare): pin just before CURRENT user so hot assembly is legal.
-        watermark = max(0, int(plan.user_message_id) - 1)
+        watermark = max(0, _history_anchor(plan) - 1)
 
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
     gen = int(refreshed.get('resident_generation') or 0)
@@ -5718,17 +6008,9 @@ def reprepare_after_capacity_swap(
             error_code='capacity_swap_cursor_seed_failed',
         ) from exc
 
-    replacement = prepare_daily_turn(
-        user_message_id=plan.user_message_id,
-        chat_id=plan.chat_id,
-        request_id=plan.request_id,
-        db_path=plan.db_path,
-        now=plan.user_created_at,
-        origin_local_day=plan.origin_local_day or plan.local_day,
-        lease_owner=plan.lease_owner,
+    replacement = _reprepare_same_request(
+        plan,
         resident=resident,
-        _turn_lease=plan.turn_lease,
-        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -6034,17 +6316,9 @@ def reprepare_after_registered_session_change(
         close_local_resident_if_bound(resident, expected_key=plan.resident_key)
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
-    return prepare_daily_turn(
-        user_message_id=plan.user_message_id,
-        chat_id=plan.chat_id,
-        request_id=plan.request_id,
-        db_path=plan.db_path,
-        now=plan.user_created_at,
-        origin_local_day=plan.origin_local_day or plan.local_day,
-        lease_owner=plan.lease_owner,
+    return _reprepare_same_request(
+        plan,
         resident=resident,
-        _turn_lease=plan.turn_lease,
-        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -6431,7 +6705,7 @@ def finalize_transcript_mapping_after_success(
                 context_epoch=int(plan.context_epoch),
                 resident_generation=int(plan.resident_generation),
                 chat_id=str(plan.chat_id),
-                user_message_id=int(plan.user_message_id),
+                user_message_id=_require_request_message_id(plan),
                 assistant_message_id=int(assistant_message_id),
                 expected_start_offset=int(plan.transcript_start_offset),
                 observed_end_offset=int(plan.transcript_end_offset),
@@ -6544,7 +6818,8 @@ def _rebuild_daily_assembly_with_history_budget(
     assembly = dh.build_daily_window_context(
         chat_id=plan.chat_id,
         daily_context=refreshed,
-        current_user_message_id=int(plan.user_message_id),
+        current_user_message_id=plan.user_message_id,
+        history_anchor_message_id=_history_anchor(plan),
         static_system=static_system,
         is_cold=is_cold,
         is_respawn=is_respawn,
@@ -6869,7 +7144,7 @@ def _attempt_capacity_swap_before_stdin(
             owner_cursor_message_id=(
                 int(watermark)
                 if watermark is not None
-                else max(0, int(plan.user_message_id) - 1)
+                else max(0, _history_anchor(plan) - 1)
             ),
             owner_process_generation=target_process_generation,
             db_path=plan.db_path,
@@ -6990,7 +7265,7 @@ def _attempt_capacity_swap_before_stdin(
                 for value in tuple(getattr(handoff.candidate, 'selected_message_ids', ()) or ())
                 if int(value) > 0
             )
-            if int(plan.user_message_id) in selected_ids:
+            if plan.user_message_id in selected_ids:
                 raise DailyRuntimeError(
                     'current user entered Capacity forged JSONL',
                     error_code='context_plan_capacity_current_user_in_candidate',
@@ -7733,7 +8008,7 @@ def _commit_continuity_shadow_receipt(
                     continue
                 if mid > 0 and mid not in selected_ids:
                     selected_ids.append(mid)
-            current_user_id = int(plan.user_message_id)
+            current_user_id = _require_request_message_id(plan)
             candidate_sid = str(
                 capacity_pending.get('candidate_session_id') or ''
             ).strip()
@@ -7969,7 +8244,7 @@ def _commit_continuity_shadow_receipt(
                 )
                 return False
             new_members = _shadow_derive_members_for_ids(
-                (int(plan.user_message_id), int(assistant_message_id)),
+                (_require_request_message_id(plan), int(assistant_message_id)),
                 db_path=plan.db_path,
             )
             if len(new_members) != 1:
@@ -8005,7 +8280,7 @@ def _commit_continuity_shadow_receipt(
                 )
                 return False
             ids = list(_shadow_assembly_message_ids(plan))
-            ids.extend((int(plan.user_message_id), int(assistant_message_id)))
+            ids.extend((_require_request_message_id(plan), int(assistant_message_id)))
             unique_ids: list[int] = []
             for value in ids:
                 if value > 0 and value not in unique_ids:
@@ -8260,7 +8535,7 @@ def _observe_continuity_shadow(
                     result = build_daily_continuity_shadow_plan(
                         source_db_path=plan.db_path or dc.DEFAULT_DB_PATH,
                         shadow_store_path=store_path,
-                        current_user_message_id=int(plan.user_message_id),
+                        current_user_message_id=_require_request_message_id(plan),
                         budget_policy=policy,
                         accepted_fixed_sections=fixed_sections,
                     )
@@ -8673,10 +8948,16 @@ def ensure_resident_and_stream(
         reality_time_anchor = ''
         try:
             from chat.reality_context import build_reality_context
+            is_wake_request = _request_identity(plan)[0] == 'wake'
             reality = build_reality_context(
-                current_user_message_id=int(plan.user_message_id),
+                # A wake has no request row: "previous" is everything up to H.
+                current_user_message_id=(
+                    _history_anchor(plan) + 1 if is_wake_request
+                    else _require_request_message_id(plan)
+                ),
                 is_new_model_context=bool(cold_like),
                 db_path=plan.db_path,
+                include_weather=not is_wake_request,
             )
             reality_time_anchor = str(reality.get('time_anchor') or '').strip()
             plan.manifest['reality_context'] = {
@@ -8860,6 +9141,9 @@ def ensure_resident_and_stream(
             # enabled when the resident explicitly supports the kwarg.
             if 'idle_heartbeat_sec' in params or accepts_kwargs:
                 send_kwargs['idle_heartbeat_sec'] = 10.0
+            profile = getattr(plan, '_jsonl_finality_profile', None)
+            if profile and ('jsonl_finality_profile' in params or accepts_kwargs):
+                send_kwargs['jsonl_finality_profile'] = profile
             if plan.tool_profile == cc_resident.TOOL_PROFILE_UH_A0:
                 if not isinstance(plan.turn_lease, dict) or not plan.turn_lease:
                     raise DailyRuntimeError(
@@ -9619,7 +9903,7 @@ def _assert_hidden_flow_lease_for_finalize(
         raise ConflictError("hidden flow resident lease owner mismatch at finalize")
     if type(row["request_message_id"]) is not int or int(
         row["request_message_id"]
-    ) != int(plan.user_message_id):
+    ) != _require_request_message_id(plan):
         raise ConflictError("hidden flow resident lease request mismatch at finalize")
     try:
         expires_at = datetime.datetime.strptime(
@@ -9664,6 +9948,7 @@ def complete_daily_turn(
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
     unexpected_save_marker: bool = False,
+    finalize_pending: bool = True,
 ) -> dict[str, Any]:
     verify_epoch_token(plan)
     aid = int(assistant_message_id)
@@ -9671,7 +9956,11 @@ def complete_daily_turn(
         raise DailyRuntimeError('assistant_message_id required', error_code='assistant_missing')
 
     try:
-        cursor_result = dc.finalize_daily_assistant_and_advance_cursor(
+        # A proactive Wake row is already formal (source_kind='wake'): cursor only.
+        cursor_result = (
+            dc.finalize_daily_assistant_and_advance_cursor if finalize_pending
+            else dc.advance_resident_history_cursor
+        )(
             plan.context_id,
             plan.resident_generation,
             aid,
@@ -10198,6 +10487,78 @@ def handle_provider_success(
     return dict(plan.manifest)
 
 
+def prepare_proactive_cold_wake_round(
+    plan: DailyTurnPlan, *, resident: Any, silent: bool, jsonl_finality: Any,
+) -> Optional[dict[str, Any]]:
+    """Register the new session, then prove (spoken) or CAS-skip (silent) the cold round."""
+    from chat import unified_heartbeat_a1 as uh
+    if plan.transcript_observation_error_code or plan.transcript_path is None:
+        raise DailyRuntimeError(
+            'cold wake transcript observation incomplete',
+            error_code=str(plan.transcript_observation_error_code or 'transcript_observation_incomplete'),
+        )
+    existing = get_context_claude_session(
+        int(plan.context_id), int(plan.resident_generation), db_path=plan.db_path,
+    )
+    sid, start = str(plan.transcript_claude_session_id), int(plan.transcript_start_offset)
+    register_context_claude_session(
+        context_id=int(plan.context_id), context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation), chat_id=str(plan.chat_id),
+        claude_session_id=sid, cwd=str(plan.transcript_cwd), scan_offset=start,
+        source=resolve_finalize_registry_source(existing, default='daily_runtime'),
+        process_generation=int(plan.transcript_process_generation),
+        transcript_path=plan.transcript_path, db_path=plan.db_path,
+    )
+    watermark = uh.SharedTranscriptWatermark(
+        int(plan.context_id), int(plan.context_epoch), int(plan.resident_generation),
+        str(plan.resident_key), sid, str(plan.transcript_path), start,
+        int(plan.transcript_process_generation),
+    )
+    if not silent:
+        return uh.prepare_shared_transcript_native_binding(
+            watermark, resident, jsonl_finality=jsonl_finality,
+        )
+    try:  # audit only: the resident is retired right after
+        return uh.commit_shared_transcript_watermark(
+            watermark, resident, db_path=plan.db_path, jsonl_finality=jsonl_finality,
+        )
+    except Exception:
+        logger.warning('silent cold wake skip not recorded', exc_info=True)
+        return None
+
+
+def finalize_proactive_cold_wake(
+    plan: DailyTurnPlan, *, assistant_message_id: int, binding: dict[str, Any],
+) -> bool:
+    """After the executor committed A + native events: context row, cursor CAS, last-good, receipt."""
+    aid, end = int(assistant_message_id), int(binding['end_offset'])
+    window = dict(
+        context_id=int(plan.context_id), context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation),
+    )
+    dc.record_daily_message_context(aid, role='assistant', db_path=plan.db_path, **window)
+    plan.transcript_end_offset = end
+    _set_transcript_mapping_manifest(
+        plan, status='MAPPED', event_count=len(binding['events']), scan_offset=end,
+    )
+    complete_daily_turn(plan, assistant_message_id=aid, finalize_pending=False)
+    dc.upsert_resident_owner(
+        plan.context_id, plan.resident_generation, worker_id=plan.worker_id,
+        resident_key=plan.resident_key, bound_cursor_message_id=aid,
+        process_generation=int(plan.transcript_process_generation), db_path=plan.db_path,
+    )
+    note_same_context_last_good(
+        claude_session_id=str(plan.transcript_claude_session_id), transcript_end_offset=end,
+        source='daily_runtime', **window,
+    )
+    plan._same_context_last_good_proven = _same_context_last_good_matches(plan)
+    plan.manifest['context_receipt_last_good_proven'] = bool(plan._same_context_last_good_proven)
+    committed = bool(_commit_production_context_receipt(plan, assistant_message_id=aid))
+    if committed:
+        _consume_feedback_after_success(plan)
+    return committed
+
+
 def handle_provider_failure(
     plan: DailyTurnPlan,
     *,
@@ -10223,17 +10584,9 @@ def reprepare_after_hot_cold_mismatch(
         close_local_resident_if_bound(resident, expected_key=plan.resident_key)
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
-    return prepare_daily_turn(
-        user_message_id=plan.user_message_id,
-        chat_id=plan.chat_id,
-        request_id=plan.request_id,
-        db_path=plan.db_path,
-        now=plan.user_created_at,
-        origin_local_day=plan.origin_local_day or plan.local_day,
-        lease_owner=plan.lease_owner,
+    return _reprepare_same_request(
+        plan,
         resident=resident,
-        _turn_lease=plan.turn_lease,
-        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,

@@ -277,6 +277,18 @@ def compute_anchor_token_budget() -> int:
     return max(512, int(cold_safety_margin()) // 2)
 
 
+def _current_request_id(plan: Any) -> int:
+    """Chat request row id; -1 (matches no row) for a proactive turn."""
+    value = plan.user_message_id
+    return -1 if value is None else int(value)
+
+
+def _before_current(plan: Any) -> int:
+    """Exclusive history cut: the request row, or one past H for a proactive turn."""
+    value = plan.user_message_id
+    return int(value) if value is not None else int(plan.history_anchor_message_id) + 1
+
+
 def assert_current_user_excluded(
     *,
     candidate: CapacitySwapCandidate,
@@ -837,7 +849,7 @@ def prepare_capacity_swap_for_context_plan(
             context_id=source_ctx,
             context_epoch=source_epoch,
             resident_generation=source_gen,
-            before_message_id=int(plan.user_message_id),
+            before_message_id=_before_current(plan),
             db_path=plan.db_path,
         )
         if registry_mapping_lags_watermark(registry, watermark):
@@ -891,8 +903,8 @@ def prepare_capacity_swap_for_context_plan(
         for _member, ids in members
         for mid in ids
     }
-    if int(plan.user_message_id) in raw_ids or (
-        int(anchor_message_id) == int(plan.user_message_id)
+    if _current_request_id(plan) in raw_ids or (
+        int(anchor_message_id) == _current_request_id(plan)
         and anchor_section is not None
         and anchor_status != AnchorStatus.ANCHOR_UNAVAILABLE
     ):
@@ -904,7 +916,7 @@ def prepare_capacity_swap_for_context_plan(
             conn,
             context_id=source_ctx,
             context_epoch=source_epoch,
-            current_user_message_id=int(plan.user_message_id),
+            current_user_message_id=_current_request_id(plan),
             cursor_before=plan.cursor_before,
         )
         mids = [int(m['id']) for m in formal]
@@ -1174,7 +1186,7 @@ def prepare_capacity_swap_for_context_plan(
                 'context_plan_capacity_raw_mapping_missing',
                 ['native event mapping missing:%s' % event_uuid],
             )
-        if message_id == int(plan.user_message_id):
+        if message_id == _current_request_id(plan):
             return _failure(
                 'context_plan_capacity_current_user_in_candidate',
             )
@@ -1271,7 +1283,7 @@ def prepare_capacity_swap_for_plan(
         context_id=source_ctx,
         context_epoch=source_epoch,
         resident_generation=source_gen,
-        before_message_id=int(plan.user_message_id),
+        before_message_id=_before_current(plan),
         db_path=plan.db_path,
     )
     if registry_mapping_lags_watermark(registry, watermark):
@@ -1347,7 +1359,7 @@ def prepare_capacity_swap_for_plan(
             conn,
             context_id=source_ctx,
             context_epoch=source_epoch,
-            current_user_message_id=int(plan.user_message_id),
+            current_user_message_id=_current_request_id(plan),
             cursor_before=plan.cursor_before,
         )
         mids = [int(m['id']) for m in formal]
@@ -1430,7 +1442,7 @@ def prepare_capacity_swap_for_plan(
     try:
         assert_current_user_excluded(
             candidate=cand,
-            current_user_message_id=int(plan.user_message_id),
+            current_user_message_id=_current_request_id(plan),
             current_user_content=str(getattr(plan, 'user_content', '') or ''),
         )
     except CapacitySwapRuntimeError as exc:
