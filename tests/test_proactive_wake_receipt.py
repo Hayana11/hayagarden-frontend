@@ -381,6 +381,14 @@ class ColdWakeOutcomeTests(_World):
         self.assertEqual(dc.get_daily_context_by_id(1, db_path=self.db)['resident_generation'], 2)
         self.assertTrue(self.next_chat().is_cold)
 
+    def test_anchor_context_row_commits_with_the_message(self):
+        with mock.patch.object(dr.dc, 'record_daily_message_context', side_effect=RuntimeError('crash')):
+            body = self.decide()
+        self.assertEqual(body['action'], 'message')
+        a = self.q("SELECT id FROM chat_messages WHERE source_kind='wake'")[0][0]
+        self.assertEqual(self.q('SELECT context_id, context_epoch, resident_generation, role '
+                                'FROM daily_message_contexts WHERE message_id=?', a), [(1, 1, 1, 'assistant')])
+
     def test_silent_cold_wake_retires_resident_without_receipt(self):
         self.resident.script = [('text', '[[SILENT]]')]
         body = self.decide()

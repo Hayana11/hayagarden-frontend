@@ -356,6 +356,18 @@ def execute(action: str, thoughts: str, content: str,
                     binding=native_transcript_binding,
                     window_identity=window_identity,
                 )
+                if wake_cache_info.get('proactive_cold_start') is True:
+                    # Same transaction as A: a crash can never leave A outside its window.
+                    from chat import daily_context as _dc
+                    conn.execute(
+                        'INSERT INTO daily_message_contexts (message_id, context_id, '
+                        'context_epoch, resident_generation, role, created_at) '
+                        "VALUES (?,?,?,?,'assistant',?)",
+                        (int(message_row[0]), int(native_transcript_binding['context_id']),
+                         int(native_transcript_binding['context_epoch']),
+                         int(native_transcript_binding['resident_generation']),
+                         _dc._now_local_str()),
+                    )
                 if 'cache_info' in wake_columns:
                     # The skip chain must also see a spoken Wake's native range.
                     span = {k: int(native_transcript_binding[k]) for k in (
