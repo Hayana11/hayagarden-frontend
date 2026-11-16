@@ -256,12 +256,24 @@ def chat_speaker(author: Any) -> str:
     return raw or "未知"
 
 
+def _sender_names(value: Any) -> list[str]:
+    """Upstream readonly ``from`` is a list of ``{"name": ...}``; tolerate a plain string too."""
+    if isinstance(value, list):
+        return [str(item.get("name") or "").strip() for item in value
+                if isinstance(item, dict) and str(item.get("name") or "").strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
 def _gmail_speaker(message: dict[str, Any]) -> str:
-    """Upstream readonly messages carry ``direction`` (+ ``counterparts`` / contact name when listed)."""
-    if message.get("direction") == "outgoing":
+    """费奥多尔 when he is the sender; any other sender's raw display name is not trusted.
+
+    Production ``/readonly/messages/<id>`` has no ``direction``; ``from`` is ``[{"name": ...}]``.
+    An incoming letter stays INCOMING_UNNAMED and the Candidate's counterparts name it."""
+    if message.get("direction") == "outgoing" or "费奥多尔" in _sender_names(message.get("from")):
         return "费奥多尔"
-    name = message.get("speaker") or message.get("from") or message.get("contactName") or message.get("counterpart")
-    return str(name).strip() if name else INCOMING_UNNAMED
+    return INCOMING_UNNAMED
 
 
 def resolve_media_asset(ref: str, *, media_db: str | None = None, media_root: str | None = None) -> Resolved | None:
@@ -443,7 +455,9 @@ def _speaker_label(item: Resolved, counterparts: tuple[str, ...] = ()) -> str:
         return "机器标注，不是任何人说的话"
     if item.speaker is None:
         return "发言人：未标注"
-    if item.speaker == INCOMING_UNNAMED and counterparts:  # upstream gave no name: use the Candidate's counterparts
+    if item.speaker == INCOMING_UNNAMED and len(counterparts) == 1:  # the thread's one counterpart wrote it
+        return "发言人：" + counterparts[0]
+    if item.speaker == INCOMING_UNNAMED and counterparts:
         return f"发言人：{INCOMING_UNNAMED}（本线程对方：{'、'.join(counterparts)}）"
     return "发言人：" + item.speaker
 

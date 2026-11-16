@@ -504,7 +504,7 @@ class SpeakerAndHayaTest(ReviewTestCase):
         prompt = request.prompt_text
         for expected in ("[chat_messages:1][发言人：哈娅]", "[chat_messages:2][发言人：费奥多尔]",
                          "[chat_messages:3][发言人：bot9]", "[gmail_message:o][发言人：费奥多尔]",
-                         "[gmail_message:i][发言人：incoming 来信人（本线程对方：哈娅）]",
+                         "[gmail_message:i][发言人：哈娅]",
                          "[media_asset:m][机器标注，不是任何人说的话]"):
             self.assertIn(expected, prompt)
 
@@ -521,6 +521,31 @@ class SpeakerAndHayaTest(ReviewTestCase):
         out = review.resolve_gmail_message("gmail_message:a", reader=lambda path: {"direction": "outgoing", "text": "x"})
         inc = review.resolve_gmail_message("gmail_message:a", reader=lambda path: {"direction": "incoming", "text": "x"})
         self.assertEqual(("费奥多尔", review.INCOMING_UNNAMED), (out.speaker, inc.speaker))
+
+    def test_gmail_resolver_reads_production_from_list_shape(self):
+        # Production /readonly/messages/<id>: no direction, from = [{"name": ...}].
+        fedya = review.resolve_gmail_message("gmail_message:o", reader=lambda path: {
+            "from": [{"name": "费奥多尔"}], "to": [{"name": "阿蒂尔"}], "text": "x"})
+        haya = review.resolve_gmail_message("gmail_message:h", reader=lambda path: {
+            "from": [{"name": "Hayana（未备注 · AB12）"}], "to": [{"name": "费奥多尔"}], "text": "y"})
+        self.assertEqual("费奥多尔", fedya.speaker)
+        self.assertEqual(review.INCOMING_UNNAMED, haya.speaker)  # raw display name is not trusted
+        self.assertEqual("发言人：费奥多尔", review._speaker_label(fedya, ("阿蒂尔",)))
+        self.assertEqual("发言人：哈娅", review._speaker_label(haya, ("哈娅",)))
+        self.assertEqual("发言人：阿蒂尔", review._speaker_label(haya, ("阿蒂尔",)))
+        self.assertEqual(f"发言人：{review.INCOMING_UNNAMED}（本线程对方：阿蒂尔、皮若尼耶）",
+                         review._speaker_label(haya, ("阿蒂尔", "皮若尼耶")))
+
+    def test_haya_mail_in_production_shape_reaches_support_prompt_as_haya(self):
+        self.evidence["gmail_message:h"] = review.resolve_gmail_message(
+            "gmail_message:h", reader=lambda path: {"from": [{"name": "Hayana（未备注 · AB12）"}],
+                                                     "to": [{"name": "费奥多尔"}], "text": "我想你了"})
+        self.add("哈娅在信里说她想费奥多尔。", refs=("gmail_message:h",), attribution="haya",
+                 counterparts=[{"contact_id": "c_x", "name": "哈娅"}])
+        self.run_review(dry_run=True)
+        prompt = self.gen.calls[0].prompt_text
+        self.assertIn("[gmail_message:h][发言人：哈娅]", prompt)
+        self.assertNotIn("未备注", prompt.split("[gmail_message:h]")[1].split("]")[0])
 
     def test_haya_attribution_skips_penpal_guard_and_maps_epistemic_status(self):
         haya = self.add("哈娅说费奥多尔是她最信任的人。", attribution="haya")
