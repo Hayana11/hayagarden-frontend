@@ -39,6 +39,7 @@ attachments/
 gallery.db
 gallery/
 client_errors.log
+client_errors.log.*
 static/uploads/
 memories.db.bak*
 # B1-1B Planner Shadow observations (non-authoritative JSONL)
