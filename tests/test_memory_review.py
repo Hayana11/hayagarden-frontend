@@ -689,12 +689,13 @@ class CliAndDeployTest(ReviewTestCase):
     def test_status_flag_prints_health(self):
         self.assertEqual(0, review.main(["--status", "--db", self.db]))
 
-    def test_cron_runs_dry_after_both_dehydrators_and_deploy_installs_with_rollback(self):
+    def test_cron_commits_after_both_dehydrators_and_deploy_installs_with_rollback(self):
         cron = (ROOT / "deploy/cron.d/hayagarden-memory-review").read_text()
         self.assertIn("CRON_TZ=UTC", cron)
         self.assertIn("15 20 * * * root cd /opt/frontend &&", cron)
         self.assertIn("/usr/bin/flock -n /run/lock/hayagarden-memory-review.lock", cron)
-        self.assertIn("python3.11 -m tools.memory_review --dry-run", cron)
+        self.assertIn("python3.11 -m tools.memory_review >> /var/log/hayagarden-memory-review.log", cron)
+        self.assertNotIn("--dry-run", cron)
         deploy = (ROOT / "scripts/deploy-frontend.sh").read_text()
         for line in (
             'REVIEW_CRON_PATH="/etc/cron.d/hayagarden-memory-review"',
