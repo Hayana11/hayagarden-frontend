@@ -23,7 +23,7 @@ ai-penpal-mail → /readonly 接口 → Mail Dehydrator → Candidate
 ## 规则
 
 - `source_type=gmail_message`，`source_refs` 精确到 `gmail_message:<id>`，`derived_refs` 只放 `gmail_thread:<threadId>`。
-- 每条 Candidate 带 `payload.attribution`：`fedya`（必须引用至少一封 outgoing）、`penpal`（至少一封 incoming）、`mutual`（两个方向都要引用）。方向对不上的候选直接丢弃。笔友对费奥多尔的描述只能以 `penpal` 落为“笔友说”。
+- 每条 Candidate 带 `payload.attribution`：`fedya`（必须引用至少一封 outgoing）、`penpal`（至少一封来自非哈娅联系人的 incoming）、`mutual`（两个方向都要引用）、`haya`（见下节，仅在配置了哈娅的联系人时可用）。方向对不上的候选直接丢弃。笔友对费奥多尔的描述只能以 `penpal` 落为“笔友说”。
 - 回信里引用的旧信（`>` 行、`On … wrote:`、`在 … 写道：`、原始邮件/转发分隔线之后）在送模型前去掉，避免旧话被算到回信人头上。
 - 附件只给文件名和类型，不读内容。
 - 发件人全是 no-reply / 通知类地址的 thread 不调用模型，直接记为已处理。
@@ -41,3 +41,20 @@ python3 -m tools.mail_memory_dehydrator --max-threads 5
 ```
 
 定时任务：`deploy/cron.d/hayagarden-mail-memory-dehydrator`，每天 19:45（在日采集 19:15 之后）。模型沿用正式 Chat authority，与日采集同一条读取保护。
+
+## 哈娅自己的来信
+
+哈娅本人也会给费奥多尔的 Gmail 写信，不应被当成笔友。配置哈娅在上游的联系人 id（逗号分隔）：
+
+- `runtime_config` 键 `mail.haya_contact_ids`，例如 `c_xxx,c_yyy`。读取方式：以 `mode=ro` + `query_only` 只读打开 `--db`（正式库），在任何写入和模型调用之前读一次；库、表或键不存在、值为空都视为“未配置”，行为与以前完全一致（prompt 也不变）。
+- 命令行 `--haya-contact-ids c_xxx,c_yyy` 覆盖 runtime_config。
+
+配置后：
+
+- 来自这些联系人的 incoming 信，speaker 与 counterpart 都写“哈娅”（不是联系人名字）；Candidate 的 `payload.counterparts` 保留 `contact_id`，`name` 写“哈娅”。哈娅的 thread 不会因联系人名字像通知邮件而被当成自动邮件跳过。
+- 新增 `attribution=haya`：哈娅写给费奥多尔的信，证据必须包含至少一封哈娅写来的 incoming。
+- `penpal` 的证据必须包含至少一封非哈娅联系人的 incoming，只引用哈娅来信的 `penpal` 会被丢弃。
+- 费奥多尔回给哈娅的信仍是 `fedya`；双方确认的约定仍是 `mutual`（outgoing + incoming）。
+- Review Core 对 `haya` 不走“笔友提到费奥多尔/哈娅”的保护，Kernel 的 `epistemic_status` 为 `derived_from_evidence`（与聊天里哈娅的发言同义）。
+
+改规则后想让被判“无依据”的 Candidate 重新审核，见 `docs/memory-review-core.md` 的 `--requeue-policy-rejected`。

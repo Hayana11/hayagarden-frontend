@@ -356,5 +356,11 @@ class DailyMemoryDehydratorTest(unittest.TestCase):
         self.assertIn("no longer scheduled", source[:300])
 
 
+class DailySpeakerPromptTest(unittest.TestCase):
+    def test_system_prompt_maps_authors_to_speakers(self):
+        from tools import daily_memory_dehydrator as daily
+        self.assertIn("author=user/hayana/haya 的发言是哈娅说的，author=assistant 的发言是费奥多尔说的", daily._SYSTEM)
+
+
 if __name__ == "__main__":
     unittest.main()

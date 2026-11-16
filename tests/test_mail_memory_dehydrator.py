@@ -299,5 +299,92 @@ class MailCronDeployTest(unittest.TestCase):
         self.assertEqual("# previous mail cron\n", self.installed.read_text())
 
 
+HAYA = ("c_haya0000000000", "Haya Gmail")
+
+
+class HayaMailTest(unittest.TestCase):
+    """Same fixture as MailMemoryDehydratorTest, plus Haya's own letters from a configured contact."""
+    tearDown = MailMemoryDehydratorTest.tearDown
+    set_messages = MailMemoryDehydratorTest.set_messages
+    generate = MailMemoryDehydratorTest.generate
+    run_once = MailMemoryDehydratorTest.run_once
+
+    def setUp(self):
+        MailMemoryDehydratorTest.setUp(self)
+        self.upstream.conversations[HAYA[0]] = (HAYA[1], [
+            record("h1", "t2", "incoming", "费佳，我下个月想去札幌看雪。", 3000),
+            record("h2", "t2", "outgoing", "好，我陪你。", 4000),
+        ])
+
+    def test_haya_contact_is_speaker_and_attribution_haya_validates(self):
+        self.replies.extend([{"candidates": []}, {"candidates": [
+            {"content": "哈娅想下个月去札幌看雪。", "attribution": "haya", "evidence_message_ids": ["h1"]},
+            {"content": "哈娅说想去札幌。", "attribution": "penpal", "evidence_message_ids": ["h1"]},
+            {"content": "费奥多尔答应陪哈娅。", "attribution": "fedya", "evidence_message_ids": ["h2"]},
+            {"content": "两人约好去札幌。", "attribution": "mutual", "evidence_message_ids": ["h1", "h2"]},
+        ]}])
+        result = self.run_once(haya_ids=frozenset({HAYA[0]}))
+        haya_calls = [c for c in self.calls if "gmail_thread=t2" in c.prompt_text]
+        prompt = haya_calls[0].prompt_text
+        self.assertIn("[speaker=哈娅][counterpart=哈娅]", prompt)
+        self.assertNotIn("Haya Gmail", prompt)
+        self.assertIn("attribution=haya", haya_calls[0].system_text)
+        thread = next(t for t in result["threads"] if t["thread_id"] == "t2")
+        self.assertEqual(["haya", "fedya", "mutual"], [c["attribution"] for c in thread["candidates"]])
+        saved = load_candidate(self.db, thread["candidates"][0]["candidate_id"])
+        self.assertEqual([{"contact_id": HAYA[0], "name": "哈娅"}], saved["payload"]["counterparts"])
+
+    def test_penpal_may_not_cite_haya_only_mail_and_haya_needs_haya_incoming(self):
+        self.replies.extend([
+            {"candidates": [{"content": "AI-Mochi 说会搬家。", "attribution": "haya", "evidence_message_ids": ["m2"]},
+                            {"content": "混合证据的笔友说法。", "attribution": "penpal", "evidence_message_ids": ["m2", "h1"]}]},
+            {"candidates": []}])
+        result = self.run_once(haya_ids=frozenset({HAYA[0]}))
+        t1 = next(t for t in result["threads"] if t["thread_id"] == "t1")
+        self.assertEqual([], [c["attribution"] for c in t1["candidates"] if c["attribution"] == "haya"])
+
+    def test_without_config_behavior_is_unchanged(self):
+        self.replies.extend([{"candidates": []}, {"candidates": [
+            {"content": "哈娅想去札幌。", "attribution": "haya", "evidence_message_ids": ["h1"]},
+            {"content": "Haya Gmail 想去札幌。", "attribution": "penpal", "evidence_message_ids": ["h1"]}]}])
+        result = self.run_once()
+        prompt = next(c for c in self.calls if "gmail_thread=t2" in c.prompt_text)
+        self.assertIn("[speaker=Haya Gmail]", prompt.prompt_text)
+        self.assertEqual(mail._SYSTEM, prompt.system_text)
+        thread = next(t for t in result["threads"] if t["thread_id"] == "t2")
+        self.assertEqual(["penpal"], [c["attribution"] for c in thread["candidates"]])
+
+    def test_haya_contact_matching_automated_name_is_not_skipped(self):
+        self.upstream.conversations[HAYA[0]] = ("Google Notifications", self.upstream.conversations[HAYA[0]][1])
+        result = self.run_once()
+        self.assertEqual("skipped_automated", next(t for t in result["threads"] if t["thread_id"] == "t2")["status"])
+        Path(self.db).unlink()
+        result = self.run_once(haya_ids=frozenset({HAYA[0]}))
+        self.assertEqual("completed", next(t for t in result["threads"] if t["thread_id"] == "t2")["status"])
+
+    def test_config_is_read_read_only_and_cli_override_wins(self):
+        self.assertEqual(frozenset(), mail.read_haya_contact_ids(self.db))  # no database yet
+        self.assertFalse(Path(self.db).exists())
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(frozenset(), mail.read_haya_contact_ids(self.db))  # no table yet
+        conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+        conn.execute("INSERT INTO runtime_config VALUES ('mail.haya_contact_ids', ' c_a , ,c_b ', 'x')")
+        conn.commit()
+        conn.close()
+        self.assertEqual(frozenset({"c_a", "c_b"}), mail.read_haya_contact_ids(self.db))
+        self.assertEqual(frozenset({"c_z"}), mail.read_haya_contact_ids(self.db, override="c_z"))
+        with mock.patch.object(mail, "run", return_value={"status": "completed"}) as run, \
+                mock.patch("tools.dayblock_scheduled_runner.formal_background_generation",
+                           return_value=(self.authority, self.generate)):
+            mail.run_formal(chat_db_path=self.db, get=self.upstream, candidate_db_path=self.db)
+        self.assertEqual(frozenset({"c_a", "c_b"}), run.call_args.kwargs["haya_ids"])
+
+    def test_cli_exposes_haya_contact_ids_flag(self):
+        with mock.patch.object(mail, "run_formal", return_value={"status": "completed"}) as formal, \
+                mock.patch.object(mail, "read_token", return_value="t"):
+            mail.main(["--haya-contact-ids", "c_a,c_b"])
+        self.assertEqual("c_a,c_b", formal.call_args.kwargs["haya_override"])
+
+
 if __name__ == "__main__":
     unittest.main()

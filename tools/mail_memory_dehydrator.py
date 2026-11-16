@@ -36,7 +36,9 @@ MAX_CHUNK_CHARS = 32_000
 MAX_CONTEXT_CHARS = 8_000
 MAX_MESSAGE_CHARS = 24_000
 DEFAULT_MAX_THREADS = 20
-ATTRIBUTIONS = ("fedya", "penpal", "mutual")
+ATTRIBUTIONS = ("fedya", "penpal", "mutual", "haya")
+HAYA_CONFIG_KEY = "mail.haya_contact_ids"
+HAYA_NAME = "哈娅"
 
 # Upstream hides addresses behind contact names, so notification senders are recognised by name.
 _AUTOMATED_NAME = re.compile(
@@ -58,6 +60,53 @@ _SYSTEM = """你在读费奥多尔（AI）与笔友之间的一条邮件往来�
 content 里用笔友的名字称呼对方，写成自包含的一句或几句话。
 role=context 的信只用来理解上下文，已经处理过；不要只凭 context 生成候选，每条候选至少引用一封 role=new 的信。
 只返回 JSON：{"candidates":[{"content":"...","attribution":"fedya|penpal|mutual","evidence_message_ids":["<邮件 id>"]}]}。没有值得记录的内容时返回 {"candidates":[]}。证据只能引用本段输入里出现的邮件 id。"""
+
+# Added to the attribution rules only when mail.haya_contact_ids is configured.
+_HAYA_RULE = "\n- attribution=haya：哈娅写给费奥多尔的信，speaker=哈娅 的 incoming；证据必须包含至少一封哈娅写来的 incoming。哈娅的话不是“笔友的说法”，不要标成 penpal；费奥多尔回给哈娅的信仍是 fedya。"
+_HAYA_NOTE = "；speaker=哈娅 的 incoming 是哈娅写来的信，不是笔友"
+
+
+def system_prompt(haya_ids: frozenset[str] = frozenset()) -> str:
+    """The system prompt; unchanged unless Haya's contact ids are configured."""
+    if not haya_ids:
+        return _SYSTEM
+    text = _SYSTEM.replace("incoming 是笔友写来的信。", "incoming 是笔友写来的信" + _HAYA_NOTE + "。", 1)
+    text = text.replace("\n- attribution=mutual", _HAYA_RULE + "\n- attribution=mutual", 1)
+    text = text.replace("attribution=penpal：笔友说的事，", "attribution=penpal：笔友（不含哈娅）说的事，", 1)
+    text = text.replace("证据必须包含至少一封 incoming。\n- attribution=haya", "证据必须包含至少一封非哈娅的 incoming。\n- attribution=haya", 1)
+    return text.replace("fedya|penpal|mutual", "fedya|penpal|mutual|haya")
+
+
+def parse_contact_ids(value: Any) -> frozenset[str]:
+    return frozenset(part.strip() for part in str(value or "").split(",") if part.strip())
+
+
+def read_haya_contact_ids(db_path: str, *, override: str = "") -> frozenset[str]:
+    """Haya's upstream contact ids: the CLI override, else runtime_config ``mail.haya_contact_ids``.
+
+    The formal DB is opened ``mode=ro`` with ``query_only`` (no config_store import, so nothing
+    can create tables or write), and this runs before any write or model call. A missing
+    database, table or key means "not configured" (current behaviour)."""
+    if str(override or "").strip():
+        return parse_contact_ids(override)
+    try:
+        conn = sqlite3.connect("file:" + Path(db_path).expanduser().resolve().as_posix() + "?mode=ro",
+                               uri=True, timeout=5)
+    except (sqlite3.Error, OSError):
+        return frozenset()
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        row = conn.execute("SELECT value FROM runtime_config WHERE key=?", (HAYA_CONFIG_KEY,)).fetchone()
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        conn.close()
+    return parse_contact_ids(row[0] if row else "")
+
+
+def _is_haya(message: "MailMessage", haya_ids: frozenset[str]) -> bool:
+    """An incoming letter listed under one of Haya's contacts (outgoing is always Fedya's)."""
+    return message.direction == "incoming" and any(cid in haya_ids for cid, _name in message.counterparts)
 
 
 @dataclass(frozen=True)
@@ -205,17 +254,19 @@ def mark_processed(db_path: str, thread_id: str, message_ids: Iterable[str]) -> 
 
 # --- prompt --------------------------------------------------------------------------------
 
-def _names(message: MailMessage) -> str:
-    return "、".join(dict.fromkeys(name for _id, name in message.counterparts))
+def _names(message: MailMessage, haya_ids: frozenset[str] = frozenset()) -> str:
+    return "、".join(dict.fromkeys(HAYA_NAME if cid in haya_ids else name for cid, name in message.counterparts))
 
 
-def message_text(message: MailMessage, *, role: str, limit: int = MAX_MESSAGE_CHARS) -> str:
+def message_text(message: MailMessage, *, role: str, limit: int = MAX_MESSAGE_CHARS,
+                 haya_ids: frozenset[str] = frozenset()) -> str:
     body = strip_quoted_reply(message.text)
     cut = len(body) > limit
     if cut:
         body = body[:limit]
-    counterpart = _names(message) or "未知"
-    speaker = "费奥多尔" if message.direction == "outgoing" else counterpart
+    counterpart = _names(message, haya_ids) or "未知"
+    speaker = ("费奥多尔" if message.direction == "outgoing"
+               else HAYA_NAME if _is_haya(message, haya_ids) else counterpart)
     lines = [
         f"[mail:{message.id}][role={role}][direction={message.direction}]"
         f"[speaker={speaker}][counterpart={counterpart}][date={message.date}]",
@@ -233,12 +284,13 @@ def message_text(message: MailMessage, *, role: str, limit: int = MAX_MESSAGE_CH
     return "\n".join(lines)
 
 
-def _context_block(previous: list[MailMessage], budget: int = MAX_CONTEXT_CHARS) -> tuple[str, list[MailMessage]]:
+def _context_block(previous: list[MailMessage], budget: int = MAX_CONTEXT_CHARS,
+                   haya_ids: frozenset[str] = frozenset()) -> tuple[str, list[MailMessage]]:
     selected: list[str] = []
     used: list[MailMessage] = []
     size = 0
     for message in reversed(previous):
-        text = message_text(message, role="context", limit=max(budget // 2, 1))
+        text = message_text(message, role="context", limit=max(budget // 2, 1), haya_ids=haya_ids)
         if selected and size + len(text) > budget:
             break
         selected.append(text)
@@ -247,14 +299,15 @@ def _context_block(previous: list[MailMessage], budget: int = MAX_CONTEXT_CHARS)
     return "\n\n".join(reversed(selected)), list(reversed(used))
 
 
-def _chunk_new(new: list[MailMessage], budget: int) -> list[list[MailMessage]]:
+def _chunk_new(new: list[MailMessage], budget: int,
+               haya_ids: frozenset[str] = frozenset()) -> list[list[MailMessage]]:
     if budget < 1:
         raise ValueError("chunk character budget must be positive")
     chunks: list[list[MailMessage]] = []
     current: list[MailMessage] = []
     size = 0
     for message in new:
-        length = len(message_text(message, role="new")) + 2
+        length = len(message_text(message, role="new", haya_ids=haya_ids)) + 2
         if current and size + length > budget:
             chunks.append(current)
             current, size = [], 0
@@ -268,7 +321,7 @@ def _chunk_new(new: list[MailMessage], budget: int) -> list[list[MailMessage]]:
 # --- validation ----------------------------------------------------------------------------
 
 def _parse_and_validate(result: Any, *, allowed: dict[str, MailMessage], new_ids: set[str],
-                        thread_id: str) -> tuple[int, list[dict[str, Any]]]:
+                        thread_id: str, haya_ids: frozenset[str] = frozenset()) -> tuple[int, list[dict[str, Any]]]:
     raw = getattr(result, "text", result)
     if not isinstance(raw, str):
         raise ValueError("mail_dehydrator_output_not_text")
@@ -297,10 +350,18 @@ def _parse_and_validate(result: Any, *, allowed: dict[str, MailMessage], new_ids
         if not new_ids.intersection(message_ids):
             _LOG.warning("mail dehydrator discarded context-only candidate: thread=%s item=%d", thread_id, index)
             continue
-        directions = {allowed[value].direction for value in message_ids}
-        required = {"fedya": {"outgoing"}, "penpal": {"incoming"},
-                    "mutual": {"outgoing", "incoming"}}[attribution]
-        if not required.issubset(directions):
+        cited = [allowed[value] for value in message_ids]
+        directions = {message.direction for message in cited}
+        haya_incoming = any(_is_haya(message, haya_ids) for message in cited)
+        other_incoming = any(message.direction == "incoming" and not _is_haya(message, haya_ids)
+                             for message in cited)
+        if attribution == "haya":
+            ok = haya_incoming
+        elif attribution == "penpal":
+            ok = other_incoming  # Haya-only evidence is never a penpal's claim
+        else:
+            ok = {"fedya": {"outgoing"}, "mutual": {"outgoing", "incoming"}}[attribution].issubset(directions)
+        if not ok:
             _LOG.warning("mail dehydrator discarded misattributed candidate: thread=%s item=%d attribution=%s",
                          thread_id, index, attribution)
             continue
@@ -318,9 +379,10 @@ def _candidate_id(thread_id: str, content: str, attribution: str, source_refs: l
     return "mail_dehydrator:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def _counterparts(messages: Iterable[MailMessage]) -> list[dict[str, str]]:
+def _counterparts(messages: Iterable[MailMessage], haya_ids: frozenset[str] = frozenset()) -> list[dict[str, str]]:
     seen = dict.fromkeys(pair for message in messages for pair in message.counterparts)
-    return [{"contact_id": contact_id, "name": name} for contact_id, name in seen]
+    return [{"contact_id": contact_id, "name": HAYA_NAME if contact_id in haya_ids else name}
+            for contact_id, name in seen]
 
 
 # --- run -----------------------------------------------------------------------------------
@@ -328,17 +390,19 @@ def _counterparts(messages: Iterable[MailMessage]) -> list[dict[str, str]]:
 def dehydrate_thread(
     candidate_db_path: str, *, thread_id: str, messages: list[MailMessage], new_ids: set[str],
     authority: Any, generate_fn: Callable[[Any, Any], Any], chunk_chars: int = MAX_CHUNK_CHARS,
+    haya_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     new = [message for message in messages if message.id in new_ids]
     previous = [message for message in messages if message.id not in new_ids]
-    if all(_AUTOMATED_NAME.search(name) for message in new for _id, name in message.counterparts) \
+    if all(_AUTOMATED_NAME.search(name) and cid not in haya_ids
+           for message in new for cid, name in message.counterparts) \
             or not any(message.counterparts for message in new):
         return {"thread_id": thread_id, "status": "skipped_automated", "model_calls": 0,
                 "candidates": [], "new_message_ids": sorted(new_ids)}
-    context_text, context_messages = _context_block(previous)
+    context_text, context_messages = _context_block(previous, haya_ids=haya_ids)
     proposals: list[dict[str, Any]] = []
     model_candidate_count = 0
-    chunks = _chunk_new(new, chunk_chars)
+    chunks = _chunk_new(new, chunk_chars, haya_ids)
     for index, chunk in enumerate(chunks, 1):
         chunk_new_ids = {message.id for message in chunk}
         allowed = {message.id: message for message in [*context_messages, *chunk]}
@@ -346,10 +410,10 @@ def dehydrate_thread(
         if context_text:
             parts.append("=== 已处理过的旧信（role=context，仅供理解）===\n" + context_text)
         parts.append("=== 本次要判断的新信（role=new）===\n" + "\n\n".join(
-            message_text(message, role="new") for message in chunk
+            message_text(message, role="new", haya_ids=haya_ids) for message in chunk
         ))
         request = BackgroundGenerationRequest(
-            system_text=_SYSTEM, prompt_text="\n\n".join(parts), max_tokens_hint=8192,
+            system_text=system_prompt(haya_ids), prompt_text="\n\n".join(parts), max_tokens_hint=8192,
             timeout_sec=300.0, task_kind="mail_memory_dehydrator",
         )
         result = generate_fn(request, authority)
@@ -357,11 +421,11 @@ def dehydrate_thread(
                 or str(getattr(result, "model_identity", "")) != str(authority.model_identity)):
             raise ValueError("mail_dehydrator_model_authority_mismatch")
         count, valid = _parse_and_validate(result, allowed=allowed, new_ids=chunk_new_ids,
-                                           thread_id=thread_id)
+                                           thread_id=thread_id, haya_ids=haya_ids)
         model_candidate_count += count
         proposals.extend(valid)
 
-    counterparts = _counterparts(messages)
+    counterparts = _counterparts(messages, haya_ids)
     saved: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in proposals:
@@ -388,7 +452,7 @@ def dehydrate_thread(
 def run(
     *, get: Callable[..., Any], candidate_db_path: str = DEFAULT_DB_PATH, authority: Any,
     generate_fn: Callable[[Any, Any], Any], max_threads: int = DEFAULT_MAX_THREADS,
-    since_ms: int = 0, chunk_chars: int = MAX_CHUNK_CHARS,
+    since_ms: int = 0, chunk_chars: int = MAX_CHUNK_CHARS, haya_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     done = processed_message_ids(candidate_db_path)
     threads = fetch_threads(get, since_ms=since_ms)
@@ -406,7 +470,7 @@ def run(
             outcome = dehydrate_thread(
                 candidate_db_path, thread_id=thread_id, messages=messages, new_ids=new_ids,
                 authority=authority, generate_fn=generate_fn,
-                chunk_chars=chunk_chars,
+                chunk_chars=chunk_chars, haya_ids=haya_ids,
             )
         except Exception as exc:
             if str(exc) == "mail_dehydrator_model_authority_mismatch":
@@ -432,6 +496,9 @@ def run(
 
 def run_formal(**kwargs: Any) -> dict[str, Any]:
     chat_db_path = kwargs.pop("chat_db_path", DEFAULT_DB_PATH)
+    if "haya_ids" not in kwargs:  # read-only, before any write or model call
+        kwargs["haya_ids"] = read_haya_contact_ids(chat_db_path, override=kwargs.pop("haya_override", ""))
+    kwargs.pop("haya_override", None)
     from tools.dayblock_scheduled_runner import formal_background_generation
     authority, generate_fn = formal_background_generation(chat_db_path)
     return run(authority=authority, generate_fn=generate_fn, **kwargs)
@@ -453,10 +520,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-db", default=DEFAULT_DB_PATH)
     parser.add_argument("--max-threads", type=int, default=DEFAULT_MAX_THREADS)
     parser.add_argument("--since", default="", help="only threads with a letter on/after YYYY-MM-DD (UTC+8)")
+    parser.add_argument("--haya-contact-ids", default="",
+                        help="comma-separated upstream contact ids that are Haya (overrides runtime_config mail.haya_contact_ids)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     try:
         result = run_formal(
+            haya_override=args.haya_contact_ids,
             chat_db_path=args.db, get=http_reader(args.mail_url, read_token(args.mail_env)),
             candidate_db_path=args.candidate_db, max_threads=args.max_threads,
             since_ms=_since_ms(args.since),
