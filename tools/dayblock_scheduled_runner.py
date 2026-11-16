@@ -419,6 +419,24 @@ def _formal_config_read_guard(source_db: str | Path = SOURCE_DB):
         readonly_conn.close()
 
 
+def formal_background_generation(chat_db_path: str | Path):
+    """Freeze the formal authority once; return ``(authority, generate_fn)``.
+
+    The read-only guard encloses the authority capture and each model call only. While it
+    is active it forces the production memories.db read-only, and Candidates, progress and
+    review rows live in that same file, so callers must not write anything inside it."""
+    with _formal_config_read_guard(chat_db_path):
+        from chat.provider_router import capture_generation_authority
+        authority = capture_generation_authority()
+
+    def generate(request: Any, frozen: Any) -> Any:
+        with _formal_config_read_guard(chat_db_path) as formal:
+            _request_cls, generate_background, _authority_cls, token_getter = formal
+            return generate_background(request, frozen, cc_token_getter=token_getter)
+
+    return authority, generate
+
+
 def _recheck_source(shadow: Any, source_db: str | Path, source_day: str,
                    original: dict[str, Any]) -> bool:
     rows = shadow.discover_natural_day_rows(source_db, source_day)
