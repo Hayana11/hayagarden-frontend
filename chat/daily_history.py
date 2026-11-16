@@ -367,7 +367,9 @@ def build_daily_window_context(
             local_day=str(ctx['local_day']),
             db_path=db_path,
             after_message_id=after_cursor,
-            exclude_message_id=history_cut,
+            # Identity excludes only the request row (None for a proactive
+            # turn); the anchor alone bounds how far history reads.
+            exclude_message_id=current_user_message_id,
             up_to_message_id=history_cut,
             context_id=context_id,
             context_epoch=int(ctx.get('context_epoch') or 0),
