@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -698,7 +699,39 @@ def record_failed_run(candidate_db: str, *, dry_run: bool, limit: int, error: st
         conn.close()
 
 
+# cron starts with an almost empty environment; the systemd units get these from
+# EnvironmentFile=/opt/frontend/.env, so the CLI reads the same file for just these keys.
+RUNTIME_ENV_FILE = "/opt/frontend/.env"
+RUNTIME_ENV_KEYS = ("OMBRE_RUNTIME_PYTHON", "OMBRE_RUNTIME_SRC", "OMBRE_RUNTIME_ENV_FILE",
+                    "OMBRE_RUNTIME_TIMEOUT", "MEMORY_KERNEL_DB")
+
+
+def load_runtime_env(path: str | None = None) -> list[str]:
+    """Fill missing/empty Ombre runtime keys from the frontend .env; never overrides a set value."""
+    try:
+        lines = Path(path or RUNTIME_ENV_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    loaded: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or key not in RUNTIME_ENV_KEYS or os.environ.get(key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 def main(argv: list[str] | None = None) -> int:
+    load_runtime_env()
     from chat.daily_context import DEFAULT_DB_PATH
     parser = argparse.ArgumentParser(description="Review pending memory Candidates")
     parser.add_argument("--dry-run", action="store_true", help="record verdicts only; write nothing to the Kernel")

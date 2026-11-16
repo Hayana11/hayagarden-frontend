@@ -539,11 +539,36 @@ class OmbreAdapterTest(unittest.TestCase):
 class CliAndDeployTest(ReviewTestCase):
     def test_main_without_ombre_runtime_aborts_visibly(self):
         env = {k: "" for k in ("OMBRE_RUNTIME_PYTHON", "OMBRE_RUNTIME_SRC", "OMBRE_RUNTIME_ENV_FILE")}
-        with mock.patch.dict(os.environ, env):
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(review, "RUNTIME_ENV_FILE", str(Path(self.db).with_name("missing.env"))):
             self.assertEqual(1, review.main(["--dry-run", "--db", self.db, "--kernel-db", self.kernel_db]))
         health = review.review_health(self.db)
         self.assertEqual(("failed", "ombre_runtime_unconfigured"),
                          (health["last_run"]["status"], health["last_run"]["error"]))
+
+    def test_runtime_env_is_read_from_frontend_env_file_for_cron(self):
+        env_file = Path(self.db).with_name("frontend.env")
+        env_file.write_text(
+            "OTHER_SECRET=nope\nexport OMBRE_RUNTIME_PYTHON=/ombre/py\n"
+            "OMBRE_RUNTIME_SRC='/ombre/src'\nOMBRE_RUNTIME_ENV_FILE=\"/ombre/.env\"\n",
+            encoding="utf-8")
+        keys = ("OMBRE_RUNTIME_PYTHON", "OMBRE_RUNTIME_SRC", "OMBRE_RUNTIME_ENV_FILE", "OTHER_SECRET")
+        with mock.patch.dict(os.environ, {k: "" for k in keys}):
+            os.environ["OMBRE_RUNTIME_SRC"] = "/already/set"
+            loaded = review.load_runtime_env(str(env_file))
+            self.assertEqual(["OMBRE_RUNTIME_PYTHON", "OMBRE_RUNTIME_ENV_FILE"], loaded)
+            self.assertEqual("/ombre/py", os.environ["OMBRE_RUNTIME_PYTHON"])
+            self.assertEqual("/already/set", os.environ["OMBRE_RUNTIME_SRC"])
+            self.assertEqual("/ombre/.env", os.environ["OMBRE_RUNTIME_ENV_FILE"])
+            self.assertEqual("", os.environ["OTHER_SECRET"])
+            runtime = review.projection.OmbreRuntime.from_env()
+            self.assertEqual(("/ombre/py", "/already/set", "/ombre/.env"),
+                             (runtime.python, runtime.src_dir, runtime.env_file))
+
+    def test_main_loads_runtime_env_before_anything_else(self):
+        with mock.patch.object(review, "load_runtime_env", side_effect=RuntimeError("loaded first")):
+            with self.assertRaisesRegex(RuntimeError, "loaded first"):
+                review.main(["--status", "--db", self.db])
 
     def test_status_flag_prints_health(self):
         self.assertEqual(0, review.main(["--status", "--db", self.db]))
