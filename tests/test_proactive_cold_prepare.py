@@ -52,7 +52,7 @@ class _ColdResident(_FakeResident):
         if self.fail_at == 'after_flush':
             raise RuntimeError('provider died after flush')
         yield ('text', 'hello there')
-        yield ('done', ('hello there', '', {'input_tokens': 3}, {}))
+        yield ('done', ('hello there', '', {'input_tokens': 3, 'jsonl_usage': {'stream_totals_match': True}}, {}))
 
 
 class _Base(unittest.TestCase):
@@ -194,7 +194,7 @@ class ReprepareTests(_Base):
         dr._release_lease(replacement)
 
 
-class GatewayColdRouteTests(_Base):
+class _GatewayBase(_Base):
     MODES = ('normal', 'morning', 'nightwatch', 'self_trigger')
 
     def setUp(self):
@@ -231,6 +231,8 @@ class GatewayColdRouteTests(_Base):
         return self.gw._run_unified_normal_main_chat_turn(
             wake_run_id=rid, now=NOW, t2_hours=1.0, t_hours=1.0, mode=mode)
 
+
+class GatewayColdRouteTests(_GatewayBase):
     def test_switch_off_or_unsafe_reason_still_skips(self):
         from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
         cases = [
@@ -258,7 +260,7 @@ class GatewayColdRouteTests(_Base):
         ):
             self.assertEqual(self.gw._proactive_cold_start_allowed(mode, reason), expected, (mode, reason))
 
-    def test_four_modes_cold_round_then_pending_finalizer(self):
+    def test_four_modes_cold_round_then_abort_cleanup(self):
         before = self.counts()
         for mode in self.MODES:
             dr.reset_bindings_for_tests()
@@ -278,9 +280,7 @@ class GatewayColdRouteTests(_Base):
             self.assertIs(turn['_shared_delivery_fence'], self.fence)
             self.assertIn('start_offset', turn['_proactive_cold_transcript'])
             self.assertIsNotNone(dr.get_local_binding())          # temporary binding is live
-            out = self.gw._proactive_cold_finalizer_pending(turn, 'rid-' + mode, None)
-            self.assertEqual(out['reason'], 'proactive_cold_finalizer_pending')
-            self.assertTrue(out['skipped'])
+            self.gw._proactive_cold_abort(turn, 'test_abort')
             self.assertIsNone(dr.get_local_binding())
             self.assertGreaterEqual(self.resident.killed, 1)
             self.assertEqual(dc.get_resident_history_cursor(1, plan.resident_generation, db_path=self.db), None)

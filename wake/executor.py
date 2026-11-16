@@ -264,12 +264,13 @@ def execute(action: str, thoughts: str, content: str,
             # Do not backfill current; leave identity columns NULL on audit row.
             pass
 
-        conn.execute(
+        wake_log_id = conn.execute(
             "INSERT INTO wake_log (%s) VALUES (%s)" % (
                 ','.join(columns), ','.join(placeholders)
             ),
             tuple(values),
-        )
+        ).lastrowid
+        assistant_message_id = None
 
         # 执行 action：仅在归属仍然有效时写聊天表面
         if (
@@ -298,13 +299,13 @@ def execute(action: str, thoughts: str, content: str,
                 if 'display_segments' in msg_cols:
                     insert_columns.append('display_segments')
                     insert_values.append(display_segments_json or '')
-                conn.execute(
+                assistant_message_id = conn.execute(
                     "INSERT INTO chat_messages (%s) VALUES (%s)" % (
                         ', '.join(insert_columns),
                         ', '.join('?' for _ in insert_columns),
                     ),
                     tuple(insert_values),
-                )
+                ).lastrowid
             elif 'cache_info' in msg_cols and 'source_kind' in msg_cols:
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, cache_info, source_kind) "
@@ -355,6 +356,17 @@ def execute(action: str, thoughts: str, content: str,
                     binding=native_transcript_binding,
                     window_identity=window_identity,
                 )
+                if 'cache_info' in wake_columns:
+                    # The skip chain must also see a spoken Wake's native range.
+                    span = {k: int(native_transcript_binding[k]) for k in (
+                        'context_id', 'context_epoch', 'resident_generation',
+                        'start_offset', 'end_offset')}
+                    span['message_id'] = int(message_row[0])
+                    conn.execute(
+                        'UPDATE wake_log SET cache_info=? WHERE id=?',
+                        (json.dumps({**wake_cache_info, 'native_transcript_range': span},
+                                    ensure_ascii=False), wake_log_id),
+                    )
         elif (
             deliver_chat
             and action == 'diary'
@@ -419,6 +431,7 @@ def execute(action: str, thoughts: str, content: str,
         'settlement_required': bool(settlement_required),
         'settle_status': settle_status,
         'gate_reason': gate_reason,
+        'assistant_message_id': assistant_message_id,
     }
 
     if not deliver_chat:

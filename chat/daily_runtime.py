@@ -2670,6 +2670,13 @@ def _hot_native_tail_proof(
         member for member in members
         if str(getattr(member, 'source_kind', '') or '') == 'current_request'
     )
+    if any(
+        str(getattr(m, 'source_ref', '') or '').startswith('wake_request:')
+        for m in request_members
+    ):
+        return _hot_wake_tail_proof(
+            plan, frozen=frozen, registry=registry, request_members=request_members,
+        )
     if len(request_members) > 1:
         return {'status': 'ambiguous', 'reason': 'multiple_current_request_members'}
     if not request_members:
@@ -2925,6 +2932,124 @@ def _hot_native_tail_proof(
     }
 
 
+def _hot_wake_tail_proof(
+    plan: DailyTurnPlan,
+    *,
+    frozen: dict[str, Any],
+    registry: Optional[dict[str, Any]],
+    request_members: tuple[Any, ...],
+) -> dict[str, Any]:
+    """Prove the previous receipt request (a proactive Wake) + its reply W is the live native tail.
+
+    Runs after _hot_live_identity_decision PASSed (epoch, binding, process, session, system
+    fingerprint, owner, receipt identity, three cursors == receipt watermark).
+    """
+    from continuity.sources import build_source_members, derive_autonomous_events
+    from continuity.store import open_continuity_read_only
+
+    def fail(status: str, reason: str) -> dict[str, Any]:
+        return {'status': status, 'reason': reason}
+
+    ref = str(request_members[0].source_ref or '') if len(request_members) == 1 else ''
+    rid = ref.split(':', 1)[1].strip() if ref.startswith('wake_request:') else ''
+    if len(request_members) != 1:
+        return fail('ambiguous', 'wake_request_proof_ambiguous')
+    if not rid:
+        return fail('missing', 'wake_request_proof_missing')
+    try:
+        w = int(frozen['receipt'].installed_source_watermark)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return fail('missing', 'receipt_watermark_invalid')
+    if w <= 0 or w >= _history_anchor(plan):
+        return fail('ambiguous', 'wake_tail_is_not_previous')
+    if registry is None or str(registry.get('scan_status') or '') != 'READY':
+        return fail('missing', 'session_registry_not_ready')
+    ctx = (int(plan.context_id), int(plan.context_epoch), int(plan.resident_generation))
+    try:
+        conn = open_continuity_read_only(_production_continuity_store_path(plan))
+        try:
+            row = conn.execute('SELECT * FROM chat_messages WHERE id=?', (w,)).fetchone()
+            dmc = conn.execute(
+                'SELECT context_id, context_epoch, resident_generation, role '
+                'FROM daily_message_contexts WHERE message_id=?', (w,),
+            ).fetchone()
+            logs = conn.execute(
+                'SELECT context_id, context_epoch, resident_generation '
+                'FROM wake_log WHERE wake_run_id=?', (rid,),
+            ).fetchall()
+            events = conn.execute(
+                'SELECT event_uuid, role, claude_session_id, context_id, context_epoch, '
+                'resident_generation, jsonl_byte_offset FROM chat_message_claude_events '
+                'WHERE message_id=? ORDER BY jsonl_byte_offset ASC', (w,),
+            ).fetchall()
+            cache = json.loads(dict(row).get('cache_info') or '') if row is not None else {}
+            h = cache.get('history_anchor_message_id') if isinstance(cache, dict) else None
+            foreign = None if not isinstance(h, int) or isinstance(h, bool) else conn.execute(
+                'SELECT COUNT(*) FROM chat_messages WHERE id>? AND id<?', (h, w),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return fail('missing', 'wake_tail_rows_unavailable')
+    if row is None or dmc is None or not isinstance(cache, dict) or (
+        cache.get('source') != 'wake' or cache.get('wake_run_id') != rid
+        or any(cache.get(k) is not True for k in (
+            'unified_chat_resident', 'canonical_chat_history', 'proactive_cold_start'))
+        or tuple(map(int, dmc[:3])) != ctx or str(dmc[3]) != 'assistant'
+    ):
+        return fail('missing', 'wake_tail_anchor_mismatch')
+    if not any(tuple(int(v or 0) for v in r) == ctx for r in logs):
+        return fail('missing', 'wake_tail_log_missing')
+    if foreign is None or h >= w or foreign:
+        return fail('missing', 'wake_tail_foreign_rows')
+
+    sid = str(registry.get('claude_session_id') or '')
+    last_good = get_same_context_last_good(ctx[0], ctx[1])
+    try:
+        if not isinstance(last_good, dict) or (
+            int(last_good.get('context_id') or 0), int(last_good.get('context_epoch') or 0),
+            int(last_good.get('resident_generation') or 0),
+        ) != ctx or str(last_good.get('claude_session_id') or '') != sid:
+            return fail('missing', 'same_context_last_good_identity_mismatch')
+        end, reg_offset = int(last_good['transcript_end_offset']), int(registry['scan_offset'])
+    except (KeyError, TypeError, ValueError):
+        return fail('missing', 'native_tail_offset_missing')
+    skips = 0
+    if reg_offset != end:
+        chain_end, skips = _hot_wake_skip_chain_end(plan, start_offset=end)
+        if skips <= 0 or chain_end != reg_offset:
+            return fail('missing', 'native_tail_offset_mismatch')
+    if end <= 0:
+        return fail('missing', 'native_tail_offset_mismatch')
+
+    try:
+        by_role = {r: [e['jsonl_byte_offset'] for e in events if str(e['role']) == r]
+                   for r in ('provider_input', 'assistant')}
+        offsets = [e['jsonl_byte_offset'] for e in events]
+        uuids = [str(e['event_uuid'] or '').strip() for e in events]
+        if not by_role['provider_input'] or not by_role['assistant']:
+            return fail('missing', 'wake_tail_mapping_incomplete')
+        if any(isinstance(o, bool) or not isinstance(o, int) for o in offsets):
+            return fail('ambiguous', 'wake_tail_mapping_offset_corrupt')
+        if not all(uuids) or len(set(uuids)) != len(uuids) or len(set(offsets)) != len(offsets):
+            return fail('ambiguous', 'wake_tail_mapping_duplicate')
+        if any(str(e['claude_session_id']) != sid or tuple(map(int, e[3:6])) != ctx for e in events):
+            return fail('missing', 'wake_tail_mapping_session_mismatch')
+        if max(by_role['provider_input']) >= min(by_role['assistant']):
+            return fail('missing', 'wake_tail_mapping_order_invalid')
+        if max(by_role['assistant']) >= end:
+            return fail('missing', 'wake_tail_mapping_offset_invalid')
+        members = tuple(build_source_members((), derive_autonomous_events([dict(row)])))
+    except Exception:
+        return fail('ambiguous', 'wake_tail_mapping_corrupt')
+    if len(members) != 1 or str(members[0].source_ref) != 'wake:%d' % w:
+        return fail('missing' if not members else 'ambiguous', 'wake_tail_member_mismatch')
+    return {
+        'status': 'pass', 'reason': None, 'source_member': members[0],
+        'assistant_message_id': w, 'transcript_end_offset': end, 'wake_skip_count': skips,
+    }
+
+
 def _hot_wake_skip_chain_end(
     plan: DailyTurnPlan,
     *,
@@ -2958,6 +3083,14 @@ def _hot_wake_skip_chain_end(
                 'ORDER BY id ASC',
                 (context_id, context_epoch, resident_generation),
             ).fetchall()
+            mapped = {
+                int(r[0]): (int(r[1]), int(r[2])) for r in conn.execute(
+                    'SELECT message_id, MIN(jsonl_byte_offset), MAX(jsonl_byte_offset) '
+                    'FROM chat_message_claude_events WHERE context_id=? '
+                    'AND context_epoch=? AND resident_generation=? GROUP BY message_id',
+                    (context_id, context_epoch, resident_generation),
+                )
+            }
         finally:
             conn.close()
     except (OSError, ValueError, sqlite3.Error):
@@ -2978,7 +3111,7 @@ def _hot_wake_skip_chain_end(
             continue
 
         observation_present = 'observation_transcript_skip' in cache
-        main_present = 'transcript_skip' in cache
+        main_present = 'transcript_skip' in cache or 'native_transcript_range' in cache
         if observation_present and not main_present:
             return None, 0
 
@@ -2986,13 +3119,23 @@ def _hot_wake_skip_chain_end(
         for field, requires_epoch in (
             ('observation_transcript_skip', True),
             ('transcript_skip', False),
+            ('native_transcript_range', True),
         ):
             if field not in cache:
                 continue
             skip = cache.get(field)
             if not isinstance(skip, dict):
                 return None, 0
-            if skip.get('skipped_provider_round') is not True:
+            if field == 'native_transcript_range':
+                # A spoken Wake's range counts only when its mapping proves it.
+                span = mapped.get(strict_int(skip.get('message_id')))
+                if span is None or not (
+                    strict_int(skip.get('start_offset')) is not None
+                    and strict_int(skip.get('end_offset')) is not None
+                    and skip['start_offset'] <= span[0] and span[1] < skip['end_offset']
+                ):
+                    return None, 0
+            elif skip.get('skipped_provider_round') is not True:
                 return None, 0
             skip_context_id = strict_int(skip.get('context_id'))
             skip_epoch = strict_int(skip.get('context_epoch'))
@@ -8998,6 +9141,9 @@ def ensure_resident_and_stream(
             # enabled when the resident explicitly supports the kwarg.
             if 'idle_heartbeat_sec' in params or accepts_kwargs:
                 send_kwargs['idle_heartbeat_sec'] = 10.0
+            profile = getattr(plan, '_jsonl_finality_profile', None)
+            if profile and ('jsonl_finality_profile' in params or accepts_kwargs):
+                send_kwargs['jsonl_finality_profile'] = profile
             if plan.tool_profile == cc_resident.TOOL_PROFILE_UH_A0:
                 if not isinstance(plan.turn_lease, dict) or not plan.turn_lease:
                     raise DailyRuntimeError(
@@ -9802,6 +9948,7 @@ def complete_daily_turn(
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
     unexpected_save_marker: bool = False,
+    finalize_pending: bool = True,
 ) -> dict[str, Any]:
     verify_epoch_token(plan)
     aid = int(assistant_message_id)
@@ -9809,7 +9956,11 @@ def complete_daily_turn(
         raise DailyRuntimeError('assistant_message_id required', error_code='assistant_missing')
 
     try:
-        cursor_result = dc.finalize_daily_assistant_and_advance_cursor(
+        # A proactive Wake row is already formal (source_kind='wake'): cursor only.
+        cursor_result = (
+            dc.finalize_daily_assistant_and_advance_cursor if finalize_pending
+            else dc.advance_resident_history_cursor
+        )(
             plan.context_id,
             plan.resident_generation,
             aid,
@@ -10334,6 +10485,78 @@ def handle_provider_success(
             {'pending_mail_ids': pending_mail_ids},
         )
     return dict(plan.manifest)
+
+
+def prepare_proactive_cold_wake_round(
+    plan: DailyTurnPlan, *, resident: Any, silent: bool, jsonl_finality: Any,
+) -> Optional[dict[str, Any]]:
+    """Register the new session, then prove (spoken) or CAS-skip (silent) the cold round."""
+    from chat import unified_heartbeat_a1 as uh
+    if plan.transcript_observation_error_code or plan.transcript_path is None:
+        raise DailyRuntimeError(
+            'cold wake transcript observation incomplete',
+            error_code=str(plan.transcript_observation_error_code or 'transcript_observation_incomplete'),
+        )
+    existing = get_context_claude_session(
+        int(plan.context_id), int(plan.resident_generation), db_path=plan.db_path,
+    )
+    sid, start = str(plan.transcript_claude_session_id), int(plan.transcript_start_offset)
+    register_context_claude_session(
+        context_id=int(plan.context_id), context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation), chat_id=str(plan.chat_id),
+        claude_session_id=sid, cwd=str(plan.transcript_cwd), scan_offset=start,
+        source=resolve_finalize_registry_source(existing, default='daily_runtime'),
+        process_generation=int(plan.transcript_process_generation),
+        transcript_path=plan.transcript_path, db_path=plan.db_path,
+    )
+    watermark = uh.SharedTranscriptWatermark(
+        int(plan.context_id), int(plan.context_epoch), int(plan.resident_generation),
+        str(plan.resident_key), sid, str(plan.transcript_path), start,
+        int(plan.transcript_process_generation),
+    )
+    if not silent:
+        return uh.prepare_shared_transcript_native_binding(
+            watermark, resident, jsonl_finality=jsonl_finality,
+        )
+    try:  # audit only: the resident is retired right after
+        return uh.commit_shared_transcript_watermark(
+            watermark, resident, db_path=plan.db_path, jsonl_finality=jsonl_finality,
+        )
+    except Exception:
+        logger.warning('silent cold wake skip not recorded', exc_info=True)
+        return None
+
+
+def finalize_proactive_cold_wake(
+    plan: DailyTurnPlan, *, assistant_message_id: int, binding: dict[str, Any],
+) -> bool:
+    """After the executor committed A + native events: context row, cursor CAS, last-good, receipt."""
+    aid, end = int(assistant_message_id), int(binding['end_offset'])
+    window = dict(
+        context_id=int(plan.context_id), context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation),
+    )
+    dc.record_daily_message_context(aid, role='assistant', db_path=plan.db_path, **window)
+    plan.transcript_end_offset = end
+    _set_transcript_mapping_manifest(
+        plan, status='MAPPED', event_count=len(binding['events']), scan_offset=end,
+    )
+    complete_daily_turn(plan, assistant_message_id=aid, finalize_pending=False)
+    dc.upsert_resident_owner(
+        plan.context_id, plan.resident_generation, worker_id=plan.worker_id,
+        resident_key=plan.resident_key, bound_cursor_message_id=aid,
+        process_generation=int(plan.transcript_process_generation), db_path=plan.db_path,
+    )
+    note_same_context_last_good(
+        claude_session_id=str(plan.transcript_claude_session_id), transcript_end_offset=end,
+        source='daily_runtime', **window,
+    )
+    plan._same_context_last_good_proven = _same_context_last_good_matches(plan)
+    plan.manifest['context_receipt_last_good_proven'] = bool(plan._same_context_last_good_proven)
+    committed = bool(_commit_production_context_receipt(plan, assistant_message_id=aid))
+    if committed:
+        _consume_feedback_after_success(plan)
+    return committed
 
 
 def handle_provider_failure(
