@@ -486,6 +486,7 @@ def build_daily_continuity_shadow_plan(
     ] | None = None,
     prepared_source_projection: tuple[object, object, Sequence[SourceMember]] | None = None,
     prepared_inputs_out: dict[str, object] | None = None,
+    current_request: Mapping[str, object] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -498,6 +499,10 @@ def build_daily_continuity_shadow_plan(
     member identity, but restricts only the window-anchor candidate.  It never
     removes members from the expected source universe.  The pure R4 planner
     remains the only selection authority.
+
+    A proactive turn has no request row: ``current_request`` (source_ref,
+    source_revision, content_hash, estimated_tokens, history_cut, context_id,
+    context_epoch) stands in for it and history is read up to history_cut.
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
@@ -508,7 +513,10 @@ def build_daily_continuity_shadow_plan(
             or window_anchor_token_budget <= 0
         ):
             return _blocked('window_anchor_budget_unmapped')
-    if isinstance(current_user_message_id, bool) or not isinstance(current_user_message_id, int):
+    if current_request is None and (
+        isinstance(current_user_message_id, bool)
+        or not isinstance(current_user_message_id, int)
+    ):
         return _blocked('invalid_current_request')
 
     try:
@@ -530,7 +538,18 @@ def build_daily_continuity_shadow_plan(
                 return _blocked('source_rows_unavailable')
             try:
                 _check_source_schema(source_conn)
-                history_rows, current_row = _source_rows(source_conn, current_user_message_id)
+                if current_request is not None:
+                    history_rows = read_canonical_scope_rows(
+                        source_conn,
+                        context_id=int(current_request['context_id']),
+                        context_epoch=int(current_request['context_epoch']),
+                        before_message_id=int(current_request['history_cut']) + 1,
+                    )
+                    current_row = None
+                else:
+                    history_rows, current_row = _source_rows(
+                        source_conn, current_user_message_id,
+                    )
             except LookupError:
                 return _blocked('invalid_current_request')
             except _SourceScopeUnavailable:
@@ -585,11 +604,20 @@ def build_daily_continuity_shadow_plan(
                 for turn in tuple(turns)
                 if str(turn.turn_id) in selected_turn_ids
             )
-        if not is_formal_user_source_row(current_row):
-            return _blocked('invalid_current_request')
         try:
-            current_request = _current_request_section(current_row)
-        except (TypeError, ValueError):
+            if current_request is not None:
+                current_section = ContextSection(
+                    kind='current_request',
+                    source_ref=str(current_request['source_ref']),
+                    source_revision=str(current_request['source_revision']),
+                    content_hash=str(current_request['content_hash']),
+                    estimated_tokens=int(current_request['estimated_tokens']),
+                )
+            elif not is_formal_user_source_row(current_row):
+                return _blocked('invalid_current_request')
+            else:
+                current_section = _current_request_section(current_row)
+        except (KeyError, TypeError, ValueError):
             return _blocked('invalid_current_request')
         window_anchor = None
         window_anchor_status = ''
@@ -640,7 +668,7 @@ def build_daily_continuity_shadow_plan(
                 raw_members=expected_members,
                 chunks=bindings,
                 budget_policy=budget_policy,
-                fixed_sections=accepted + (current_request,),
+                fixed_sections=accepted + (current_section,),
                 budget_policy_version=str(budget_policy_version or '').strip(),
                 window_anchor=window_anchor,
                 window_anchor_status=window_anchor_status,
