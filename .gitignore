@@ -46,3 +46,6 @@ planner_shadow.jsonl
 
 # Local compatibility only; production Task Timer DB lives outside the source worktree.
 /commands.db
+
+# opencli-gate local config (contains token)
+opencli-gate/gate.config.json
