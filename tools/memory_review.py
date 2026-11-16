@@ -1,4 +1,4 @@
-"""Review Core (#690): decide what each pending memory Candidate becomes.
+"""Review Core: decide what each pending memory Candidate becomes.
 
 Candidates (memory_candidates) are the intake queue. This module reviews them one at a
 time, in a single process, and records every verdict in ``memory_candidate_reviews`` - a

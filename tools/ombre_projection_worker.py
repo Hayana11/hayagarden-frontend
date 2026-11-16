@@ -40,12 +40,14 @@ UPDATE_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "
 
 
 # Ops this worker implements. ``analyze`` and ``judge_same_event`` drive Ombre's own dehydrator
-# object (class / method names UNVERIFIED, see docs/memory-review-core.md). They are isolated
-# in ``_dehydrator`` / ``_analyze`` / ``_judge_same_event`` and fail the single request, never
+# object (class / method names confirmed on the production VPS by inspection; see
+# docs/memory-review-core.md). They are isolated in ``_dehydrator`` / ``_analyze`` /
+# ``_judge_same_event`` and fail the single request, never
 # guess a result. ``digest`` is never called.
 OPS = ("capabilities", "get", "create_if_absent", "update", "touch", "list", "search",
        "analyze", "judge_same_event")
-# UNVERIFIED Ombre names, all used below and nowhere else.
+# Ombre names (class and method names confirmed on the production VPS by inspection),
+# all used below and nowhere else.
 DEHYDRATOR_MODULE, DEHYDRATOR_CLASS = "dehydrator", "Dehydrator"
 ANALYZE_METHOD, JUDGE_METHOD = "analyze", "judge_same_event"
 
@@ -140,7 +142,7 @@ def _dehydrator():
 
 
 def _dehydrator_report() -> dict:
-    """Whether the (UNVERIFIED) dehydrator names resolve. Never raises."""
+    """Whether the dehydrator class and its methods resolve. Never raises."""
     try:
         target = _dehydrator()
         methods = [name for name in (ANALYZE_METHOD, JUDGE_METHOD) if callable(getattr(target, name, None))]

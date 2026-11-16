@@ -78,15 +78,23 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 
 **接线方式**
 
-`analyze` 与 `judge_same_event` 两个 worker op 在 Ombre 自己的解释器里运行（`OMBRE_RUNTIME_SRC` 在 `sys.path` 上），用同一份 `load_config()` 的结果构造 Ombre 自己的 dehydrator 对象，再调用它的方法。不调用 `digest`（有测试守住）。所有未验证的名字都集中在 `tools/ombre_projection_worker.py` 顶部的常量里，只在那里使用。
+`analyze` 与 `judge_same_event` 两个 worker op 在 Ombre 自己的解释器里运行（`OMBRE_RUNTIME_SRC` 在 `sys.path` 上），用同一份 `load_config()` 的结果构造 Ombre 自己的 dehydrator 对象，再调用它的方法。不调用 `digest`（有测试守住）。Ombre 的类名与方法名都集中在 `tools/ombre_projection_worker.py` 顶部的常量里，只在那里使用。
 
-**未验证（仓库里找不到名字和签名，均为假设）**
-- dehydrator 的模块名与类名：假定 `dehydrator.Dehydrator`，构造签名 `Dehydrator(config)`。构造或导入失败 → 该请求失败（`Incompatible`）。
-- 方法名与签名：`analyze(text)`、`judge_same_event(old, new)`，同步或协程均可（worker 会 await）。
+**已在生产 VPS 上确认（代码检查）**
+- Ombre 的 dehydrator 类 `Dehydrator` 存在，且有 `analyze()` 与 `judge_same_event()` 两个方法。
+- worker 以 `Dehydrator(load_config())` 构造它，与 `BucketManager` 用的是同一份 `load_config()` 结果。
+- 启动前检查（每次运行都做，含 `--dry-run`）：加载 dehydrator 失败，或两个方法中任一缺失，都会中止整轮运行，不碰任何 Candidate。
+- 以上只确认了类名、两个方法名和构造方式；构造参数的细节不在确认范围内。两个方法的返回结构没有核对，仍由 worker 的形状检查兜底。worker 对同步或协程返回值都会处理（会 await）。
+
+**仍是假设（需和真实语义核对）**
 - `analyze` 返回 dict，期望含 `domain` / `valence` / `arousal` / `tags` / `suggested_name` / `importance` / `why_remembered`。worker 只检查“非空 dict”，缺失字段不补默认值，写 Kernel 时 `title` 取空、数值取 `None`，由投影层按其原有默认值处理。
-- `judge_same_event` 返回 dict，含布尔 `same_event` 和 0..1 的 `confidence`（可带 `reason`）。形状不符 → worker 报错。有效分数 = `confidence`；明确 `same_event=false` 时按 0 处理（假设，需和真实语义核对）。
+- `judge_same_event` 返回 dict，含布尔 `same_event` 和 0..1 的 `confidence`（可带 `reason`）。形状不符 → worker 报错。有效分数 = `confidence`；明确 `same_event=false` 时按 0 处理。
 - 阈值 0.85 / 0.60 来自计划，不是 Ombre 的原生阈值；本模块用独立常量（`SAME_EVENT_REVIEW` / `SAME_EVENT_UNCERTAIN`）。
-- 任何一项不成立时的行为：启动前检查就会中止（见下）；运行中单条调用失败 → 该 Candidate 记 `error` 并保持 `pending`，不会自动提交，也不会猜测结果。要启用，需在服务器上确认 Ombre 的真实名字并只改 worker 顶部常量。
+- 任何一项不成立时的行为：形状检查不过 → 该 Candidate 记 `error` 并保持 `pending`，不会自动提交，也不会猜测结果。若 Ombre 的类名或方法名将来改动，启动前检查会先中止，只需改 worker 顶部常量。
+
+## 已知限制
+
+- **同一轮内的近重复互相看不见。** 一轮 Review 里，如果两条 Candidate 用不同措辞描述同一件事，第一条会先写入 Kernel，但还没投影进 Ombre；第二条的 Ombre 搜索因此看不到它，可能另开一条谱系。这是接受的偶发重复，之后通过 revision 或人工审核合并。目前刻意不为此增加队列、索引或审核门。
 
 ## 运维注意
 
