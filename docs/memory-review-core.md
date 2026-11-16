@@ -11,7 +11,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 
 - Candidate 行不会被改写，只有 `status` 列会变。判定、依据和决定人都写在单独的 `memory_candidate_reviews`。
 - `python3 -m tools.memory_review [--dry-run] [--limit N] [--status] [--requeue-policy-rejected]`。`--limit` 默认 50；`--status` 只打印健康信息；`--requeue-policy-rejected` 见下文“规则改动后重排队”。
-- **`--dry-run`**：跑完整条流水线，写 `dry_run=1` 的判定行，**不写 Kernel，不改 Candidate 状态**。定时任务目前只跑 dry-run（`deploy/cron.d/hayagarden-memory-review`，20:15 UTC = 北京 04:15，在 19:15 和 19:45 两个脱水任务之后）。dry-run 的判定行会被之后的正式运行覆盖；已经正式判定的行不会被 dry-run 改写。
+- **`--dry-run`**：跑完整条流水线，写 `dry_run=1` 的判定行，**不写 Kernel，不改 Candidate 状态**。定时任务现在正式运行、不带 `--dry-run`（`deploy/cron.d/hayagarden-memory-review`，20:15 UTC = 北京 04:15，在 19:15 和 19:45 两个脱水任务之后）。dry-run 的判定行会被之后的正式运行覆盖；已经正式判定的行不会被 dry-run 改写。
 - 顺序：priority 高的先，同级按创建时间从早到晚。
 
 ## 流水线
@@ -25,6 +25,9 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
    - 解析器可注入。读不到、暂时不可用、没有对应解析器、或 Candidate 本身没有可靠来源（`provenance_status≠resolved` / 无 refs）→ `needs_review`，原因写明，**不会自动提交**。
 4. **曾被人拒绝**：与人工拒绝过的 Candidate（`decision='rejected'` 且 `decision_by` 为 `fedya` / `haya`）归一化后精确相同 → `suppressed_rejected`。策略自动拒绝的（`decision_by='policy'`）不算。
 5. **证据支持检查**（一次模型调用，走正式 Chat 背景生成的 authority，与日采集同一条保护）：原文是否支持这条 Candidate 的说法。返回 `{supported, reason}`。不支持 → `rejected_unsupported`（`decision_by='policy'`）。
+   **上下文窗口**：Candidate 的 `source_refs` 含 `chat_messages:<id>` 时，支持检查的 prompt 另有一节“上下文（未被引用，仅供参考）”：每条被引用的聊天消息前后各取最多 `CONTEXT_NEIGHBORS`（6）条未被引用的消息（按 id 顺序，不要求同一天），用同样的发言人标签渲染，按离被引用消息的远近优先、总字数不超过 `CONTEXT_MAX_CHARS`（6000）。被引用的不会重复出现。读取上下文失败只记警告，仍只按被引用的证据判断。
+   **`extra_evidence_ids`**（可选）：模型认为上下文里哪几条是支持候选所必需的，返回它们的聊天消息 id。必须是上下文一节里出现过的 id，未知 id 忽略并记警告（写进 `ignored_extra_evidence_ids`）。判定为支持时，这些消息作为额外 Evidence（`chat_messages:<id>`，provenance 标 `evidence_role=context_extra`）随 `commit_candidate` 写入 Kernel，并记在判定行 `support_check_json.extra_evidence_ids`。Candidate 行的 `source_refs` 不改写；Evidence ID 仍按 ref 哈希确定，重跑结果相同。
+   **删减重写（`supported_rewrite`，可选）**：核心被支持但部分细节不被支持时，模型可给出只保留被支持部分的版本（同语言、自成一句、不加新内容）。若 `supported=false` 且有非空、且与原文不同的重写 → 对重写**再做一次**支持检查（证据含 extra ids；这一次返回的 `supported_rewrite` 忽略，绝不循环）。第二次为 `supported` → 以重写为内容继续后面的步骤（精确重复、人工拒绝抑制、Ombre 分析与搜索、同事件、归属保护），自动创建时 Kernel State 的 `content` 是重写，`structured_value.review` 带 `trimmed_from_candidate=true` 和 `original_content`；判定行原因为 `trimmed_rewrite`，`support_check_json.trimmed_rewrite` 含 `committed_content`、`original_check`、`rewrite_check`。`memory_candidates` 里的原文不动。第二次核对**同时收到原始候选和删减版**（仍是同一次模型调用，没有第三次），要分别回答 `supported`（删减版有证据支持）和 `rewrite_faithful`（删减版只是删掉了原始候选里无证据的部分，没有加入新事实、没有换主体、事件、时间或对象、没有改成另一件事）。只有 `supported=true` 且 `rewrite_faithful=true` 才继续；任何一项为 false，或没有重写 → `rejected_unsupported`（`support_check_json.rewrite_check` 记第二次结果；不忠实时原因以 `rewrite_not_faithful:` 开头）。第二次缺少布尔值 `rewrite_faithful` 算支持输出格式错误，按下面的“连续出错上限”处理。
 6. **Ombre 分析**：`analyze(content)`，结果原样存入 `analysis_json`，之后写进 Kernel State 供 Ombre 投影使用（不调用 digest）。第 6、7 步的所有 Ombre 调用（analyze / search / judge_same_event）一旦抛错或返回形状不对，该条记为 `error`（原因 `ombre_failed:<op>:...` 写进判定行的 `error`），Candidate 保持 `pending`，下轮重试，**绝不自动提交，也不会涌进人工队列**（和 Kernel 写入错误同样处理）。
 7. **搜索与同事件判断**：
    - 先与最近 10 条人工拒绝的 Candidate 做同事件判断：置信度 ≥ 0.85 → `suppressed_rejected`；0.60–0.85 → `needs_review`（`uncertain`）。
@@ -49,6 +52,9 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 | `rejected_unsupported` | rejected / policy | `rejected` |
 | `needs_review` | NULL / NULL（等待人工） | `needs_review` |
 | `error`（模型、解析或 Ombre 调用失败） | — | 保持 `pending`，下轮重试 |
+| `needs_review`（原因 `repeated_errors:<最后一次错误>`） | NULL / NULL | `needs_review` |
+
+**连续出错上限**：`memory_candidate_reviews.error_count`（加列是增量、幂等的 `ALTER TABLE ADD COLUMN`）记每条 Candidate 连续出错的运行次数，每次 `error` +1，记录任何非 error 判定时清零。第 `ERROR_LIMIT`（3）次出错的那一轮改记 `needs_review`（原因 `repeated_errors:<最后一次错误>`），Candidate 状态随之为 `needs_review`，不再无限重试。**只有“内容 / 模型判定类、重试大概率仍卡在同一条 Candidate 上”的错误计数并转人工**：支持检查返回空文本、无法解析、不是对象或缺少必需布尔值（`SupportOutputError`），以及单条 Candidate 的 `OmbreFailure`。Kernel 提交、SQLite、IO、模型调用本身的传输故障等基础设施异常仍是 `error → pending → 下一轮重试`：照常进入失败记录和运行状态 `partial_failure`，但不增加 `error_count`，也不会转 `needs_review`（人工审核解决不了磁盘或数据库故障）；它们也不会清零已有的计数。启动前检查中止不碰 Candidate，不计数。`--dry-run` 不增加 `error_count`、不改状态，但判定行会显示“如果正式运行会怎样”（达到上限时显示 `needs_review`）。
 
 `decision_by` 在决定前为 NULL，取值只会是 `policy` / `fedya` / `haya`。`needs_review` 的人工界面和决定写入不在本 PR。
 

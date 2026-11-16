@@ -707,5 +707,287 @@ class CliAndDeployTest(ReviewTestCase):
         self.assertEqual(2, deploy.count('"$MAIL_CRON_BACKUP" "$REVIEW_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"'))
 
 
+class ScriptedGenerator:
+    """Pops one scripted support response per call (dict -> JSON, str -> raw text)."""
+
+    def __init__(self, script):
+        self.script, self.calls = list(script), []
+
+    def __call__(self, request, authority):
+        self.calls.append(request)
+        item = self.script.pop(0)
+        return BackgroundGenerationResult(
+            text=item if isinstance(item, str) else json.dumps(item),
+            provider="p", model_identity="m", actual_executor="test")
+
+
+class ContextAndTrimTest(ReviewTestCase):
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, created_at TEXT)")
+        for i in range(1, 31):
+            conn.execute("INSERT INTO chat_messages VALUES (?,?,?,?)",
+                         (i, "assistant" if i % 2 == 0 else "hayana", f"消息{i}", "2026-11-01 09:00:00"))
+        conn.commit()
+        conn.close()
+
+    def script(self, *responses):
+        self.gen = ScriptedGenerator(responses)
+
+    def test_context_neighbors_rendered_capped_and_cited_not_duplicated(self):
+        got = review.load_chat_context(self.db, [10, 12])
+        ids = [r.ref for r in got]
+        self.assertNotIn("chat_messages:10", ids)
+        self.assertNotIn("chat_messages:12", ids)
+        self.assertEqual(sorted(ids, key=lambda r: int(r.split(":")[1])), ids)
+        self.assertIn("chat_messages:4", ids)
+        self.assertIn("chat_messages:18", ids)
+        self.assertNotIn("chat_messages:3", ids)
+        self.assertEqual("哈娅", next(r for r in got if r.ref == "chat_messages:11").speaker)
+        capped = review.load_chat_context(self.db, [10], max_chars=60)
+        self.assertTrue(0 < len(capped) < 12)
+        near = {r.ref for r in capped}
+        self.assertIn("chat_messages:11", near)
+        self.assertEqual([], review.load_chat_context(self.db, []))
+
+    def test_prompt_has_marked_context_section_with_speaker_labels(self):
+        self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script({"supported": True, "reason": "ok"})
+        self.run_review()
+        prompt = self.gen.calls[0].prompt_text
+        self.assertIn("上下文（未被引用，仅供参考）", prompt)
+        head, _, tail = prompt.partition("上下文（未被引用，仅供参考）")
+        self.assertNotIn("[chat_messages:11]", head)
+        self.assertIn("[chat_messages:11][发言人：哈娅]", tail)
+        self.assertNotIn("[chat_messages:10]", tail)
+
+    def test_no_context_section_without_chat_refs(self):
+        self.add("费奥多尔下个月搬去札幌。", refs=("gmail_message:abc",))
+        self.script({"supported": True, "reason": "ok"})
+        self.run_review()
+        self.assertNotIn("上下文", self.gen.calls[0].prompt_text)
+
+    def test_extra_ids_validated_and_become_kernel_evidence_with_stable_ids(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script({"supported": True, "reason": "ok", "extra_evidence_ids": [11, "chat_messages:12", 999, "x"]})
+        self.run_review()
+        ids = review.candidate_ids(cid)
+        evidence = MemoryKernel(self.kernel_db).evidence_for_state(ids["state"])
+        refs = {e.source_ref for e in evidence}
+        self.assertEqual({"chat_messages:10", "chat_messages:11", "chat_messages:12"}, refs)
+        self.assertTrue(all(e.evidence_id.startswith(ids["evidence_prefix"]) for e in evidence))
+        self.assertIn("[assistant] 消息12", next(e for e in evidence if e.source_ref == "chat_messages:12").content)
+        support = json.loads(self.row(cid)["support_check_json"])
+        self.assertEqual([11, 12], support["extra_evidence_ids"])
+        self.assertEqual(2, len(support["ignored_extra_evidence_ids"]))
+        conn = sqlite3.connect(self.db)
+        try:
+            stored = json.loads(conn.execute("SELECT source_refs_json FROM memory_candidates WHERE candidate_id=?",
+                                             (cid,)).fetchone()[0])
+        finally:
+            conn.close()
+        self.assertEqual(["chat_messages:10"], stored)
+
+    def test_unknown_extra_ids_are_ignored(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script({"supported": True, "reason": "ok", "extra_evidence_ids": [10, 500]})
+        self.run_review()
+        evidence = MemoryKernel(self.kernel_db).evidence_for_state(review.candidate_ids(cid)["state"])
+        self.assertEqual({"chat_messages:10"}, {e.source_ref for e in evidence})
+        self.assertNotIn("extra_evidence_ids", json.loads(self.row(cid)["support_check_json"]))
+
+    def test_trimmed_rewrite_commits_only_after_second_supported_check(self):
+        cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "日期不是双方商定", "extra_evidence_ids": [11],
+                     "supported_rewrite": "费奥多尔下个月搬去札幌。"},
+                    {"supported": True, "rewrite_faithful": True, "reason": "核心被支持", "supported_rewrite": "忽略我"})
+        result = self.run_review()
+        self.assertEqual({"committed_new": 1}, result["outcomes"])
+        self.assertEqual(2, len(self.gen.calls))
+        second_head = self.gen.calls[1].prompt_text.split("=== 证据原文")[0]
+        self.assertIn("原始候选：\n费奥多尔下个月搬去札幌，双方商定了日期。", second_head)
+        self.assertIn("待核对的删减版", second_head)
+        self.assertIn("费奥多尔下个月搬去札幌。", second_head)
+        self.assertIn("rewrite_faithful", self.gen.calls[1].system_text)
+        self.assertNotIn("原始候选", self.gen.calls[0].prompt_text)
+        self.assertIn("[chat_messages:11]", self.gen.calls[1].prompt_text.split("上下文（未被引用")[0])
+        ids = review.candidate_ids(cid)
+        kernel = MemoryKernel(self.kernel_db)
+        state = kernel.get_state(ids["state"])
+        self.assertEqual("费奥多尔下个月搬去札幌。", state.content)
+        self.assertTrue(state.structured_value["review"]["trimmed_from_candidate"])
+        self.assertEqual("费奥多尔下个月搬去札幌，双方商定了日期。", state.structured_value["review"]["original_content"])
+        self.assertEqual({"chat_messages:10", "chat_messages:11"},
+                         {e.source_ref for e in kernel.evidence_for_state(ids["state"])})
+        row = self.row(cid)
+        self.assertEqual(("committed_new", "trimmed_rewrite"), (row["outcome"], row["decision_reason"]))
+        support = json.loads(row["support_check_json"])
+        self.assertEqual("费奥多尔下个月搬去札幌。", support["trimmed_rewrite"]["committed_content"])
+        self.assertFalse(support["trimmed_rewrite"]["original_check"]["supported"])
+        self.assertTrue(support["trimmed_rewrite"]["rewrite_check"]["supported"])
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual("费奥多尔下个月搬去札幌，双方商定了日期。", json.loads(conn.execute(
+                "SELECT payload_json FROM memory_candidates WHERE candidate_id=?", (cid,)).fetchone()[0])["content"])
+        finally:
+            conn.close()
+
+    def test_trimmed_rewrite_failing_second_check_is_rejected(self):
+        cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
+                    {"supported": False, "rewrite_faithful": True, "reason": "仍不支持", "supported_rewrite": "再来一次"})
+        result = self.run_review()
+        self.assertEqual({"rejected_unsupported": 1}, result["outcomes"])
+        self.assertEqual(2, len(self.gen.calls))
+        self.assertEqual(0, self.kernel_count("state"))
+        self.assertEqual("rejected", self.status(cid))
+        self.assertFalse(json.loads(self.row(cid)["support_check_json"])["rewrite_check"]["supported"])
+
+    def test_no_rewrite_is_rejected_with_a_single_call(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "原文没有"})
+        self.assertEqual({"rejected_unsupported": 1}, self.run_review()["outcomes"])
+        self.assertEqual(1, len(self.gen.calls))
+        self.assertEqual("rejected", self.status(cid))
+
+    def test_trimmed_rewrite_that_is_exact_duplicate_stops_there(self):
+        head = self.seed_head("费奥多尔下个月搬去札幌。")
+        cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
+                    {"supported": True, "rewrite_faithful": True, "reason": "ok"})
+        self.assertEqual({"exact_duplicate": 1}, self.run_review()["outcomes"])
+        self.assertEqual(head["lineage_id"], self.row(cid)["matched_lineage_id"])
+
+    def test_empty_model_response_three_runs_goes_to_needs_review(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script("", "", "")
+        for n in (1, 2):
+            self.assertEqual("partial_failure", self.run_review()["status"])
+            row = self.row(cid)
+            self.assertEqual(("error", n, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+            self.assertIn("JSONDecodeError", row["error"])
+        result = self.run_review()
+        self.assertEqual({"needs_review": 1}, result["outcomes"])
+        row = self.row(cid)
+        self.assertEqual("needs_review", row["outcome"])
+        self.assertTrue(row["decision_reason"].startswith("repeated_errors:SupportOutputError:JSONDecodeError"))
+        self.assertEqual("needs_review", self.status(cid))
+        self.assertEqual(0, self.kernel_count("state"))
+
+    def test_dry_run_never_increments_error_count_but_shows_what_would_happen(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script("", "", "", "", "")
+        self.run_review()
+        self.run_review()
+        self.assertEqual(2, self.row(cid)["error_count"])
+        for _ in range(2):
+            self.run_review(dry_run=True)
+            row = self.row(cid)
+            self.assertEqual(("needs_review", 1, 2, "pending"),
+                             (row["outcome"], row["dry_run"], row["error_count"], self.status(cid)))
+        fresh = self.add("另一条。", refs=("chat_messages:20",))
+        self.script("")
+        self.run_review(dry_run=True, limit=1)
+        self.assertEqual(0, self.row(fresh)["error_count"] if self.row(fresh) else 0)
+
+    def test_ombre_failures_count_too(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script({"supported": True, "reason": "ok"}, {"supported": True, "reason": "ok"},
+                    {"supported": True, "reason": "ok"})
+        self.ombre.analyze = mock.Mock(side_effect=RuntimeError("down"))
+        self.run_review()
+        self.run_review()
+        self.assertEqual({"needs_review": 1}, self.run_review()["outcomes"])
+        self.assertIn("repeated_errors:OmbreFailure", self.row(cid)["decision_reason"])
+        self.assertEqual("needs_review", self.status(cid))
+
+    def test_error_count_resets_after_success(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script("", "", {"supported": True, "reason": "ok"})
+        self.run_review()
+        self.run_review()
+        self.assertEqual(2, self.row(cid)["error_count"])
+        self.assertEqual({"committed_new": 1}, self.run_review()["outcomes"])
+        self.assertEqual(0, self.row(cid)["error_count"])
+
+    def test_rewrite_that_swaps_in_another_context_fact_is_rejected_even_if_that_fact_is_supported(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE chat_messages SET content='哈娅今天买了一只蓝色杯子。' WHERE id=11")
+        conn.commit()
+        conn.close()
+        cid = self.add("费奥多尔下个月搬去札幌，并且双方已经商定日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "没有搬家的依据", "extra_evidence_ids": [11],
+                     "supported_rewrite": "哈娅今天买了一只蓝色杯子。"},
+                    {"supported": True, "rewrite_faithful": False, "reason": "这是另一件事，不是原候选的删减"})
+        result = self.run_review()
+        self.assertEqual({"rejected_unsupported": 1}, result["outcomes"])
+        self.assertEqual(2, len(self.gen.calls))  # no third model call
+        self.assertEqual(0, self.kernel_count("state"))
+        self.assertEqual([], [c for c in self.ombre.calls if c[0] == "analyze"])
+        row = self.row(cid)
+        self.assertEqual(("rejected_unsupported", "policy", "rejected"),
+                         (row["outcome"], row["decision_by"], self.status(cid)))
+        self.assertTrue(row["decision_reason"].startswith("rewrite_not_faithful:"))
+        check = json.loads(row["support_check_json"])["rewrite_check"]
+        self.assertEqual((True, False), (check["supported"], check["rewrite_faithful"]))
+        self.assertIn("原始候选：\n费奥多尔下个月搬去札幌", self.gen.calls[1].prompt_text)
+
+    def test_second_check_must_answer_rewrite_faithful(self):
+        cid = self.add("费奥多尔下个月搬去札幌，双方商定了日期。", refs=("chat_messages:10",))
+        self.script({"supported": False, "reason": "x", "supported_rewrite": "费奥多尔下个月搬去札幌。"},
+                    {"supported": True, "reason": "没有回答忠实度"})
+        result = self.run_review()
+        self.assertEqual("partial_failure", result["status"])
+        row = self.row(cid)
+        self.assertEqual(("error", 1, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+        self.assertIn("missing_rewrite_faithful", row["error"])
+        self.assertEqual(0, self.kernel_count("state"))
+
+    def test_kernel_faults_never_escalate_to_human_review(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        real_insert = MemoryKernel._insert
+
+        def failing(conn, record):
+            if type(record).__name__ == "Delta":
+                raise RuntimeError("disk full")
+            return real_insert(conn, record)
+
+        with mock.patch.object(MemoryKernel, "_insert", staticmethod(failing)):
+            for _ in range(4):
+                self.assertEqual("partial_failure", self.run_review()["status"])
+                row = self.row(cid)
+                self.assertEqual(("error", 0, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+                self.assertIn("disk full", row["error"])
+        self.assertEqual(0, self.kernel_count("state"))
+        self.assertEqual({"committed_new": 1}, self.run_review()["outcomes"])  # recovers once the fault is gone
+        self.assertEqual(("committed", 0), (self.status(cid), self.row(cid)["error_count"]))
+
+    def test_infrastructure_errors_do_not_reset_or_advance_the_content_error_count(self):
+        cid = self.add("费奥多尔下个月搬去札幌。", refs=("chat_messages:10",))
+        self.script("", "")
+        self.run_review()
+        self.run_review()
+        self.assertEqual(2, self.row(cid)["error_count"])
+        self.gen = FakeGenerator()
+        self.gen.fail = ConnectionError("relay down")  # transport fault, not an unusable reply
+        self.run_review()
+        row = self.row(cid)
+        self.assertEqual(("error", 2, "pending"), (row["outcome"], row["error_count"], self.status(cid)))
+        self.script("")
+        self.assertEqual({"needs_review": 1}, self.run_review()["outcomes"])
+        self.assertTrue(self.row(cid)["decision_reason"].startswith("repeated_errors:SupportOutputError"))
+
+    def test_schema_upgrade_adds_error_count_idempotently(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE memory_candidate_reviews (candidate_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, "
+                     "created_at TEXT NOT NULL, error TEXT, decision TEXT, decision_by TEXT)")
+        review.ensure_review_schema(conn)
+        review.ensure_review_schema(conn)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(memory_candidate_reviews)")]
+        conn.close()
+        self.assertEqual(1, cols.count("error_count"))
+
+
 if __name__ == "__main__":
     unittest.main()
