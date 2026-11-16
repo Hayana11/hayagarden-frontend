@@ -2491,6 +2491,31 @@ _BASE_TOOLS = [
         }},
     },
     {
+        'name': 'xhs_status',
+        'description': (
+            '查看哈娅电脑上的小红书门卫（OpenCLI）是否在线。想读小红书前先查一眼；离线（她的电脑睡眠/关机/Tailscale 断开）就别假装能用。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'xhs_read',
+        'description': (
+            '通过哈娅的电脑只读浏览小红书。登录的是哈娅为费佳自己注册的小红书账号，不是她的个人号。'
+            'command：feed=首页推荐，search=按 query 搜索，note=读单篇笔记正文，comments=读笔记评论，user=看某用户主页的笔记。'
+            'note / comments 必须传完整笔记链接（url），且带 xsec_token——就用 feed / search 返回结果里的原始链接，不要自己拼。'
+            'user 传 24 位用户 id 或用户主页链接。'
+            '只读：不存在发布、关注、评论、点赞等能力。哈娅的电脑睡眠或关机时会返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['feed', 'search', 'note', 'comments', 'user'], 'description': '要执行的只读命令'},
+            'query': {'type': 'string', 'description': 'search 的关键词（1-100 字，不能以 - 开头）'},
+            'url': {'type': 'string', 'description': 'note / comments 用的完整笔记链接（含 xsec_token）'},
+            'user': {'type': 'string', 'description': 'user 用的 24 位用户 id 或主页链接'},
+            'limit': {'type': 'integer', 'description': '返回条数：feed/search 1-20，comments 1-50，user 1-30'},
+            'with_replies': {'type': 'boolean', 'description': 'comments 时是否带上楼中楼回复'},
+        }, 'required': ['command']},
+    },
+    {
         'name': 'screenshot_chat',
         'description': '给我们的聊天拍一张截图。viewpoint=fyodor 是从我（费佳）的视角——我的消息在右边、哈娅的在左边，像我手机里看到的样子；viewpoint=hayana 是哈娅平时看到的样子。想给她看"我这边的聊天长什么样"、或者纪念某段对话时用。返回一张聊天截图。',
         'input_schema': {'type': 'object', 'properties': {
@@ -3943,6 +3968,13 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _pocket_html(args.get('timeout_ms', 30000))
         if name == 'pocket_screenshot':
             return _pocket_screenshot(args.get('timeout_ms', 30000))
+        if name == 'xhs_status':
+            from tools import opencli_gate_client
+            return opencli_gate_client.status()
+        if name == 'xhs_read':
+            from tools import opencli_gate_client
+            params = {k: args.get(k) for k in ('query', 'url', 'user', 'limit', 'with_replies') if args.get(k) is not None}
+            return opencli_gate_client.xhs(args.get('command', ''), **params)
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'shop_browse':
@@ -4631,6 +4663,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
     'mcp__home__collect_chat_moment',
+    'mcp__home__xhs_status', 'mcp__home__xhs_read',
 ])
 
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用

@@ -30,6 +30,101 @@ function momentsOwnerToken() {
   return '';
 }
 
+const XHS_MAX_CHARS = 30000;
+const XHS_OFFLINE = 'computer_not_connected：哈娅电脑上的小红书门卫不在线（电脑关机、睡眠或 Tailscale 未连接）。';
+const XHS_MISCONFIGURED = 'opencli_gate_misconfigured：未配置 OPENCLI_GATE_URL / OPENCLI_GATE_TOKEN（/opt/frontend/.env 或环境变量）';
+const XHS_ERROR_TEXT = {
+  auth_required: '小红书账号需要重新登录（请哈娅在电脑的 OpenCLI Chrome 里重新登录）。',
+  bridge_down: '浏览器扩展没连上（哈娅电脑上的 OpenCLI Chrome 扩展未运行）。',
+  busy: '门卫正在执行上一条命令，稍后重试。',
+  empty: '没有找到内容（结果为空）。',
+  timeout: '小红书命令超时。',
+  bad_output: '门卫返回了无法解析的输出。',
+  opencli_failed: 'OpenCLI 执行失败。',
+};
+
+function envValue(key) {
+  const direct = (process.env[key] || '').trim();
+  if (direct) return direct;
+  try {
+    const lines = readFileSync('/opt/frontend/.env', 'utf8').split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith(`${key}=`)) continue;
+      let value = line.slice(key.length + 1).trim();
+      const quoted = (value.startsWith('"') && value.endsWith('"'))
+        || (value.startsWith("'") && value.endsWith("'"));
+      if (quoted) value = value.slice(1, -1);
+      return value;
+    }
+  } catch (_error) {
+    // Falls through to the misconfigured message.
+  }
+  return '';
+}
+
+function xhsText(text) {
+  return { content: [{ type: 'text', text }] };
+}
+
+async function callXhsGate(method, path, body, timeoutMs) {
+  const base = envValue('OPENCLI_GATE_URL').replace(/\/+$/, '');
+  const token = envValue('OPENCLI_GATE_TOKEN');
+  if (!base || !token) return { error: XHS_MISCONFIGURED };
+  let resp;
+  try {
+    resp = await fetch(base + path, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (_error) {
+    return { error: XHS_OFFLINE };
+  }
+  if (resp.status === 401) {
+    return { error: 'opencli_gate_auth_failed：门卫拒绝了 token（OPENCLI_GATE_TOKEN 与电脑上的配置不一致）' };
+  }
+  let payload;
+  try {
+    payload = await resp.json();
+  } catch (_error) {
+    return { error: `opencli_gate_http_${resp.status}：门卫返回了非 JSON 内容` };
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { error: 'opencli_gate_error：门卫返回格式异常' };
+  }
+  return { payload };
+}
+
+function xhsTruncate(text, limit = XHS_MAX_CHARS) {
+  return text.length <= limit ? text : `${text.slice(0, limit)}\n…（已截断，共 ${text.length} 字符）`;
+}
+
+async function xhsStatus() {
+  const { payload, error } = await callXhsGate('GET', '/status', null, 25000);
+  if (error) return xhsText(error);
+  const doctor = xhsTruncate(String(payload.doctor || ''), 2000);
+  if (!payload.ok) return xhsText(`opencli_gate_unhealthy：门卫在线，但 OpenCLI 自检未通过。\n${doctor}`);
+  return xhsText(`小红书门卫在线。\n${doctor}`);
+}
+
+async function xhsRead(params) {
+  const body = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) body[k] = v;
+  }
+  const { payload, error } = await callXhsGate('POST', '/xhs', body, 120000);
+  if (error) return xhsText(error);
+  if (payload.ok) return xhsText(xhsTruncate(JSON.stringify(payload.data)));
+  const code = String(payload.error || 'opencli_failed');
+  const text = XHS_ERROR_TEXT[code] || `失败：${code.slice(0, 200)}`;
+  return xhsText(`${code}：${text}`);
+}
+
 async function runGatedHomeWrite({
   uhA0Profile,
   requireUhA0Profile = false,
@@ -295,6 +390,25 @@ function buildServer({ uhA0Profile = false } = {}) {
         caption: caption ?? '',
       }, { Authorization: `Bearer ${ownerToken}` });
     }
+  );
+
+  // ── 小红书（经哈娅电脑上的 OpenCLI 门卫，只读）────────────
+  server.tool(
+    'xhs_status',
+    {},
+    () => xhsStatus()
+  );
+  server.tool(
+    'xhs_read',
+    {
+      command: z.enum(['feed', 'search', 'note', 'comments', 'user']).describe('只读命令：feed 首页推荐 / search 搜索 / note 笔记正文 / comments 评论 / user 用户主页'),
+      query: z.string().optional().describe('search 的关键词（1-100 字，不能以 - 开头）'),
+      url: z.string().optional().describe('note / comments 用的完整笔记链接，必须带 xsec_token（用 feed/search 返回的原始链接）'),
+      user: z.string().optional().describe('user 用的 24 位用户 id 或主页链接'),
+      limit: z.number().int().optional().describe('返回条数：feed/search 1-20，comments 1-50，user 1-30'),
+      with_replies: z.boolean().optional().describe('comments 时是否带上楼中楼回复'),
+    },
+    (params) => xhsRead(params)
   );
 
   return server;
