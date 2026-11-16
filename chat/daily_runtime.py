@@ -167,7 +167,7 @@ class DailyTurnPlan:
     context_epoch: int
     resident_generation: int
     resident_key: str
-    user_message_id: int
+    user_message_id: Optional[int]
     epoch_token: dict[str, Any]
     lease_owner: str
     is_cold: bool
@@ -177,6 +177,8 @@ class DailyTurnPlan:
     manifest: dict[str, Any]
     feedback_lines: tuple[str, ...] = ()
     feedback_ids: tuple[int, ...] = ()
+    # History cut-off number (numeric only); request identity stays user_message_id.
+    history_anchor_message_id: Optional[int] = None
     user_content: str = ''
     user_image_url: str = ''
     user_attachments: tuple[dict[str, str], ...] = ()
@@ -225,6 +227,23 @@ class DailyTurnPlan:
     # 0-or-1 surfaced memory for this turn (tools.memory_surface); None = not decided.
     memory_recall: Optional[dict[str, Any]] = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
+
+
+def _require_request_message_id(plan: 'DailyTurnPlan') -> int:
+    """Request identity for Chat turns; a request-less (proactive) plan has none."""
+    value = plan.user_message_id
+    if value is None:
+        raise DailyRuntimeError(
+            'turn has no request message id',
+            error_code='request_message_id_missing',
+        )
+    return int(value)
+
+
+def _history_anchor(plan: 'DailyTurnPlan') -> int:
+    """Numeric history cut-off; Chat plans fall back to their request id."""
+    value = getattr(plan, 'history_anchor_message_id', None)
+    return int(plan.user_message_id if value is None else value)
 
 
 _LOCAL_BINDING: Optional[LocalResidentBinding] = None
@@ -1745,7 +1764,7 @@ def _build_production_context_plan(
         source_db_path=store_path,
         shadow_store_path=store_path,
         continuity_store_path=store_path,
-        current_user_message_id=int(plan.user_message_id),
+        current_user_message_id=_require_request_message_id(plan),
         budget_policy=policy,
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
@@ -1949,7 +1968,7 @@ def _conditionally_seal_cold_bridge(
 
     bridge_members = tuple(detection.source_members)
     if any(
-        int(plan.user_message_id) in _context_source_message_ids(
+        _require_request_message_id(plan) in _context_source_message_ids(
             str(getattr(member, 'source_ref', '') or '')
         )
         for member in bridge_members
@@ -2148,7 +2167,7 @@ def _project_context_plan_history(
                     error_code='context_plan_source_unavailable',
                 )
             for message_id in ids:
-                if message_id == int(plan.user_message_id) or message_id in seen_ids:
+                if message_id == _require_request_message_id(plan) or message_id in seen_ids:
                     continue
                 row = rows.get(message_id)
                 if row is None:
@@ -2625,7 +2644,7 @@ def _hot_native_tail_proof(
             'reason': 'current_request_source_ambiguous' if request_source_ref
                 else 'current_request_source_missing',
         }
-    if int(user_message_id) >= int(plan.user_message_id):
+    if int(user_message_id) >= _history_anchor(plan):
         return {'status': 'ambiguous', 'reason': 'current_request_is_not_previous'}
     try:
         watermark = int(frozen['receipt'].installed_source_watermark)
@@ -4440,7 +4459,7 @@ def _validate_production_context_install(
     if (
         len(current_sections) != 1
         or str(current_sections[0].source_ref or '')
-            != 'message:%d' % int(plan.user_message_id)
+            != 'message:%d' % _require_request_message_id(plan)
     ):
         raise DailyRuntimeError(
             'ContextPlan current-request proof is invalid',
@@ -4449,9 +4468,9 @@ def _validate_production_context_install(
     try:
         from continuity.sources import evidence_ref
         current_row = _load_context_source_rows(
-            {int(plan.user_message_id)},
+            {_require_request_message_id(plan)},
             db_path=_production_continuity_store_path(plan),
-        ).get(int(plan.user_message_id))
+        ).get(_require_request_message_id(plan))
         if current_row is None:
             raise ValueError('current request source row is unavailable')
         current_evidence = evidence_ref(current_row, prefix='message')
@@ -4747,7 +4766,7 @@ def _validate_production_context_install(
                 'Capacity current request has a second history carrier',
                 error_code='context_plan_current_request_parity_failed',
             )
-        current_source_ref = 'message:%d' % int(plan.user_message_id)
+        current_source_ref = 'message:%d' % _require_request_message_id(plan)
         if (
             plan.manifest.get('capacity_context_current_user_in_candidate')
             is not False
@@ -5144,6 +5163,7 @@ def _assemble_plan(
             chat_id=chat_id,
             daily_context=refreshed,
             current_user_message_id=int(user_message_id),
+            history_anchor_message_id=int(user_message_id),
             static_system=static_system,
             is_cold=is_cold,
             is_respawn=is_respawn,
@@ -5210,6 +5230,7 @@ def _assemble_plan(
         resident_generation=resident_generation,
         resident_key=resident_key,
         user_message_id=int(user_message_id),
+        history_anchor_message_id=int(user_message_id),
         epoch_token=epoch_token,
         lease_owner=owner,
         is_cold=is_cold,
@@ -5496,7 +5517,8 @@ def prepare_daily_turn(
                 request_id=req_id, chat_id=chat_id, local_day=origin_day,
                 context_id=context_id, context_epoch=context_epoch,
                 resident_generation=resident_generation, resident_key=resident_key,
-                user_message_id=int(user_message_id), epoch_token={},
+                user_message_id=int(user_message_id),
+                history_anchor_message_id=int(user_message_id), epoch_token={},
                 lease_owner=owner, is_cold=True, is_respawn=False,
                 cursor_before=db_cursor, assembly={}, manifest={},
                 db_path=db_path, tool_profile=DAILY_TOOL_PROFILE,
@@ -5669,7 +5691,7 @@ def reprepare_after_capacity_swap(
     watermark = cursor_watermark if cursor_watermark is not None else plan.cursor_before
     if watermark is None:
         # No prior cursor (rare): pin just before CURRENT user so hot assembly is legal.
-        watermark = max(0, int(plan.user_message_id) - 1)
+        watermark = max(0, _history_anchor(plan) - 1)
 
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
     gen = int(refreshed.get('resident_generation') or 0)
@@ -5719,7 +5741,7 @@ def reprepare_after_capacity_swap(
         ) from exc
 
     replacement = prepare_daily_turn(
-        user_message_id=plan.user_message_id,
+        user_message_id=_require_request_message_id(plan),
         chat_id=plan.chat_id,
         request_id=plan.request_id,
         db_path=plan.db_path,
@@ -6035,7 +6057,7 @@ def reprepare_after_registered_session_change(
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
     return prepare_daily_turn(
-        user_message_id=plan.user_message_id,
+        user_message_id=_require_request_message_id(plan),
         chat_id=plan.chat_id,
         request_id=plan.request_id,
         db_path=plan.db_path,
@@ -6431,7 +6453,7 @@ def finalize_transcript_mapping_after_success(
                 context_epoch=int(plan.context_epoch),
                 resident_generation=int(plan.resident_generation),
                 chat_id=str(plan.chat_id),
-                user_message_id=int(plan.user_message_id),
+                user_message_id=_require_request_message_id(plan),
                 assistant_message_id=int(assistant_message_id),
                 expected_start_offset=int(plan.transcript_start_offset),
                 observed_end_offset=int(plan.transcript_end_offset),
@@ -6544,7 +6566,8 @@ def _rebuild_daily_assembly_with_history_budget(
     assembly = dh.build_daily_window_context(
         chat_id=plan.chat_id,
         daily_context=refreshed,
-        current_user_message_id=int(plan.user_message_id),
+        current_user_message_id=plan.user_message_id,
+        history_anchor_message_id=_history_anchor(plan),
         static_system=static_system,
         is_cold=is_cold,
         is_respawn=is_respawn,
@@ -6869,7 +6892,7 @@ def _attempt_capacity_swap_before_stdin(
             owner_cursor_message_id=(
                 int(watermark)
                 if watermark is not None
-                else max(0, int(plan.user_message_id) - 1)
+                else max(0, _history_anchor(plan) - 1)
             ),
             owner_process_generation=target_process_generation,
             db_path=plan.db_path,
@@ -6990,7 +7013,7 @@ def _attempt_capacity_swap_before_stdin(
                 for value in tuple(getattr(handoff.candidate, 'selected_message_ids', ()) or ())
                 if int(value) > 0
             )
-            if int(plan.user_message_id) in selected_ids:
+            if _require_request_message_id(plan) in selected_ids:
                 raise DailyRuntimeError(
                     'current user entered Capacity forged JSONL',
                     error_code='context_plan_capacity_current_user_in_candidate',
@@ -7733,7 +7756,7 @@ def _commit_continuity_shadow_receipt(
                     continue
                 if mid > 0 and mid not in selected_ids:
                     selected_ids.append(mid)
-            current_user_id = int(plan.user_message_id)
+            current_user_id = _require_request_message_id(plan)
             candidate_sid = str(
                 capacity_pending.get('candidate_session_id') or ''
             ).strip()
@@ -7969,7 +7992,7 @@ def _commit_continuity_shadow_receipt(
                 )
                 return False
             new_members = _shadow_derive_members_for_ids(
-                (int(plan.user_message_id), int(assistant_message_id)),
+                (_require_request_message_id(plan), int(assistant_message_id)),
                 db_path=plan.db_path,
             )
             if len(new_members) != 1:
@@ -8005,7 +8028,7 @@ def _commit_continuity_shadow_receipt(
                 )
                 return False
             ids = list(_shadow_assembly_message_ids(plan))
-            ids.extend((int(plan.user_message_id), int(assistant_message_id)))
+            ids.extend((_require_request_message_id(plan), int(assistant_message_id)))
             unique_ids: list[int] = []
             for value in ids:
                 if value > 0 and value not in unique_ids:
@@ -8260,7 +8283,7 @@ def _observe_continuity_shadow(
                     result = build_daily_continuity_shadow_plan(
                         source_db_path=plan.db_path or dc.DEFAULT_DB_PATH,
                         shadow_store_path=store_path,
-                        current_user_message_id=int(plan.user_message_id),
+                        current_user_message_id=_require_request_message_id(plan),
                         budget_policy=policy,
                         accepted_fixed_sections=fixed_sections,
                     )
@@ -8674,7 +8697,7 @@ def ensure_resident_and_stream(
         try:
             from chat.reality_context import build_reality_context
             reality = build_reality_context(
-                current_user_message_id=int(plan.user_message_id),
+                current_user_message_id=_require_request_message_id(plan),
                 is_new_model_context=bool(cold_like),
                 db_path=plan.db_path,
             )
@@ -9619,7 +9642,7 @@ def _assert_hidden_flow_lease_for_finalize(
         raise ConflictError("hidden flow resident lease owner mismatch at finalize")
     if type(row["request_message_id"]) is not int or int(
         row["request_message_id"]
-    ) != int(plan.user_message_id):
+    ) != _require_request_message_id(plan):
         raise ConflictError("hidden flow resident lease request mismatch at finalize")
     try:
         expires_at = datetime.datetime.strptime(
@@ -10224,7 +10247,7 @@ def reprepare_after_hot_cold_mismatch(
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
     return prepare_daily_turn(
-        user_message_id=plan.user_message_id,
+        user_message_id=_require_request_message_id(plan),
         chat_id=plan.chat_id,
         request_id=plan.request_id,
         db_path=plan.db_path,

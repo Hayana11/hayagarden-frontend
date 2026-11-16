@@ -248,6 +248,7 @@ def build_daily_window_context(
     chat_id: str = DEFAULT_CHAT_ID,
     daily_context: dict[str, Any],
     current_user_message_id: Optional[int] = None,
+    history_anchor_message_id: Optional[int] = None,
     static_system: str = '',
     is_cold: bool = True,
     is_respawn: bool = False,
@@ -278,6 +279,11 @@ def build_daily_window_context(
     to suppress Manual Forge carryover replay (C1 Exact-Once).
     """
     _ = TZ_OFFSET_HOURS
+    # Numeric history cut-off; defaults to the request id (Chat behaviour).
+    history_cut = (
+        current_user_message_id if history_anchor_message_id is None
+        else history_anchor_message_id
+    )
     ctx = dict(daily_context)
     context_id = int(ctx['id'])
     resident_generation = int(ctx.get('resident_generation') or 1)
@@ -361,8 +367,8 @@ def build_daily_window_context(
             local_day=str(ctx['local_day']),
             db_path=db_path,
             after_message_id=after_cursor,
-            exclude_message_id=current_user_message_id,
-            up_to_message_id=current_user_message_id,
+            exclude_message_id=history_cut,
+            up_to_message_id=history_cut,
             context_id=context_id,
             context_epoch=int(ctx.get('context_epoch') or 0),
             include_assistant_wake=cold_like,
