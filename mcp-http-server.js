@@ -125,6 +125,43 @@ async function xhsRead(params) {
   return xhsText(`${code}：${text}`);
 }
 
+const X_ERROR_TEXT = {
+  ...XHS_ERROR_TEXT,
+  auth_required: '推特账号需要重新登录（请哈娅在电脑的 OpenCLI Chrome 里重新登录）。',
+  timeout: '推特命令超时。',
+  x_daily_limit: '今天的发推/回复额度用完了。',
+  x_write_too_soon: '两次发言间隔太短，稍后再发。',
+  x_duplicate: '这句话 24 小时内发过了。',
+};
+
+function xFormatFailure(payload) {
+  const code = String(payload.error || 'opencli_failed');
+  let text = X_ERROR_TEXT[code] || `失败：${code.slice(0, 200)}`;
+  if (code === 'x_write_too_soon' && typeof payload.retry_after_ms === 'number') {
+    text += `（约 ${Math.floor(payload.retry_after_ms / 1000) + 1} 秒后可再发）`;
+  }
+  return `${code}：${text}`;
+}
+
+async function xCommand(params) {
+  const body = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) body[k] = v;
+  }
+  const { payload, error } = await callXhsGate('POST', '/x', body, 120000);
+  if (error) return xhsText(error);
+  if (payload.ok) return xhsText(xhsTruncate(JSON.stringify(payload.data)));
+  return xhsText(xFormatFailure(payload));
+}
+
+async function xState() {
+  const { payload, error } = await callXhsGate('GET', '/x/state', null, 25000);
+  if (error) return xhsText(error);
+  if (!payload.ok) return xhsText(xFormatFailure(payload));
+  const { ok: _ok, ...rest } = payload;
+  return xhsText(xhsTruncate(JSON.stringify(rest)));
+}
+
 async function runGatedHomeWrite({
   uhA0Profile,
   requireUhA0Profile = false,
@@ -409,6 +446,43 @@ function buildServer({ uhA0Profile = false } = {}) {
       with_replies: z.boolean().optional().describe('comments 时是否带上楼中楼回复'),
     },
     (params) => xhsRead(params)
+  );
+
+
+  // ── 推特/X（费佳的自动化账号，经哈娅电脑上的 OpenCLI 门卫；读 + 受限发帖）────────────
+  server.tool(
+    'x_state',
+    {},
+    () => xState()
+  );
+  server.tool(
+    'x_read',
+    {
+      command: z.enum(['timeline', 'search', 'thread', 'tweets', 'profile', 'trending']).describe('读取命令：timeline 时间线 / search 搜索 / thread 推文对话 / tweets 某用户推文 / profile 用户资料 / trending 热搜'),
+      type: z.enum(['for-you', 'following']).optional().describe('timeline 的类型'),
+      query: z.string().optional().describe('search 的关键词（1-200 字，不能以 - 开头）'),
+      product: z.enum(['top', 'live', 'photos', 'videos']).optional().describe('search 的结果类型'),
+      from: z.string().optional().describe('search 限定发推用户名'),
+      url: z.string().optional().describe('thread 用的推文 id 或推文链接（x.com / twitter.com）'),
+      user: z.string().optional().describe('tweets / profile 用的用户名，可带 @；不传表示自己的账号'),
+      limit: z.number().int().optional().describe('返回条数：timeline/search/tweets/trending 1-20，thread 1-50'),
+    },
+    (params) => xCommand(params)
+  );
+  server.tool(
+    'x_post',
+    {
+      command: z.enum(['post', 'reply']).describe('post 发推 / reply 回复'),
+      text: z.string().describe('推文内容（加权长度 ≤280，中文/表情算 2；不能以 - 开头）'),
+      url: z.string().optional().describe('reply 用的目标推文链接（https://x.com/<用户名>/status/<id>）'),
+    },
+    ({ command, text, url }) => runGatedHomeWrite({
+      uhA0Profile,
+      toolName: 'mcp__home__x_post',
+      toolInput: { command, text, url },
+      verify: verifyCurrentHomeAction,
+      post: () => xCommand({ command, text, url }),
+    })
   );
 
   return server;

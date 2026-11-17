@@ -2516,6 +2516,45 @@ _BASE_TOOLS = [
         }, 'required': ['command']},
     },
     {
+        'name': 'x_read',
+        'description': (
+            '通过哈娅的电脑读推特/X。这是哈娅为费佳注册的自动化账号（标注为由哈娅管理的自动化账号），不是她的个人号。'
+            'command：timeline=时间线（type=for-you 推荐 / following 关注），search=搜索（query，可选 product=top/live/photos/videos、from=某用户），'
+            'thread=读一条推文及其对话（url 传推文 id 或推文链接），tweets=某用户的推文（user，不传=自己的账号），profile=用户资料（user，不传=自己），trending=热搜。'
+            'user / from 传用户名，可带 @。只读；哈娅的电脑睡眠或关机时返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['timeline', 'search', 'thread', 'tweets', 'profile', 'trending'], 'description': '要执行的读取命令'},
+            'type': {'type': 'string', 'enum': ['for-you', 'following'], 'description': 'timeline 的类型'},
+            'query': {'type': 'string', 'description': 'search 的关键词（1-200 字，不能以 - 开头）'},
+            'product': {'type': 'string', 'enum': ['top', 'live', 'photos', 'videos'], 'description': 'search 的结果类型'},
+            'from': {'type': 'string', 'description': 'search 限定发推用户名'},
+            'url': {'type': 'string', 'description': 'thread 用的推文 id 或推文链接（x.com / twitter.com）'},
+            'user': {'type': 'string', 'description': 'tweets / profile 用的用户名，可带 @；不传表示自己的账号'},
+            'limit': {'type': 'integer', 'description': '返回条数：timeline/search/tweets/trending 1-20，thread 1-50'},
+        }, 'required': ['command']},
+    },
+    {
+        'name': 'x_post',
+        'description': (
+            '用费佳自己的自动化推特/X 账号（由哈娅管理）发推或回复。发言不需要先问哈娅，但每一条都会被记录，并且有硬上限：'
+            '每天最多 5 条推文、20 条回复，两次发言至少间隔 60 秒，同一句话 24 小时内不能重复发。'
+            'command=post 发新推（text）；command=reply 回复某条推文（url 传推文链接，text 为回复内容）。'
+            'text 最长 280（中文/全角/表情算 2），不能以 - 开头。不支持图片；没有点赞、转推、关注、私信、删除等能力。'
+            '这是公开发言：不要发哈娅的隐私信息。哈娅的电脑睡眠或关机时返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['post', 'reply'], 'description': 'post 发推 / reply 回复'},
+            'text': {'type': 'string', 'description': '推文内容（加权长度 ≤280，中文/表情算 2）'},
+            'url': {'type': 'string', 'description': 'reply 用的目标推文链接（https://x.com/<用户名>/status/<id>）'},
+        }, 'required': ['command', 'text']},
+    },
+    {
+        'name': 'x_state',
+        'description': '查看费佳推特账号今天的发推/回复数量、每日上限、以及最近 10 条发言记录（发之前先看一眼额度）。哈娅的电脑离线时返回 computer_not_connected。',
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
         'name': 'screenshot_chat',
         'description': '给我们的聊天拍一张截图。viewpoint=fyodor 是从我（费佳）的视角——我的消息在右边、哈娅的在左边，像我手机里看到的样子；viewpoint=hayana 是哈娅平时看到的样子。想给她看"我这边的聊天长什么样"、或者纪念某段对话时用。返回一张聊天截图。',
         'input_schema': {'type': 'object', 'properties': {
@@ -3975,6 +4014,20 @@ def run_tool(name, args, caller='fyodor_cc'):
             from tools import opencli_gate_client
             params = {k: args.get(k) for k in ('query', 'url', 'user', 'limit', 'with_replies') if args.get(k) is not None}
             return opencli_gate_client.xhs(args.get('command', ''), **params)
+        if name == 'x_read':
+            from tools import opencli_gate_client
+            params = {k: args.get(k) for k in ('type', 'query', 'product', 'from', 'url', 'user', 'limit') if args.get(k) is not None}
+            return opencli_gate_client.x(args.get('command', ''), **params)
+        if name == 'x_post':
+            from tools import opencli_gate_client
+            command = args.get('command', '')
+            if command not in ('post', 'reply'):
+                return 'x_post 只支持 command=post 或 reply'
+            params = {k: args.get(k) for k in ('text', 'url') if args.get(k) is not None}
+            return opencli_gate_client.x(command, **params)
+        if name == 'x_state':
+            from tools import opencli_gate_client
+            return opencli_gate_client.x_state()
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'shop_browse':
@@ -4664,6 +4717,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
     'mcp__home__collect_chat_moment',
     'mcp__home__xhs_status', 'mcp__home__xhs_read',
+    'mcp__home__x_read', 'mcp__home__x_post', 'mcp__home__x_state',
 ])
 
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用

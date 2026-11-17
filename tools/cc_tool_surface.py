@@ -58,6 +58,30 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["command"],
     },
+    "mcp__home__x_state": _EMPTY_SCHEMA,
+    "mcp__home__x_read": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "enum": ["timeline", "search", "thread", "tweets", "profile", "trending"]},
+            "type": {"type": "string", "enum": ["for-you", "following"]},
+            "query": {"type": "string"},
+            "product": {"type": "string", "enum": ["top", "live", "photos", "videos"]},
+            "from": {"type": "string"},
+            "url": {"type": "string"},
+            "user": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["command"],
+    },
+    "mcp__home__x_post": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "enum": ["post", "reply"]},
+            "text": {"type": "string"},
+            "url": {"type": "string"},
+        },
+        "required": ["command", "text"],
+    },
     "mcp__home__get_ledger": {
         "type": "object",
         "properties": {"month": {"type": "string"}},

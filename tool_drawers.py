@@ -39,6 +39,10 @@ DRAWERS = {
         'label': '小红书',
         'tools': ['xhs_status', 'xhs_read'],
     },
+    'x': {
+        'label': '推特',
+        'tools': ['x_state', 'x_read', 'x_post'],
+    },
     'light': {
         'label': '灯控',
         'tools': ['light_on', 'light_off', 'light_warm', 'light_neutral',
@@ -114,6 +118,7 @@ FORCE_RULES = [
     (re.compile(r'开灯|关灯|暖光|暖灯|中性光|亮度|色温|台灯|灯还?[开关亮]'), ['light']),
     (re.compile(r'搜一?下|搜索|查一?[下查]|最新|新闻|github|仓库|开源', re.I), ['web']),
     (re.compile(r'小红书|微博|收藏|pocket|手机浏览器|她的账号|登录态', re.I), ['pocket', 'xhs']),
+    (re.compile(r'(?i:推特|twitter)|推文|发推|(?<![A-Za-z0-9_])X(?![A-Za-z0-9_])'), ['x']),
     (re.compile(r'购物|淘宝|下单|购物车|结[账帐]|买.{0,6}(东西|个|件|点)|店里'), ['shopping']),
     (re.compile(r'照片|图片|相册|截图|拍的|存图'), ['gallery']),
     (re.compile(r'代码|文件|前端|后端|页面|部署|修(一下|个|复)|bug|报错', re.I), ['code', 'workspace']),
