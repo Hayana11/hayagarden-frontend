@@ -6,6 +6,8 @@ const { StreamableHTTPServerTransport }  = require('@modelcontextprotocol/sdk/se
 const { execSync, execFileSync }       = require('child_process');
 const { randomUUID }                     = require('crypto');
 const { readFileSync }                    = require('fs');
+const os                                  = require('os');
+const path                                = require('path');
 const { z }                              = require('zod');
 const { readLightStatus }                = require('./light-status-adapter');
 
@@ -184,7 +186,18 @@ async function runGatedHomeWrite({
   return post();
 }
 
-function buildServer({ uhA0Profile = false } = {}) {
+function residentTurnLeasePath(rawPath) {
+  const raw = String(rawPath || '').trim();
+  if (!raw) return '';
+  const resolved = path.resolve(raw);
+  const leaseDir = path.join(os.tmpdir(), 'hayagarden-uh-a0-turn-leases');
+  if (path.dirname(resolved) !== leaseDir) return '';
+  if (!/^[0-9a-f]{32}\.json$/.test(path.basename(resolved))) return '';
+  return resolved;
+}
+
+function buildServer({ uhA0Profile = false, turnLeasePath = '' } = {}) {
+  const verifiedTurnLeasePath = residentTurnLeasePath(turnLeasePath);
   const server = new McpServer({ name: 'home-mcp', version: '1.0.0' });
 
   server.tool(
@@ -278,9 +291,13 @@ function buildServer({ uhA0Profile = false } = {}) {
     }
   }
   function verifyCurrentHomeAction(toolName, toolInput) {
+    if (!verifiedTurnLeasePath) {
+      return { ok: false, decision: { lease_decision: 'LEASE_MISMATCH' }, result: { content: [{ type: 'text', text: 'UH-A0 LEASE_MISMATCH' }] } };
+    }
     try {
       const raw = execFileSync(process.env.PYTHON || 'python3', ['-m', 'tools.execution_fence', 'verify-json'], {
-        cwd: process.env.UH_A0_REPO_ROOT || '/opt/frontend', env: process.env,
+        cwd: process.env.UH_A0_REPO_ROOT || '/opt/frontend',
+        env: { ...process.env, UH_A0_TURN_LEASE_PATH: verifiedTurnLeasePath },
         input: JSON.stringify({ tool_name: toolName, tool_input: toolInput }),
         encoding: 'utf8', timeout: 3000,
       });
@@ -510,7 +527,8 @@ app.all('/mcp', async (req, res) => {
     );
     if (isInit) {
       const uhA0Profile = String(req.headers['x-uh-a0-profile'] || '').trim() === 'uh_a0';
-      const server = buildServer({ uhA0Profile });
+      const turnLeasePath = req.headers['x-uh-a0-turn-lease-path'];
+      const server = buildServer({ uhA0Profile, turnLeasePath });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { sessions[id] = { server, transport }; },
