@@ -91,6 +91,20 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["capability_id"], "memory.search")
         self.assertEqual(result["lease_decision"], "ALLOW")
 
+    def test_xhs_read_capabilities_are_allowed_and_unknown_home_tool_is_denied(self):
+        for mode in ("chat", "wake"):
+            lease = self.lease(mode=mode)
+            for tool, capability_id, tool_input in (
+                ("mcp__home__xhs_status", "xhs.status", {}),
+                ("mcp__home__xhs_read", "xhs.read", {"command": "feed"}),
+            ):
+                result = evaluate_tool_call(tool, tool_input, lease)
+                self.assertEqual(result["capability_id"], capability_id, (mode, tool))
+                self.assertEqual(result["lease_decision"], "ALLOW", (mode, tool))
+        denied = evaluate_tool_call("mcp__home__xhs_publish", {}, self.lease())
+        self.assertEqual(denied["lease_decision"], "DENIED_CAPABILITY")
+        self.assertIsNone(denied["capability_id"])
+
     def test_a_health_internal_read_is_allowed_by_default_chat_lease(self):
         lease = self.lease()
         self.assertIn("health.read", lease["allowed_capabilities"])
@@ -506,6 +520,8 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__diary_write",
                 "mcp__capability__task_timer_start",
                 "mcp__home__get_countdowns",
+                "mcp__home__xhs_status",
+                "mcp__home__xhs_read",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",
