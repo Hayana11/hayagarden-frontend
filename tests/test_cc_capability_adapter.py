@@ -252,6 +252,23 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
 
+    def test_home_http_receives_resident_owned_turn_lease_path(self):
+        lease_path = (
+            "/tmp/hayagarden-uh-a0-turn-leases/"
+            + ("a" * 32)
+            + ".json"
+        )
+        cfg = build_uh_a0_mcp_config(
+            env={"UH_A0_TURN_LEASE_PATH": lease_path}
+        )
+        self.assertEqual(
+            cfg["mcpServers"]["home"]["headers"],
+            {
+                "X-UH-A0-Profile": "uh_a0",
+                "X-UH-A0-Turn-Lease-Path": lease_path,
+            },
+        )
+
     def _external_item(self):
         return {
             "surface_tool_name": "ext_game_roll",

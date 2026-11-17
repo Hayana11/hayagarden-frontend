@@ -320,11 +320,18 @@ def build_uh_a0_mcp_config(
     leave it out when no external tool is visible, since it would expose nothing.
     """
     root = Path(__file__).resolve().parent.parent
+    environ = os.environ if env is None else env
+    home_headers = {"X-UH-A0-Profile": "uh_a0"}
+    home_turn_lease_path = str(
+        environ.get("UH_A0_TURN_LEASE_PATH") or ""
+    ).strip()
+    if home_turn_lease_path:
+        home_headers["X-UH-A0-Turn-Lease-Path"] = home_turn_lease_path
     servers = {
         "home": {
             "type": "http",
             "url": resolve_home_mcp_url(legacy_mcp_config_path),
-            "headers": {"X-UH-A0-Profile": "uh_a0"},
+            "headers": home_headers,
         },
         "internal": {
             "type": "http",
