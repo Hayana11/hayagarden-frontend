@@ -5879,6 +5879,22 @@ def _run_proactive_cold_wake_turn(
             'self_state': ''.join(state_acc),
             'display_segments': segments.to_json(),
         })
+        delivery_window_identity = window_identity
+        if window_identity is not None:
+            from chat.window_identity import (
+                capture_current_window_identity, identities_match, normalize_window_identity,
+            )
+            captured = normalize_window_identity(window_identity)
+            promoted = {
+                'chat_id': plan.chat_id, 'context_id': plan.context_id,
+                'context_epoch': plan.context_epoch,
+                'resident_generation': plan.resident_generation,
+            }
+            if captured is None or any(captured[k] != promoted[k] for k in (
+                    'chat_id', 'context_id', 'context_epoch')) or not identities_match(
+                    promoted, capture_current_window_identity(db_path=DB_PATH)):
+                raise RuntimeError('proactive_cold_window_identity_drift')
+            delivery_window_identity = promoted
         _wake_live_trace(rid, 'PROACTIVE_COLD_STREAM_DONE', silent=silent)
         return {
             'text': text,
@@ -5895,6 +5911,7 @@ def _run_proactive_cold_wake_turn(
             'cache_info': cache_info,
             'native_transcript_binding': None,
             '_shared_delivery_fence': fence,
+            '_delivery_window_identity': delivery_window_identity,
             # Hand-off to the 2b finalizer.
             'proactive_cold_start': True,
             '_proactive_cold_plan': plan,
@@ -10544,6 +10561,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 main_cache_info['observation_transcript_skip'] = dict(
                     observation_skip
                 )
+            delivery_window_identity = (
+                main_turn.get('_delivery_window_identity') or _wake_window_identity
+            )
             cold_turn = bool(main_turn.get('proactive_cold_start'))
             if cold_turn:
                 from chat import daily_runtime as _rt
@@ -10578,7 +10598,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 ),
                 display_segments_json=str(main_turn.get('display_segments') or ''),
                 wake_run_id=wake_run_id,
-                window_identity=_wake_window_identity,
+                window_identity=delivery_window_identity,
                 settlement_required=False,
             )
         except UnifiedNormalWakeSharedUnavailable as exc:
@@ -10642,7 +10662,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     failed_fence.finish(
                         False,
                         cache_info=main_turn.get('cache_info'),
-                        window_identity=_wake_window_identity,
+                        window_identity=(
+                            main_turn.get('_delivery_window_identity') or _wake_window_identity
+                        ),
                         reason='normal_wake_main_chat_failed',
                     )
             _wake_live_trace(
@@ -10682,7 +10704,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             delivery_fence.finish(
                 delivery_succeeded,
                 cache_info=main_cache_info,
-                window_identity=_wake_window_identity,
+                window_identity=delivery_window_identity,
                 reason=(
                     'normal_wake_main_chat_delivery_failed'
                     if not delivery_succeeded else 'delivery_succeeded'

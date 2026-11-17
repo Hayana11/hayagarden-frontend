@@ -20,6 +20,7 @@ import config_store
 from chat import daily_context as dc
 from chat import daily_runtime as dr
 from chat.capacity_swap_runtime import note_same_context_last_good
+from chat.session_registry import register_context_claude_session
 from chat.mail_notice_store import peek_pending_mail_notice_ids, record_pending_mail_notice
 from tests.test_proactive_cold_prepare import NOW, TRIGGER, _ColdResident, _GatewayBase, _insert
 
@@ -199,6 +200,81 @@ class ColdWakeHappyPathTests(_World):
         self.assertNotIn('spoken reply', sent)
         self.assertEqual(self.resident.killed, 0)
         dr._release_lease(plan)
+
+
+class ColdWakeGenerationHandoffTests(_World):
+    def setUp(self):
+        super().setUp()
+        from chat import window_identity
+
+        ctx = dc.get_or_create_daily_context(now=NOW, db_path=self.db)
+        register_context_claude_session(
+            context_id=ctx['id'],
+            context_epoch=ctx['context_epoch'],
+            resident_generation=ctx['resident_generation'],
+            chat_id=ctx['chat_id'],
+            claude_session_id='old-session',
+            cwd='/work',
+            source='daily_runtime',
+            scan_offset=0,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        def current_identity(conn=None):
+            owned = conn is None
+            if owned:
+                conn = sqlite3.connect(self.db)
+                conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT id, chat_id, context_epoch, resident_generation "
+                    "FROM daily_contexts WHERE chat_id='default' "
+                    "ORDER BY context_epoch DESC LIMIT 1"
+                ).fetchone()
+                return {
+                    'chat_id': row['chat_id'],
+                    'context_id': row['id'],
+                    'context_epoch': row['context_epoch'],
+                    'resident_generation': row['resident_generation'],
+                }
+            finally:
+                if owned:
+                    conn.close()
+
+        self.stack.enter_context(mock.patch.object(
+            window_identity, 'capture_current_window_identity',
+            side_effect=lambda **kwargs: current_identity(),
+        ))
+        self.stack.enter_context(mock.patch.object(
+            window_identity, 'read_current_window_identity_conn',
+            side_effect=lambda conn, **kwargs: current_identity(conn),
+        ))
+
+    def test_cold_respawn_promotes_delivery_identity_to_new_generation(self):
+        old_generation = self.q('SELECT resident_generation FROM daily_contexts')[0][0]
+        a = self.spoken_cold_wake()
+        new_generation = self.q('SELECT resident_generation FROM daily_contexts')[0][0]
+        self.assertEqual(new_generation, old_generation + 1)
+        self.assertEqual(
+            self.q('SELECT resident_generation FROM daily_message_contexts WHERE message_id=?', a),
+            [(new_generation,)],
+        )
+
+    def test_cold_respawn_does_not_promote_across_epoch_change(self):
+        def change_epoch():
+            self.exec_sql(
+                'UPDATE daily_contexts SET context_epoch=context_epoch+1'
+            )
+
+        self.resident.on_stream = change_epoch
+        out = self.decide('rid-window-drift')
+        body = out.get_json() if hasattr(out, 'get_json') else out
+        self.assertEqual(body.get('reason'), 'NORMAL_WAKE_MAIN_CHAT_FAILED', body)
+        self.assertEqual(
+            self.q("SELECT COUNT(*) FROM chat_messages WHERE source_kind='wake'"),
+            [(0,)],
+        )
 
 
 class WakeTailProofTests(_World):
