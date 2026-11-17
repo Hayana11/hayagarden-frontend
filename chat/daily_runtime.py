@@ -5220,6 +5220,13 @@ def _prepare_hidden_flow_plan(
         and str(provider or "").strip() in {"claude_code", "api_relay"}
         and str(turn_kind or "").strip() in {"hot", "cold", "respawn"}
     )
+    # A proactive cold Wake must boot with the same stable system carrier as
+    # the next Chat, while remaining ineligible for volatile Flow state.
+    static_only = bool(
+        gate_enabled
+        and str(provider or "").strip() in {"claude_code", "api_relay"}
+        and str(turn_kind or "").strip() == "wake"
+    )
     try:
         from chat.hidden_flow.observability import begin_turn
         observation = begin_turn(
@@ -5232,7 +5239,7 @@ def _prepare_hidden_flow_plan(
         observation = None
     if observation_sink is not None and observation is not None:
         observation_sink.append(observation)
-    if not eligible:
+    if not eligible and not static_only:
         if observation is not None:
             observation.record_prepare(
                 outcome="skipped",
@@ -5252,6 +5259,11 @@ def _prepare_hidden_flow_plan(
             user_message_id=int(user_message_id),
             db_path=db_path,
         )
+        if static_only:
+            plan.enabled = False
+            plan.eligible = False
+            plan.private_request_block = ""
+            plan.volatile_runtime_attached = False
         if observation is not None:
             available = getattr(plan, "available_configs", ()) or ()
             observation.record_prepare(
@@ -8619,8 +8631,6 @@ def _effective_hidden_flow_static_system(
     static_system: str,
 ) -> str:
     """Attach one stable system carrier, never the volatile request tail."""
-    if not _hidden_flow_runtime_enabled(plan):
-        return str(static_system or "")
     hidden_plan = getattr(plan, "hidden_flow_plan", None)
     carrier = str(
         getattr(hidden_plan, "global_guide_system_carrier", "") or ""
