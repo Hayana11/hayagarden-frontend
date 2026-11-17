@@ -53,6 +53,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "code.search",
                 "web.search",
                 "web.read",
+                "xhs.status",
+                "xhs.read",
                 "gallery.save",
                 "gallery.recall",
                 "gallery.screenshot",
@@ -114,6 +116,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "ledger.write",
+            "xhs.status",
+            "xhs.read",
         ):
             self.assertEqual(get_capability(capability_id)["loading_policy"], "deferred")
         memory_write = get_capability("memory.write")
@@ -134,6 +138,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "health.read",
+            "xhs.status",
+            "xhs.read",
         ):
             item = get_capability(capability_id)
             self.assertEqual(item["kind"], "read")
@@ -162,6 +168,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "todo.write": "mcp__capability__todo_write",
             "task.timer.start": "mcp__capability__task_timer_start",
             "countdown.read": "mcp__home__get_countdowns",
+            "xhs.status": "mcp__home__xhs_status",
+            "xhs.read": "mcp__home__xhs_read",
             "ledger.read": "mcp__capability__ledger_read",
             "ledger.budget.read": "mcp__capability__ledger_budget_read",
             "ledger.write": "mcp__capability__ledger_write",
@@ -249,6 +257,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "ledger.write",
                 "web.search",
                 "web.read",
+                "xhs.status",
+                "xhs.read",
                 "health.read",
                 "gallery.save",
                 "gallery.recall",

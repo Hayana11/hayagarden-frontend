@@ -45,6 +45,19 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["content"],
     },
     "mcp__home__get_countdowns": _EMPTY_SCHEMA,
+    "mcp__home__xhs_status": _EMPTY_SCHEMA,
+    "mcp__home__xhs_read": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "enum": ["feed", "search", "note", "comments", "user"]},
+            "query": {"type": "string"},
+            "url": {"type": "string"},
+            "user": {"type": "string"},
+            "limit": {"type": "integer"},
+            "with_replies": {"type": "boolean"},
+        },
+        "required": ["command"],
+    },
     "mcp__home__get_ledger": {
         "type": "object",
         "properties": {"month": {"type": "string"}},

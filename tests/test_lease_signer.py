@@ -41,6 +41,8 @@ CHAT_WAKE_DEFAULTS = (
     "ledger.write",
     "web.search",
     "web.read",
+    "xhs.status",
+    "xhs.read",
     "health.read",
     "gallery.save",
     "gallery.recall",

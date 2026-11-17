@@ -127,6 +127,8 @@ _LEGACY_CAPABILITY_ALIASES = {
   "home.light.status": "get_light_status",
   "todo.read": "get_todos",
   "countdown.read": "get_countdowns",
+  "xhs.status": "xhs_status",
+  "xhs.read": "xhs_read",
   "ledger.read": "get_ledger",
   "ledger.budget.read": "get_ledger_budget",
   "files.read": "codebase_read_file",

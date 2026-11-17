@@ -67,6 +67,8 @@ NON_P3_HOME_MCP_TOOLS: tuple[str, ...] = (
 
 HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "countdown.read",
+    "xhs.status",
+    "xhs.read",
 )
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read",)
