@@ -13,6 +13,14 @@ const fake = path.join(tmp, 'fake-opencli.mjs');
 fs.writeFileSync(fake, `
 import fs from 'node:fs';
 const mode = JSON.parse(fs.readFileSync(${JSON.stringify(modeFile)}, 'utf8'));
+if (mode.expectState) {
+  const state = JSON.parse(fs.readFileSync(mode.expectState.path, 'utf8'));
+  const matches = state.posts === mode.expectState.posts
+    && state.replies === mode.expectState.replies
+    && state.hashes.length === mode.expectState.hashes
+    && state.last_write_at > 0;
+  if (!matches) process.exit(91);
+}
 fs.appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');
 if (mode.stdout !== undefined) process.stdout.write(mode.stdout);
 process.exit(mode.exit ?? 0);
@@ -302,6 +310,79 @@ test('x endpoint shares auth / content-type / method rules', async () => {
     const noCt = await fetch(base + '/x', { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     assert.equal(noCt.status, 400);
     assert.equal((await fetch(base + '/x', { headers: { Authorization: `Bearer ${TOKEN}` } })).status, 405);
+  });
+});
+
+test('malformed or partial existing state fails closed without spawning', async () => {
+  for (const text of ['{broken', '{}']) {
+    await withGate({}, async (base, cfg) => {
+      reset(); setMode(OK);
+      fs.writeFileSync(cfg.xStatePath, text);
+      const r = await postX(base, { command: 'post', text: 'must not post' });
+      assert.equal(r.status, 500);
+      assert.equal((await r.json()).error, 'internal_error');
+      assert.equal(calls().length, 0);
+    });
+  }
+});
+
+test('state reservation must persist before OpenCLI is spawned', async () => {
+  await withGate({}, async (base, cfg) => {
+    reset();
+    setMode({
+      ...OK,
+      expectState: { path: cfg.xStatePath, posts: 1, replies: 0, hashes: 1 },
+    });
+    const j = await (await postX(base, { command: 'post', text: 'reserved first' })).json();
+    assert.equal(j.ok, true);
+    assert.equal(calls().length, 1);
+  });
+});
+
+test('unpersistable state refuses a write before OpenCLI is spawned', async () => {
+  const missing = path.join(tmp, 'missing-parent', 'state.json');
+  fs.rmSync(path.dirname(missing), { recursive: true, force: true });
+  await withGate({ xStatePath: missing }, async (base) => {
+    reset(); setMode(OK);
+    const r = await postX(base, { command: 'post', text: 'cannot reserve' });
+    assert.equal(r.status, 500);
+    assert.equal((await r.json()).error, 'internal_error');
+    assert.equal(calls().length, 0);
+  });
+});
+
+test('definite failure rolls back quota and hash but keeps write interval', async () => {
+  await withGate({ xMinWriteIntervalMs: 60000 }, async (base, cfg) => {
+    reset(); setMode({ exit: 77, stdout: '' });
+    const first = await (await postX(base, { command: 'post', text: 'known failure' })).json();
+    assert.equal(first.error, 'auth_required');
+    const saved = JSON.parse(fs.readFileSync(cfg.xStatePath, 'utf8'));
+    assert.equal(saved.posts, 0);
+    assert.equal(saved.hashes.length, 0);
+    assert.ok(saved.last_write_at > 0);
+
+    setMode(OK);
+    const r = await postX(base, { command: 'post', text: 'known failure' });
+    assert.equal(r.status, 429);
+    assert.equal((await r.json()).error, 'x_write_too_soon');
+    assert.equal(calls().length, 1);
+  });
+});
+
+test('ambiguous output remains counted and deduped', async () => {
+  await withGate({}, async (base, cfg) => {
+    reset(); setMode({ stdout: 'not-json' });
+    const first = await (await postX(base, { command: 'post', text: 'maybe posted' })).json();
+    assert.equal(first.error, 'bad_output');
+    const saved = JSON.parse(fs.readFileSync(cfg.xStatePath, 'utf8'));
+    assert.equal(saved.posts, 1);
+    assert.equal(saved.hashes.length, 1);
+
+    setMode(OK);
+    const r = await postX(base, { command: 'post', text: 'maybe posted' });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).error, 'x_duplicate');
+    assert.equal(calls().length, 1);
   });
 });
 

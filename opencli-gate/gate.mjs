@@ -301,16 +301,36 @@ const DAY_MS = 24 * 3600 * 1000;
 const localDay = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const textHash = (t) => crypto.createHash('sha256').update(normalizeText(t)).digest('hex');
 
+function freshXState() {
+  return { day: localDay(), posts: 0, replies: 0, last_write_at: 0, hashes: [] };
+}
+
 function loadXState(file) {
-  let raw = {};
-  try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 首次或损坏：从空开始 */ }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return freshXState();
+    throw e;
+  }
+  let raw;
+  try { raw = JSON.parse(text); } catch { throw new Error('x_state_invalid'); }
   const now = Date.now();
+  const valid = raw && typeof raw === 'object' && !Array.isArray(raw)
+    && /^\d{4}-\d{2}-\d{2}$/.test(raw.day)
+    && Number.isInteger(raw.posts) && raw.posts >= 0
+    && Number.isInteger(raw.replies) && raw.replies >= 0
+    && Number.isFinite(raw.last_write_at) && raw.last_write_at >= 0
+    && Array.isArray(raw.hashes)
+    && raw.hashes.every((h) => h && typeof h === 'object' && !Array.isArray(h)
+      && /^[0-9a-f]{64}$/.test(h.h) && Number.isFinite(h.t) && h.t >= 0);
+  if (!valid) throw new Error('x_state_invalid');
   const st = {
-    day: typeof raw.day === 'string' ? raw.day : localDay(),
-    posts: Number.isInteger(raw.posts) ? raw.posts : 0,
-    replies: Number.isInteger(raw.replies) ? raw.replies : 0,
-    last_write_at: Number.isFinite(raw.last_write_at) ? raw.last_write_at : 0,
-    hashes: Array.isArray(raw.hashes) ? raw.hashes.filter((h) => h && typeof h.h === 'string' && now - h.t < DAY_MS) : [],
+    day: raw.day,
+    posts: raw.posts,
+    replies: raw.replies,
+    last_write_at: raw.last_write_at,
+    hashes: raw.hashes.filter((h) => now - h.t < DAY_MS),
   };
   return rollDay(st);
 }
@@ -449,15 +469,21 @@ export function createGate(cfg) {
       return { status: 429, body: { ok: false, error: 'x_write_too_soon', retry_after_ms: lim.minIntervalMs - sinceLast } };
     }
 
+    const reservedAt = Date.now();
+    st.last_write_at = reservedAt;
+    st.hashes.push({ h: hash, t: reservedAt });
+    if (isPost) st.posts += 1; else st.replies += 1;
+    saveXState(xStatePath, st);
+
     const r = await runOpencli(cfg, xreq.args, cfg.timeoutMs);
     const entry = { time: new Date().toISOString(), command: xreq.kind, text: xreq.text, reply_to: xreq.replyTo, ok: false, result: null, error: null };
     let out;
-    let counted = false;
-    let ambiguous = false;
+    let definiteFailure = false;
     if (r.timedOut) {
-      entry.error = 'timeout'; ambiguous = true;
+      entry.error = 'timeout';
       out = { status: 504, body: { ok: false, error: 'timeout' } };
     } else if (r.code !== 0) {
+      definiteFailure = true;
       const name = r.spawnError ? 'opencli_failed' : (EXIT_NAMES[r.code] || 'opencli_failed');
       entry.error = name;
       out = { status: 200, body: { ok: false, exit_code: r.code, error: name, detail: (r.stderr || r.spawnError || '').slice(0, 500) } };
@@ -465,26 +491,27 @@ export function createGate(cfg) {
       let data;
       try { data = JSON.parse(r.stdout); } catch { data = undefined; }
       if (data === undefined) {
-        entry.error = 'bad_output'; ambiguous = true;
+        entry.error = 'bad_output';
         out = { status: 200, body: { ok: false, error: 'bad_output', stdout: (r.stdout || '').slice(0, 2000) } };
       } else {
         const failure = reportedFailure(data);
         if (failure) {
+          definiteFailure = true;
           entry.error = failure;
           out = { status: 200, body: { ok: false, error: 'opencli_failed', detail: failure } };
         } else {
-          entry.ok = true; counted = true;
+          entry.ok = true;
           entry.result = pickResult(data);
           out = { status: 200, body: { ok: true, command: xreq.kind, data } };
         }
       }
     }
-    // 先记日志，再更新状态；任何落盘失败都不能把已发生的结果吞掉。
     try { appendXLog(xLogPath, entry); } catch (e) { console.error(`x-post-log 写入失败：${e.code || 'error'}`); }
-    st.last_write_at = Date.now();
-    if (counted || ambiguous) st.hashes.push({ h: hash, t: Date.now() });
-    if (counted) { if (isPost) st.posts += 1; else st.replies += 1; }
-    try { saveXState(xStatePath, st); } catch (e) { console.error(`gate-state 写入失败：${e.code || 'error'}`); }
+    if (definiteFailure) {
+      st.hashes = st.hashes.filter((h) => !(h.h === hash && h.t === reservedAt));
+      if (isPost) st.posts -= 1; else st.replies -= 1;
+      saveXState(xStatePath, st);
+    }
     return out;
   }
 
