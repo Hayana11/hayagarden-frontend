@@ -69,6 +69,9 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "countdown.read",
     "xhs.status",
     "xhs.read",
+    "x.state",
+    "x.read",
+    "x.write",
 )
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read",)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
-GROUP_DEFS=[["memory","记忆",["save_memory","search_memories","write_diary"]],["web","联网",["web_search","browse_github","read_webpage"]],["pocket","Pocket 手机浏览器",["pocket_status","pocket_goto","pocket_js","pocket_html","pocket_screenshot"]],["xhs","小红书",["xhs_status","xhs_read"]],["light","灯",["light_on","light_off","light_warm","light_neutral","set_brightness","set_color_temp","get_light_status"]],["shopping","购物",["shop_browse","shop_act","shop_checkout","shop_login_start","shop_login_status"]],["gallery","相册/截图",["save_to_gallery","recall_photo","screenshot_chat"]],["code_files","代码/文件",["read_backend_file","search_files","read_frontend_file","write_frontend_file","str_replace_frontend_file","check_page_render","codebase_describe_project","codebase_read_file","codebase_list_directory","codebase_search_code","codebase_find_references","codebase_patch","codebase_create_file","codebase_git_view","codebase_explain_history"]],["workspace","Workspace",["shell_exec","ws_job","ws_ls","ws_read","ws_write","ws_edit","ws_patch","ws_diff","mcp_search","mcp_load","mcp_call","workspace_app"]],["self_config","自我配置",["read_bot_config","edit_bot_config","get_wake_settings","set_wake_settings"]],["board","留言板",["read_board","post_to_board","reply_to_board","block_user"]],["life","生活状态",["get_activity_summary","log_period_event","get_location","get_device_status"]],["plans_ledger","计划与账本",["get_todos","add_todo","get_countdowns","get_ledger","add_ledger","get_ledger_budget"]],["desire","欲望账本",["desire_add","desire_list","desire_act","desire_reflect","desire_history"]],["triggers","自主触发",["set_self_trigger","cancel_self_trigger"]],["artifacts","产物生成",["create_html","create_markdown","create_document"]],["phone","手机指令",["issue_command"]],["moments","朋友圈",["collect_chat_moment"]]]
+GROUP_DEFS=[["memory","记忆",["save_memory","search_memories","write_diary"]],["web","联网",["web_search","browse_github","read_webpage"]],["pocket","Pocket 手机浏览器",["pocket_status","pocket_goto","pocket_js","pocket_html","pocket_screenshot"]],["xhs","小红书",["xhs_status","xhs_read"]],["x","推特",["x_state","x_read","x_post"]],["light","灯",["light_on","light_off","light_warm","light_neutral","set_brightness","set_color_temp","get_light_status"]],["shopping","购物",["shop_browse","shop_act","shop_checkout","shop_login_start","shop_login_status"]],["gallery","相册/截图",["save_to_gallery","recall_photo","screenshot_chat"]],["code_files","代码/文件",["read_backend_file","search_files","read_frontend_file","write_frontend_file","str_replace_frontend_file","check_page_render","codebase_describe_project","codebase_read_file","codebase_list_directory","codebase_search_code","codebase_find_references","codebase_patch","codebase_create_file","codebase_git_view","codebase_explain_history"]],["workspace","Workspace",["shell_exec","ws_job","ws_ls","ws_read","ws_write","ws_edit","ws_patch","ws_diff","mcp_search","mcp_load","mcp_call","workspace_app"]],["self_config","自我配置",["read_bot_config","edit_bot_config","get_wake_settings","set_wake_settings"]],["board","留言板",["read_board","post_to_board","reply_to_board","block_user"]],["life","生活状态",["get_activity_summary","log_period_event","get_location","get_device_status"]],["plans_ledger","计划与账本",["get_todos","add_todo","get_countdowns","get_ledger","add_ledger","get_ledger_budget"]],["desire","欲望账本",["desire_add","desire_list","desire_act","desire_reflect","desire_history"]],["triggers","自主触发",["set_self_trigger","cancel_self_trigger"]],["artifacts","产物生成",["create_html","create_markdown","create_document"]],["phone","手机指令",["issue_command"]],["moments","朋友圈",["collect_chat_moment"]]]
 
 DISPLAY_LABELS = {
   "save_memory": "保存长期记忆",
@@ -18,6 +18,9 @@ DISPLAY_LABELS = {
   "pocket_screenshot": "截取 Pocket 页面",
   "xhs_status": "查看小红书门卫状态",
   "xhs_read": "只读浏览小红书",
+  "x_state": "查看推特发言额度与记录",
+  "x_read": "读推特",
+  "x_post": "用费佳的推特账号发推/回复",
   "light_on": "开灯",
   "light_off": "关灯",
   "light_warm": "切换暖光",
@@ -129,6 +132,9 @@ _LEGACY_CAPABILITY_ALIASES = {
   "countdown.read": "get_countdowns",
   "xhs.status": "xhs_status",
   "xhs.read": "xhs_read",
+  "x.state": "x_state",
+  "x.read": "x_read",
+  "x.write": "x_post",
   "ledger.read": "get_ledger",
   "ledger.budget.read": "get_ledger_budget",
   "files.read": "codebase_read_file",

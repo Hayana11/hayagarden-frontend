@@ -85,7 +85,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         conn.close()
 
     def test_a_bindings_come_from_capability_manifest(self):
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read"))
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
             ("health.read",),
@@ -210,13 +210,16 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 3)
+        self.assertEqual(len(home), 6)
         self.assertEqual(
             set(home),
             {
                 "mcp__home__get_countdowns",
                 "mcp__home__xhs_status",
                 "mcp__home__xhs_read",
+                "mcp__home__x_state",
+                "mcp__home__x_read",
+                "mcp__home__x_post",
             },
         )
         for name in NON_P3_HOME_MCP_TOOLS:

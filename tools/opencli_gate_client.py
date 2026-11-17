@@ -1,4 +1,4 @@
-"""VPS 端小红书门卫客户端：经 Tailscale 调用哈娅电脑上的 opencli-gate（只读）。"""
+"""VPS 端 OpenCLI 门卫客户端：经 Tailscale 调用哈娅电脑上的 opencli-gate（小红书只读；推特读 + 受限发帖）。"""
 import json
 import os
 import socket
@@ -24,6 +24,16 @@ _ERROR_TEXT = {
     'bad_output': '门卫返回了无法解析的输出。',
     'opencli_failed': 'OpenCLI 执行失败。',
 }
+
+# 推特通道的失败文案：在小红书文案上覆盖/追加。
+_X_ERROR_TEXT = dict(_ERROR_TEXT)
+_X_ERROR_TEXT.update({
+    'auth_required': '推特账号需要重新登录（请哈娅在电脑的 OpenCLI Chrome 里重新登录）。',
+    'timeout': '推特命令超时。',
+    'x_daily_limit': '今天的发推/回复额度用完了。',
+    'x_write_too_soon': '两次发言间隔太短，稍后再发。',
+    'x_duplicate': '这句话 24 小时内发过了。',
+})
 
 
 def _read_env_value(key):
@@ -88,11 +98,13 @@ def _request(method, path, body, timeout):
     return payload, None
 
 
-def _format_failure(payload):
+def _format_failure(payload, table=None):
     code = str(payload.get('error') or 'opencli_failed')
-    text = _ERROR_TEXT.get(code)
+    text = (table or _ERROR_TEXT).get(code)
     if text is None:
         text = '失败：' + code[:200]
+    if code == 'x_write_too_soon' and isinstance(payload.get('retry_after_ms'), (int, float)):
+        text += '（约 %d 秒后可再发）' % (int(payload['retry_after_ms']) // 1000 + 1)
     return '%s：%s' % (code, text)
 
 
@@ -114,3 +126,26 @@ def xhs(command, **params):
     if payload.get('ok'):
         return _truncate(json.dumps(payload.get('data'), ensure_ascii=False, separators=(',', ':')))
     return _format_failure(payload)
+
+
+def x(command, **params):
+    """推特读（timeline/search/thread/tweets/profile/trending）与写（post/reply）。"""
+    body = {'command': command}
+    body.update({k: v for k, v in params.items() if v is not None})
+    payload, err = _request('POST', '/x', body, XHS_TIMEOUT)
+    if err:
+        return err
+    if payload.get('ok'):
+        return _truncate(json.dumps(payload.get('data'), ensure_ascii=False, separators=(',', ':')))
+    return _format_failure(payload, _X_ERROR_TEXT)
+
+
+def x_state():
+    """今日发推/回复计数、额度与最近 10 条发言记录。"""
+    payload, err = _request('GET', '/x/state', None, STATUS_TIMEOUT)
+    if err:
+        return err
+    if not payload.get('ok'):
+        return _format_failure(payload, _X_ERROR_TEXT)
+    payload = {k: v for k, v in payload.items() if k != 'ok'}
+    return _truncate(json.dumps(payload, ensure_ascii=False, separators=(',', ':')))

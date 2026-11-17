@@ -1,6 +1,6 @@
 # opencli-gate（小红书门卫）
 
-这是跑在**哈娅的 Windows 电脑**上的一个小程序。费佳（VPS 上的网关）通过 Tailscale 私有网络带着密码（token）来敲门，门卫再调用本机的 OpenCLI，让专用 Chrome 去读小红书。**只读**：只能刷首页、搜索、看笔记、看评论、看用户主页，不能发布、关注、评论或点赞。
+这是跑在**哈娅的 Windows 电脑**上的一个小程序。费佳（VPS 上的网关）通过 Tailscale 私有网络带着密码（token）来敲门，门卫再调用本机的 OpenCLI，让专用 Chrome 去读小红书。小红书是**只读**：只能刷首页、搜索、看笔记、看评论、看用户主页，不能发布、关注、评论或点赞。推特/X 见下面第 8 节：可以读，也可以发推和回复，但有硬性护栏。
 
 ## 1. 准备环境
 
@@ -82,3 +82,32 @@ npm test
 ```
 
 （Node 22 起 `node --test <目录>` 需要写成 `node --test "test/*.test.mjs"`，`npm test` 已处理。）
+
+## 8. 推特/X（费佳的自动化账号）
+
+门卫多了两个入口：`POST /x`（读 + 发推/回复）和 `GET /x/state`（今日计数与最近发言），同样需要 token。详细规则见 `docs/opencli-x.md`。
+
+1. 在**同一个专用 Chrome 配置文件**里登录费佳的 X 账号（账号资料里标注“自动化账号 / 由哈娅管理”），OpenCLI 扩展照常启用。
+2. 不需要额外配置，重启门卫即可。可选配置（`gate.config.json`，也可用环境变量 `GATE_X_DAILY_POST_LIMIT`、`GATE_X_DAILY_REPLY_LIMIT`、`GATE_X_MIN_WRITE_INTERVAL_MS`）：
+
+```json
+{
+  "xDailyPostLimit": 5,
+  "xDailyReplyLimit": 20,
+  "xMinWriteIntervalMs": 60000
+}
+```
+
+   改上限就改这三项再重启门卫。“一天”按这台电脑的本地日期算。
+3. 两个会自动生成的文件（都在本目录、都被 git 忽略）：
+   - `gate-state.json`：今日计数、上次写入时间、24 小时内发过的正文的哈希。重启门卫不会重置。想手动清零额度，关掉门卫后删除它（同时也会清掉去重记录和间隔计时）。
+   - `x-post-log.jsonl`：每次发推/回复尝试一行（时间、命令、正文、回复目标、是否成功、结果链接、错误）。可以直接打开看，也可以请费佳调用 `x_state` 看最近 10 条。
+   - 路径可用 `xStatePath` / `xLogPath`（或 `GATE_X_STATE_PATH` / `GATE_X_LOG_PATH`）改。
+4. 自测：
+
+```powershell
+Invoke-RestMethod -Headers $h http://100.x.y.z:19830/x/state | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Post -Headers $h -ContentType "application/json" -Body '{"command":"timeline","limit":3}' http://100.x.y.z:19830/x | ConvertTo-Json -Depth 6
+```
+
+5. 不支持：图片、点赞、转推、关注、私信、删除等其它任何操作。

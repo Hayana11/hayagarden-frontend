@@ -50,3 +50,7 @@ planner_shadow.jsonl
 
 # opencli-gate local config (contains token)
 opencli-gate/gate.config.json
+# opencli-gate X write guard state + post log (contain posted text)
+opencli-gate/gate-state.json
+opencli-gate/gate-state.json.*.tmp
+opencli-gate/x-post-log.jsonl
