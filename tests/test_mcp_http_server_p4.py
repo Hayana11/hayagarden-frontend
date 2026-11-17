@@ -17,10 +17,11 @@ class HomeMcpP4Tests(unittest.TestCase):
     def test_profile_marker_and_gate_are_narrow(self):
         source = SERVER.read_text(encoding="utf-8")
         self.assertIn("x-uh-a0-profile", source)
+        self.assertIn("x-uh-a0-turn-lease-path", source)
         self.assertIn("uh_a0", source)
         self.assertIn("runGatedHomeWrite", source)
         self.assertIn("requireUhA0Profile", source)
-        self.assertIn("buildServer({ uhA0Profile })", source)
+        self.assertIn("buildServer({ uhA0Profile, turnLeasePath })", source)
 
     def test_diary_provider_is_narrow_and_gated(self):
         source = SERVER.read_text(encoding="utf-8")
@@ -141,6 +142,130 @@ async function sample(
         for key in ("uhA0Allowed", "uhA0AllowedDiary"):
             self.assertEqual(result[key]["posts"], 1)
             self.assertEqual(result[key]["verifies"], 1)
+
+    def test_http_session_uses_only_its_resident_owned_lease_path(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable in this focused Windows environment")
+        source_path = json.dumps(str(SERVER))
+        script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const path = require('path');
+const os = require('os');
+const filename = __FILENAME__;
+const fakeApp = { use() {}, all() {}, listen() {} };
+function express() { return fakeApp; }
+express.json = () => ({});
+class FakeMcpServer {
+  constructor() { this.handlers = {}; }
+  tool(name, schema, handler) { this.handlers[name] = handler; }
+}
+class FakeTransport {}
+const fakeZ = new Proxy({}, { get: () => () => ({
+  describe() { return this; },
+  optional() { return this; },
+  int() { return this; },
+  min() { return this; },
+  max() { return this; },
+}) });
+const verifierEnvs = [];
+let gateCalls = 0;
+const fakeRequire = (name) => {
+  if (name === 'express') return express;
+  if (name === '@modelcontextprotocol/sdk/server/mcp.js') return { McpServer: FakeMcpServer };
+  if (name === '@modelcontextprotocol/sdk/server/streamableHttp.js') {
+    return { StreamableHTTPServerTransport: FakeTransport };
+  }
+  if (name === 'child_process') return {
+    execSync() {},
+    execFileSync(command, args, options) {
+      verifierEnvs.push(options.env);
+      return JSON.stringify({ lease_decision: 'ALLOW' });
+    },
+  };
+  if (name === 'crypto') return { randomUUID() { return 'test'; } };
+  if (name === 'fs') return { readFileSync() { return ''; } };
+  if (name === 'zod') return { z: fakeZ };
+  return require(name);
+};
+fakeRequire.main = {};
+const moduleValue = { exports: {} };
+const text = fs.readFileSync(filename, 'utf8');
+vm.runInNewContext(text, {
+  require: fakeRequire,
+  module: moduleValue,
+  exports: moduleValue.exports,
+  __dirname: path.dirname(filename),
+  __filename: filename,
+  process: {
+    env: {
+      OPENCLI_GATE_URL: 'http://gate.test',
+      OPENCLI_GATE_TOKEN: 'test-token',
+    },
+  },
+  console,
+  AbortSignal,
+  fetch: async () => {
+    gateCalls += 1;
+    return {
+      status: 200,
+      json: async () => ({ ok: true, data: { url: 'https://x.test/1' } }),
+    };
+  },
+});
+const { buildServer } = moduleValue.exports;
+const validPath = path.join(
+  os.tmpdir(), 'hayagarden-uh-a0-turn-leases', `${'a'.repeat(32)}.json`
+);
+(async () => {
+  const valid = buildServer({ uhA0Profile: true, turnLeasePath: validPath });
+  const validResult = await valid.handlers.x_post({ command: 'post', text: 'test' });
+  const afterValid = { verifies: verifierEnvs.length, posts: gateCalls };
+
+  const invalid = buildServer({
+    uhA0Profile: true,
+    turnLeasePath: path.join(os.tmpdir(), 'not-resident-owned.json'),
+  });
+  const invalidResult = await invalid.handlers.x_post({ command: 'post', text: 'test' });
+
+  const missing = buildServer({ uhA0Profile: true });
+  const missingResult = await missing.handlers.x_post({ command: 'post', text: 'test' });
+  const afterDenied = { verifies: verifierEnvs.length, posts: gateCalls - 1 };
+
+  const legacy = buildServer({ uhA0Profile: false });
+  const legacyResult = await legacy.handlers.x_post({ command: 'post', text: 'legacy' });
+
+  process.stdout.write(JSON.stringify({
+    validPath,
+    validResult,
+    validVerifierPath: verifierEnvs[0] && verifierEnvs[0].UH_A0_TURN_LEASE_PATH,
+    afterValid,
+    afterDenied,
+    invalidResult,
+    missingResult,
+    legacyResult,
+    final: { verifies: verifierEnvs.length, posts: gateCalls },
+  }));
+})();
+""".replace("__FILENAME__", source_path)
+        completed = subprocess.run(
+            [node, "--eval", script],
+            cwd=str(ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["validVerifierPath"], result["validPath"])
+        self.assertEqual(result["afterValid"], {"verifies": 1, "posts": 1})
+        for key in ("invalidResult", "missingResult"):
+            self.assertEqual(
+                result[key]["content"][0]["text"],
+                "UH-A0 LEASE_MISMATCH",
+            )
+        self.assertEqual(result["afterDenied"], {"verifies": 1, "posts": 0})
+        self.assertEqual(result["final"], {"verifies": 1, "posts": 2})
 
 
 if __name__ == "__main__":
