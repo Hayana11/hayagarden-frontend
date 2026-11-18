@@ -1,6 +1,7 @@
 """2b: proactive cold Wake receipt, Wake-tail hot proof, one-shot, finality (fake resident, temp DB)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -531,6 +532,10 @@ class LoopContractTests(_World):
     def test_same_events_give_same_accumulation(self):
         events = [('think', 'pl'), ('text', 'Hel'), ('self_state', 'calm'), *TOOLS, ('text', 'lo'), ('think', 'an'), self.done('Hello', 'plan')]
         hot, cold = self.both(events)
+        for receipt in (hot, cold):
+            for call in receipt['tool_calls']:
+                observed_at = datetime.fromisoformat(call.pop('time'))
+                self.assertEqual(observed_at.tzinfo, timezone.utc)
         keys = ('text', 'silent', 'thinking', 'self_state', 'display_segments', 'tool_calls')
         self.assertEqual({k: hot[k] for k in keys}, {k: cold[k] for k in keys})
         self.assertEqual((cold['text'], cold['thinking'], cold['self_state']), ('Hello', 'plan', 'calm'))
