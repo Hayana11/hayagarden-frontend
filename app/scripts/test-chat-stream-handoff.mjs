@@ -407,3 +407,20 @@ assert.doesNotMatch(
 }
 
 console.log('test:chat-stream-handoff — T1-T22 + gateway terminal ID contract all checks passed');
+
+// Silent activities share the existing chronological display; a date without a
+// chat message still gets one separator, and the live answer remains last.
+{
+  const rows = [
+    { ...message(51, 'user', '你好'), dateKey: '2026-11-18', createdAt: '2026-11-18 08:00:00' },
+    { ...message(52, 'assistant', '早安'), dateKey: '2026-11-18', createdAt: '2026-11-18 09:00:00' },
+  ];
+  const activities = [
+    { wake_run_id: 'a', woke_at: '2026-11-18 08:30:00' },
+    { wake_run_id: 'b', woke_at: '2026-11-19 06:00:00' },
+  ];
+  const entries = buildChatPresentationEntries({ messages: rows, activities, finalMessageId: null,
+    handoff: { presentationKey: 'stream', sourceAssistantId: null }, liveVisible: true });
+  assert.deepEqual(entries.map(e => e.kind), ['date','message','activity','message','date','activity','live']);
+  assert.equal(entries[2].key, 'wake-a');
+}
