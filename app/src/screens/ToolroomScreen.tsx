@@ -547,6 +547,32 @@ export function ToolroomScreen() {
   const [rawJsonFrozen, setRawJsonFrozen] = useState(false);
   const [rawJsonSnapshot, setRawJsonSnapshot] = useState<string | null>(null);
   const [rawJsonNotice, setRawJsonNotice] = useState('');
+  const [locationNotice, setLocationNotice] = useState('');
+  const [locating, setLocating] = useState(false);
+
+  async function shareLocation() {
+    setLocating(true);
+    setLocationNotice('正在读取手机位置…');
+    try {
+      if (!navigator.geolocation) throw new Error('当前页面无法使用手机定位');
+      const { coords } = await new Promise<GeolocationPosition>((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, error => {
+          const reason = error.code === 1 ? '请在应用权限中允许使用位置'
+            : error.code === 3 ? '定位超时，请到信号较好的地方再试' : '手机暂时无法定位';
+          reject(new Error(reason));
+        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 })
+      );
+      const result = await http.post<{ address?: string; city?: string }>('/api/geo/report', {
+        lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, coord_type: 'wgs84',
+      });
+      setLocationNotice(`已分享 · ${result.address || result.city || '坐标已保存'} · 精度约 ${Math.round(coords.accuracy)} 米`);
+    } catch (error) {
+      setLocationNotice(error instanceof Error ? error.message : '位置分享失败');
+    } finally {
+      setLocating(false);
+    }
+  }
+
   const [activityNow, setActivityNow] = useState(() => Date.now());
 
   const reality = useSyncExternalStore(
@@ -1659,6 +1685,11 @@ export function ToolroomScreen() {
             })}
           </div>
 
+          <div className="toolroom-section-heading">
+            <div><strong>手机位置</strong><span>将这一次的位置分享给费佳</span></div>
+            <button type="button" disabled={locating} onClick={shareLocation}>分享当前位置</button>
+            <span role="status">{locationNotice}</span>
+          </div>
           <div className="toolroom-section-heading">
             <div><strong>显示传感器</strong><span>Physical Reality 与 HMS Activity 只读观测</span></div>
           </div>
