@@ -74,7 +74,7 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "x.write",
 )
 
-INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read",)
+INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read", "location.read")
 
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",

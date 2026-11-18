@@ -81,7 +81,7 @@ jobs:
               name for name in plan["surface_allowlist_csv"].split(",")
               if name.startswith("mcp__internal__")
           ]
-          assert internal_surface == ["mcp__internal__get.health"]
+          assert internal_surface == ["mcp__internal__get.health", "mcp__internal__get_location"]
           print(plan["physical_surface_fingerprint"])
           PY
 
@@ -135,7 +135,7 @@ jobs:
               name for name in plan["surface_allowlist_csv"].split(",")
               if name.startswith("mcp__internal__")
           ]
-          assert internal_surface == ["mcp__internal__get.health"]
+          assert internal_surface == ["mcp__internal__get.health", "mcp__internal__get_location"]
           print(plan["physical_surface_fingerprint"])
           PY
 

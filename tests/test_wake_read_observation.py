@@ -45,6 +45,7 @@ CURRENT_OBSERVATION_READS = (
     'web.search',
     'web.read',
     'health.read',
+    'location.read',
     'gallery.recall',
 )
 
@@ -60,6 +61,7 @@ WRITE_CAPS = (
 TOOL_BY_CAPABILITY = {
     'web.search': ('WebSearch', {}),
     'web.read': ('WebFetch', {'url': 'https://example.com'}),
+    'location.read': ('mcp__internal__get_location', {}),
     'health.read': ('mcp__internal__get.health', {'metric': 'steps'}),
     'gallery.recall': ('mcp__capability__gallery_recall', {'keyword': '海边'}),
     'memory.search': ('mcp__home__search_memories', {'keyword': '昨天'}),
@@ -199,7 +201,7 @@ class WakeObservationCapabilityTests(unittest.TestCase):
             )
         )
         for cid in (
-            'web.search', 'web.read', 'health.read',
+            'web.search', 'web.read', 'health.read', 'location.read',
             'gallery.recall', 'memory.search',
         ):
             result = self._eval(cid, lease)

@@ -138,6 +138,7 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "mcp__internal__get_location": _EMPTY_SCHEMA,
     "mcp__internal__get_todos": _EMPTY_SCHEMA,
     "mcp__internal__add_todo": {
         "type": "object",

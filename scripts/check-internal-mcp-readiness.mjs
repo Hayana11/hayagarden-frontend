@@ -32,8 +32,8 @@ async function main() {
 
     assert.deepEqual(
       [...names].sort(),
-      ['add_ledger', 'add_todo', 'get.health', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories', 'write_memory'],
-      'Internal MCP catalog must contain the Todo, Ledger, Memory, and Health tools',
+      ['add_ledger', 'add_todo', 'get.health', 'get_ledger', 'get_ledger_budget', 'get_location', 'get_todos', 'search_memories', 'write_memory'],
+      'Internal MCP catalog must contain the Todo, Ledger, Memory, Health, and Location tools',
     );
 
     const addTodo = tools.find((tool) => tool?.name === 'add_todo');

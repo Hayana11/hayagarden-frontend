@@ -25,7 +25,7 @@ _STATUS_LABELS = {
 
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
-    ("home", "家", ("home.light.status",)),
+    ("home", "家", ("home.light.status", "location.read")),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
     ("health", "健康", ("health.read",)),
     ("gallery", "相册", ("gallery.save", "gallery.recall", "gallery.screenshot")),
@@ -74,6 +74,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "开始行动计时",
         "companion_hint": "当对话上下文表明一个具体行动适合马上计时时，可以创建行动计时；模糊建议、信息不足或没有具体动作时不创建。",
         "physical_boundary": "只创建行动计时任务；不会写待办、日期倒计时或自主触发，也不会替代完成反馈和浮窗。",
+    },
+    "location.read": {
+        "display_label": "查看位置",
+        "companion_hint": "需要了解她在哪里时，查看手机最近上报的位置，并留意上报时间。",
+        "physical_boundary": "只读取最近一次已上报的位置；旧记录需标明时间。",
     },
     "health.read": {
         "display_label": "查看健康数据",

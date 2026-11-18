@@ -18,6 +18,7 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'search_memories',
   'write_memory',
   'get.health',
+  'get_location',
 ]);
 const HEALTH_OPERATIONS = new Set(['get_health']);
 
@@ -37,6 +38,9 @@ function adapterModuleFor(operation) {
   }
   if (operation === 'write_memory') {
     return 'tools.memory_write_adapter';
+  }
+  if (operation === 'get_location') {
+    return 'tools.location_reader';
   }
   if (HEALTH_OPERATIONS.has(operation)) {
     return 'tools.xiaomi_health.internal_adapter';
@@ -268,6 +272,15 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
         return { content: [{ type: 'text', text: 'MEMORY_WRITE_FAILED' }] };
       }
     },
+  );
+
+  server.tool(
+    'get_location',
+    '读取手机最近一次已上报的位置和时间。',
+    {},
+    async () => ({
+      content: [{ type: 'text', text: callInternalAdapter('get_location', {}, { dbPath, python, cwd }) }],
+    }),
   );
 
   server.tool(
