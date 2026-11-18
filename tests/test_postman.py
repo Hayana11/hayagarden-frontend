@@ -33,7 +33,8 @@ def _env(**kw):
     base = {"POSTMAN_MODEL": "m-test", "POSTMAN_API_KEY": "k", "POSTMAN_BASE_URL": "",
             "POSTMAN_FALLBACK_MODEL": "", "POSTMAN_FALLBACK_API_KEY": "",
             "POSTMAN_FALLBACK_BASE_URL": "", "DEEPSEEK_API_KEY": "",
-            "POSTMAN_DEEPSEEK_LOW_BALANCE": ""}
+            "POSTMAN_DEEPSEEK_LOW_BALANCE": "",
+            "POSTMAN_DEEPSEEK_LOW_BALANCE_USD": ""}
     base.update(kw)
     return mock.patch.dict(os.environ, base, clear=False)
 
@@ -94,6 +95,16 @@ class ParseTests(unittest.TestCase):
         cfg = postman.load_sources()
         topics = {s["topic"] for s in cfg["sources"]}
         self.assertIn("AI 研究", topics)
+        urls = {s["url"] for s in cfg["sources"]}
+        self.assertNotIn("https://www.sciencedaily.com/rss/plants_animals/pets.xml", urls)
+        self.assertNotIn("https://www.jpl.nasa.gov/feeds/news", urls)
+        for u in ("https://science.nasa.gov/feed/", "https://phys.org/rss-feed/space-news/",
+                  "https://www.nasa.gov/news-release/feed/",
+                  "https://www.sciencedaily.com/rss/plants_animals/veterinary_medicine.xml",
+                  "https://phys.org/rss-feed/biology-news/veterinary-medicine/"):
+            self.assertIn(u, urls)
+        self.assertIn("猫", cfg["interests"])
+        self.assertTrue(all(s["max_items"] <= 15 for s in cfg["sources"]))
         for s in cfg["sources"]:
             self.assertIn(s["kind"], ("rss", "atom", "arxiv"))
             self.assertTrue(s["url"].startswith("https://"))
@@ -122,6 +133,18 @@ class ValidateTests(unittest.TestCase):
         self.assertNotIn("evil", out)
         self.assertNotIn("空话题", out)
         self.assertNotIn("前言", out)
+
+    def test_unknown_url_in_heading_drops_heading_and_known_survive(self):
+        text = ("## 天文 https://evil.test/h\n- 挂在坏标题下 https://ex.test/a\n"
+                "## [好标题](https://ex.test/b)\n- 正常 https://ex.test/a\n"
+                "- 标题外裸链接 https://evil.test/z\n"
+                "## [坏](https://evil.test/m)\n")
+        out = postman.validate_paper(text, self.ALLOWED)
+        self.assertNotIn("evil", out)
+        self.assertNotIn("天文", out)
+        self.assertNotIn("挂在坏标题下", out)
+        self.assertIn("## [好标题](https://ex.test/b)", out)
+        self.assertIn("- 正常 https://ex.test/a", out)
 
     def test_markdown_link_ok(self):
         out = postman.validate_paper("## T\n- x [src](https://ex.test/b)", self.ALLOWED)
@@ -251,14 +274,25 @@ class RunTests(unittest.TestCase):
         with mock.patch.object(postman, "_http_post_json",
                                lambda *a: {"choices": [{"message": {"content": "- x https://evil.test/"}}]}):
             self.run_it()
-        self.assertFalse(os.path.exists(self.db))
+        self.assert_failure_notice_only()
 
-    def test_model_failure_exits_zero_nothing_written(self):
+    def test_model_failure_exits_zero_stores_failure_notice(self):
         def boom(*a):
             raise OSError("down")
         with mock.patch.object(postman, "_http_post_json", boom):
             self.assertEqual(self.run_it(), 0)
-        self.assertFalse(os.path.exists(self.db))
+        self.assert_failure_notice_only()
+
+    def assert_failure_notice_only(self):
+        c = sqlite3.connect(self.db)
+        try:
+            rows = c.execute("SELECT kind, content FROM postman_editions").fetchall()
+            self.assertEqual(c.execute("SELECT count(*) FROM postman_seen").fetchone()[0], 0)
+        finally:
+            c.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "notice")
+        self.assertIn("m-test", rows[0][1])
 
 
 import urllib.error  # noqa: E402
@@ -367,21 +401,53 @@ class FallbackBalanceTests(unittest.TestCase):
         self.responses = {"m-test": _http_err(500), "fb-model": BAD}
         self.run_it()
         self.assertEqual(len(self.calls), 2)
-        self.assertFalse(os.path.exists(self.db))
+        self.assertEqual(self.rows("SELECT kind FROM postman_editions"), [("notice",)])
+        self.assertEqual(self.rows("SELECT 1 FROM postman_seen"), [])
 
     def test_fallback_without_model_or_key_means_no_fallback(self):
         self.responses = {"m-test": _http_err(429)}
         self.run_it(fb=False)
         self.assertEqual(len(self.calls), 1)
-        self.assertFalse(os.path.exists(self.db))
+        self.assertEqual(self.rows("SELECT kind FROM postman_editions"), [("notice",)])
+        os.remove(self.db)
         self.run_it(fb=True, ds="")  # model but no key
         self.assertEqual(len(self.calls), 2)  # primary only again
-        self.assertFalse(os.path.exists(self.db))
+        self.assertEqual(self.rows("SELECT kind FROM postman_editions"), [("notice",)])
 
-    def test_both_fail_no_balance_problem_writes_nothing(self):
+    def test_both_fail_no_balance_problem_stores_failure_notice(self):
         self.balance = self.bal(cny=100)
         self.responses = {"m-test": _http_err(500), "fb-model": TimeoutError()}
         self.run_it()
+        row = self.rows("SELECT content, kind, model, item_count FROM postman_editions")[0]
+        self.assertEqual((row[1], row[2], row[3]), ("notice", "", 0))
+        self.assertIn("失败", row[0])
+        self.assertIn("m-test", row[0])
+        self.assertIn("fb-model", row[0])
+        self.assertIn("http_500", row[0])
+        self.assertIn("TimeoutError", row[0])
+        self.assertNotIn("探测器", row[0])
+        self.assertNotIn("https://ex.test", row[0])
+        self.assertNotIn("DeepSeek", row[0])
+        self.assertEqual(self.rows("SELECT 1 FROM postman_seen"), [])  # items kept for tomorrow
+        self.assertTrue(self.peek()["text"].startswith("【邮差附言 · 2026-05-11】\n"))
+        self.run_it()  # one edition per day
+        self.assertEqual(len(self.rows("SELECT 1 FROM postman_editions")), 1)
+
+    def test_both_fail_plus_low_balance_single_edition_with_both(self):
+        self.balance = self.bal(cny=1)
+        self.responses = {"m-test": _http_err(500), "fb-model": _http_err(500)}
+        self.run_it()
+        rows = self.rows("SELECT content, kind FROM postman_editions")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "notice")
+        self.assertIn("写报纸失败", rows[0][0])
+        self.assertIn("¥1", rows[0][0])
+
+    def test_no_candidates_no_balance_problem_writes_nothing(self):
+        self.balance = self.bal(cny=100)
+        with mock.patch.object(postman, "_http_get", lambda url: b"<rss><channel></channel></rss>"):
+            self.run_it()
+        self.assertEqual(self.calls, [])
         self.assertFalse(os.path.exists(self.db))
 
     def test_both_fail_low_balance_notice_only(self):
@@ -499,9 +565,18 @@ class FallbackBalanceTests(unittest.TestCase):
             self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
             self.balance = self.bal(cny=2, usd=500)  # CNY wins, below
             self.assertIn("¥2", notice(DEEPSEEK_API_KEY="k"))
-            self.balance = self.bal(usd=2)  # USD only
-            self.assertIn("$2", notice(DEEPSEEK_API_KEY="k"))
-            self.balance = self.bal(usd=5)
+            self.balance = self.bal(usd=0.2)  # USD only, below 0.5 default
+            n = notice(DEEPSEEK_API_KEY="k")
+            self.assertIn("$0.2", n)
+            self.assertIn("低于 $0.5", n)
+            self.assertNotIn("¥", n)
+            self.balance = self.bal(usd=2)  # USD above USD threshold (not compared to ¥3)
+            self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
+            self.balance = self.bal(usd=0.5)  # equal: no notice
+            self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
+            self.balance = self.bal(usd=2)  # custom USD threshold
+            self.assertIn("低于 $5", notice(DEEPSEEK_API_KEY="k", POSTMAN_DEEPSEEK_LOW_BALANCE_USD="5"))
+            self.balance = self.bal(cny=20, usd=0.1)  # CNY present: USD threshold ignored
             self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
             self.balance = self.bal(cny=3)  # equal to default threshold: no notice
             self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")

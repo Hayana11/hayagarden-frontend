@@ -49,7 +49,8 @@ DELIVERY_HOUR = 6  # 北京时间
 DEFAULT_FALLBACK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 BALANCE_TIMEOUT = 15
-DEFAULT_LOW_BALANCE = 3.0
+DEFAULT_LOW_BALANCE = 3.0  # CNY
+DEFAULT_LOW_BALANCE_USD = 0.5
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 
@@ -117,12 +118,17 @@ def load_fallback_config() -> Optional[dict]:
     return {"model": model, "api_key": key, "base_url": base}
 
 
-def low_balance_threshold() -> float:
-    raw = _env_value("POSTMAN_DEEPSEEK_LOW_BALANCE")
+def low_balance_threshold(currency: str = "CNY") -> float:
+    """CNY 用 POSTMAN_DEEPSEEK_LOW_BALANCE（默认 3），USD 用 ..._USD（默认 0.5）。"""
+    if currency == "USD":
+        name, default = "POSTMAN_DEEPSEEK_LOW_BALANCE_USD", DEFAULT_LOW_BALANCE_USD
+    else:
+        name, default = "POSTMAN_DEEPSEEK_LOW_BALANCE", DEFAULT_LOW_BALANCE
+    raw = _env_value(name)
     try:
-        return float(raw) if raw else DEFAULT_LOW_BALANCE
+        return float(raw) if raw else default
     except ValueError:
-        return DEFAULT_LOW_BALANCE
+        return default
 
 
 # --------------------------------------------------------------------------
@@ -401,9 +407,10 @@ def check_balance(stamp: str) -> Optional[dict]:
 
 def build_notice(balance: Optional[dict], saw_402: bool) -> str:
     """余额有问题时返回一小段中文附言，否则空串。"""
-    threshold = low_balance_threshold()
+    currency = (balance or {}).get("currency") or "CNY"
+    threshold = low_balance_threshold(currency)
     amount = (balance or {}).get("amount")
-    sym = "$" if (balance or {}).get("currency") == "USD" else "¥"
+    sym = "$" if currency == "USD" else "¥"
     unavailable = (balance or {}).get("is_available") is False
     low = amount is not None and amount < threshold
     if not (saw_402 or unavailable or low):
@@ -427,15 +434,23 @@ def build_notice(balance: Optional[dict], saw_402: bool) -> str:
     return "邮差附言：" + head + tail
 
 
+def build_failure_notice(failures: list[tuple[str, str]]) -> str:
+    """两个模型都没写成报纸时的附言：只含模型名与失败原因类别，不含条目文本。"""
+    tried = "；".join("%s（%s）" % (m, r) for m, r in failures)
+    return "邮差附言：今天写报纸失败了，试过的模型：%s。条目留到明天再试。" % tried
+
+
 def _compose(primary: dict, fallback: Optional[dict], interests: str,
-             candidates: list[dict]) -> tuple[str, str, bool]:
+             candidates: list[dict]) -> tuple[str, str, bool, list[tuple[str, str]]]:
     """先主模型，失败（HTTP/超时/空或无效输出）则兜底一次。
 
-    返回 (正文, 实际写报的模型名, 兜底是否遇到 402)；正文为空表示两者都没产出。
+    返回 (正文, 实际写报的模型名, 兜底是否遇到 402, [(模型名, 失败原因类别)])；
+    正文为空表示都没产出。
     日志只记模型名与原因类别，不记条目文本。
     """
     allowed = {it["link"] for it in candidates}
     saw_402 = False
+    failures: list[tuple[str, str]] = []
     attempts = [(primary, False)]
     if fallback is not None:
         attempts.append((fallback, True))
@@ -446,7 +461,7 @@ def _compose(primary: dict, fallback: Optional[dict], interests: str,
             if paper:
                 if is_fb:
                     _LOG.warning("paper written by fallback model %s", cfg["model"])
-                return paper, cfg["model"], saw_402
+                return paper, cfg["model"], saw_402, failures
             reason = "empty_or_invalid_output"
         except urllib.error.HTTPError as exc:
             reason = "http_%s" % exc.code
@@ -454,9 +469,10 @@ def _compose(primary: dict, fallback: Optional[dict], interests: str,
                 saw_402 = True
         except Exception as exc:
             reason = type(exc).__name__
+        failures.append((cfg["model"], reason))
         _LOG.error("model %s failed (%s)%s", cfg["model"], reason,
                    "; trying fallback" if i == 0 and fallback is not None else "")
-    return "", "", saw_402
+    return "", "", saw_402, failures
 
 
 # --------------------------------------------------------------------------
@@ -477,11 +493,13 @@ def validate_paper(text: str, allowed_links: set[str],
         line = raw.strip()
         if not line:
             continue
-        if line.startswith("#"):
-            blocks.append((line, []))
-            continue
         urls = [u.rstrip(".,;:!?") for u in _URL_RE.findall(line)]
-        if not urls or any(u not in allowed_links for u in urls):
+        unknown = any(u not in allowed_links for u in urls)  # 任何位置的未知链接
+        if line.startswith("#"):
+            # 标题里有未知链接：丢掉标题行（空标题块吞掉其下条目）
+            blocks.append(("" if unknown else line, []))
+            continue
+        if not urls or unknown:
             continue
         if not blocks:
             continue  # 没有标题的条目：丢弃
@@ -489,6 +507,8 @@ def validate_paper(text: str, allowed_links: set[str],
     out: list[str] = []
     total = 0
     for heading, lines in blocks:
+        if not heading:
+            continue
         kept = []
         used = total + len(heading) + 1
         for line in lines:
@@ -542,13 +562,16 @@ def run(date: Optional[str] = None, *, force: bool = False, dry_run: bool = Fals
     fetched, status = fetch_all(sources_cfg["sources"])
     candidates = select_candidates(fetched, seen, now_utc, ignore_seen=force)
 
-    paper, used_model, saw_402 = "", "", False
+    paper, used_model, saw_402, failures = "", "", False, []
     if candidates:
-        paper, used_model, saw_402 = _compose(
+        paper, used_model, saw_402, failures = _compose(
             cfg, load_fallback_config(), sources_cfg["interests"], candidates)
     else:
         _LOG.info("no new candidate items for %s", date)
     notice = build_notice(balance, saw_402)
+    if candidates and not paper and failures:
+        fail_notice = build_failure_notice(failures)
+        notice = fail_notice + ("\n" + notice if notice else "")
 
     kind = None
     if paper:
