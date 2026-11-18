@@ -43,6 +43,33 @@ RSS / Atom / arXiv Atom 用标准库 `xml.etree` 解析；含 `DOCTYPE` / `ENTIT
 缺 `POSTMAN_MODEL` 或 `POSTMAN_API_KEY` 时只打一行日志并以 0 退出，不抓取、不写库。
 模型调用失败同样退出 0，不写任何内容（下次重跑仍能拿到这些条目）。
 
+### 兜底模型（DeepSeek）
+
+主模型调用失败（HTTP 错误含 429/5xx、超时、空或无效输出、校验后无可用条目）时，用同一份请求调用兜底模型一次，
+校验规则相同（链接检查、长度上限）。库里的 `model` 和投递包装里的“邮差（{model}）”写的是**实际写报的模型**。
+日志记录用了哪个模型和兜底原因（不含条目文本）。
+
+- `POSTMAN_FALLBACK_MODEL`：兜底必填，代码里没有默认模型名；缺失则不兜底。
+- `POSTMAN_FALLBACK_API_KEY`：默认取 `DEEPSEEK_API_KEY`。
+- `POSTMAN_FALLBACK_BASE_URL`：默认 `https://api.deepseek.com/v1`。
+
+### DeepSeek 余额监控
+
+每天生成前，若有 `DEEPSEEK_API_KEY`，GET `https://api.deepseek.com/user/balance`（Bearer，15 秒超时，不带其他数据）。
+解析宽松，任何错误只记日志、视为无余额信息，绝不让运行失败。
+`POSTMAN_DEEPSEEK_LOW_BALANCE`（默认 3）：有 CNY 总额就比 CNY，否则比 USD。
+以下任一成立就产生一条附言（每天最多一条）：`is_available` 为 false、总额低于阈值、兜底调用返回 HTTP 402。例如：
+
+`邮差附言：DeepSeek 余额只剩 ¥2（低于 ¥3）。Ombre 给记忆补情绪、判断同一件事，以及邮差的兜底写报，都靠它；用完了，夜里的记忆审核会整晚报错。记得告诉哈娅。`
+
+投递：有报纸时，附言接在正文末尾（单独一行 `——` 之后），仍在包装内、`【报纸到此为止】` 之前。
+当天没产出报纸（两个模型都失败，或没有新条目）但有附言时，存一条只含附言的记录（`kind='notice'`，不标记 `postman_seen`），
+照常由唤醒投递，包装为 `【邮差附言 · {date}】` + 同一句安全说明 + 正文 + `【附言到此为止】`。
+`postman_editions` 新增可空列（`ensure_schema` 幂等 ALTER）：`kind`（NULL=报纸，`notice`=仅附言）、
+`balance_json`（`{currency, amount, is_available, checked_at}`，便于事后查看）。
+
+注意：此版本里 Gemini 只从已抓取的订阅源条目中挑选，**没有**启用 Google Search grounding。
+
 ## 输出校验与存储
 
 - 模型被要求：每话题最多 2 条，全文 ≤ 800 字，格式为 `## 话题` + `- 说明 链接`。

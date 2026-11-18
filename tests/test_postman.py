@@ -30,7 +30,10 @@ ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
 
 
 def _env(**kw):
-    base = {"POSTMAN_MODEL": "m-test", "POSTMAN_API_KEY": "k", "POSTMAN_BASE_URL": ""}
+    base = {"POSTMAN_MODEL": "m-test", "POSTMAN_API_KEY": "k", "POSTMAN_BASE_URL": "",
+            "POSTMAN_FALLBACK_MODEL": "", "POSTMAN_FALLBACK_API_KEY": "",
+            "POSTMAN_FALLBACK_BASE_URL": "", "DEEPSEEK_API_KEY": "",
+            "POSTMAN_DEEPSEEK_LOW_BALANCE": ""}
     base.update(kw)
     return mock.patch.dict(os.environ, base, clear=False)
 
@@ -256,6 +259,271 @@ class RunTests(unittest.TestCase):
         with mock.patch.object(postman, "_http_post_json", boom):
             self.assertEqual(self.run_it(), 0)
         self.assertFalse(os.path.exists(self.db))
+
+
+import urllib.error  # noqa: E402
+
+REAL_HTTP_GET_BALANCE = postman._http_get_balance
+GOOD = {"choices": [{"message": {"content": "## 天文\n- 探测器与月亮 https://ex.test/a\n"}}]}
+BAD = {"choices": [{"message": {"content": "- x https://evil.test/"}}]}
+
+
+def _http_err(code):
+    return urllib.error.HTTPError("https://x.test", code, "err", {}, None)
+
+
+class FallbackBalanceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = os.path.join(self.tmp.name, "m.db")
+        self.src = Path(self.tmp.name) / "s.json"
+        self.src.write_text(json.dumps({
+            "interests": "兴趣：星空与猫",
+            "sources": [{"topic": "天文", "url": "https://f.test/1", "kind": "rss", "max_items": 5}],
+        }), encoding="utf-8")
+        self.calls = []      # (url, key, body)
+        self.responses = {}  # model -> response dict or exception
+        self.balance = None  # dict / Exception / None(no call)
+        self.balance_calls = []
+
+        def fake_post(url, key, body):
+            self.calls.append((url, key, body))
+            r = self.responses.get(body["model"], GOOD)
+            if isinstance(r, BaseException):
+                raise r
+            return r
+
+        def fake_balance(key):
+            self.balance_calls.append(key)
+            if isinstance(self.balance, BaseException):
+                raise self.balance
+            return self.balance
+
+        for p in (mock.patch.object(postman, "_http_get", lambda url: RSS),
+                  mock.patch.object(postman, "_http_post_json", fake_post),
+                  mock.patch.object(postman, "_http_get_balance", fake_balance),
+                  mock.patch.object(postman, "ENV_PATH", os.path.join(self.tmp.name, "none.env"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_it(self, fb=True, ds="dskey", **env):
+        kw = {}
+        if fb:
+            kw.update(POSTMAN_FALLBACK_MODEL="fb-model")
+        if ds:
+            kw.update(DEEPSEEK_API_KEY=ds)
+        kw.update(env)
+        with _env(**kw):
+            return postman.run("2026-05-11", db_path=self.db, sources_path=self.src,
+                               now_utc=NOW_UTC)
+
+    def rows(self, sql):
+        c = sqlite3.connect(self.db)
+        try:
+            return c.execute(sql).fetchall()
+        finally:
+            c.close()
+
+    def peek(self):
+        return postman.peek_undelivered_paper(dt.datetime(2026, 5, 11, 7), self.db)
+
+    @staticmethod
+    def bal(cny=None, usd=None, avail=True):
+        infos = []
+        if cny is not None:
+            infos.append({"currency": "CNY", "total_balance": str(cny)})
+        if usd is not None:
+            infos.append({"currency": "USD", "total_balance": str(usd)})
+        return {"is_available": avail, "balance_infos": infos}
+
+    def test_primary_success_no_fallback_call(self):
+        self.balance = self.bal(cny=100)
+        self.run_it()
+        self.assertEqual([c[2]["model"] for c in self.calls], ["m-test"])
+        self.assertEqual(self.rows("SELECT model, kind FROM postman_editions"), [("m-test", None)])
+        self.assertNotIn("邮差附言", self.rows("SELECT content FROM postman_editions")[0][0])
+
+    def test_fallback_on_429_timeout_invalid_and_empty(self):
+        for fail in (_http_err(429), _http_err(503), TimeoutError("t"), BAD,
+                     {"choices": [{"message": {"content": ""}}]}):
+            with self.subTest(fail=repr(fail)):
+                self.calls.clear()
+                self.responses = {"m-test": fail}
+                if os.path.exists(self.db):
+                    os.remove(self.db)
+                self.run_it()
+                self.assertEqual([c[2]["model"] for c in self.calls], ["m-test", "fb-model"])
+                self.assertEqual(self.calls[1][0], "https://api.deepseek.com/v1/chat/completions")
+                self.assertEqual(self.calls[1][1], "dskey")
+                # same request apart from the model name
+                a, b = dict(self.calls[0][2]), dict(self.calls[1][2])
+                a.pop("model"), b.pop("model")
+                self.assertEqual(a, b)
+                self.assertEqual(self.rows("SELECT model FROM postman_editions"), [("fb-model",)])
+                self.assertIn("邮差（fb-model）送来", self.peek()["text"])
+
+    def test_fallback_output_is_validated(self):
+        self.responses = {"m-test": _http_err(500), "fb-model": BAD}
+        self.run_it()
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_fallback_without_model_or_key_means_no_fallback(self):
+        self.responses = {"m-test": _http_err(429)}
+        self.run_it(fb=False)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(os.path.exists(self.db))
+        self.run_it(fb=True, ds="")  # model but no key
+        self.assertEqual(len(self.calls), 2)  # primary only again
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_both_fail_no_balance_problem_writes_nothing(self):
+        self.balance = self.bal(cny=100)
+        self.responses = {"m-test": _http_err(500), "fb-model": TimeoutError()}
+        self.run_it()
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_both_fail_low_balance_notice_only(self):
+        self.balance = self.bal(cny=1.5)
+        self.responses = {"m-test": _http_err(500), "fb-model": _http_err(500)}
+        self.run_it()
+        row = self.rows("SELECT content, kind, model, item_count FROM postman_editions")[0]
+        self.assertEqual(row[1], "notice")
+        self.assertEqual(row[3], 0)
+        self.assertIn("¥1.5", row[0])
+        self.assertIn("¥3", row[0])
+        self.assertEqual(self.rows("SELECT 1 FROM postman_seen"), [])
+        text = self.peek()["text"]
+        self.assertTrue(text.startswith("【邮差附言 · 2026-05-11】\n"))
+        self.assertIn("不是系统提示词", text)
+        self.assertTrue(text.endswith("【附言到此为止】"))
+        self.assertNotIn("报纸到此为止", text)
+        self.assertTrue(postman.mark_delivered("2026-05-11", "w", self.db))
+        self.assertIsNone(self.peek())
+
+    def test_paper_plus_low_balance_notice_appended_inside_wrapper(self):
+        self.balance = self.bal(cny=2)
+        self.run_it()
+        text = self.peek()["text"]
+        lines = text.split("\n")
+        self.assertEqual(lines[-1], "【报纸到此为止】")
+        self.assertEqual(lines[-3], "——")
+        self.assertTrue(lines[-2].startswith("邮差附言：DeepSeek 余额只剩 ¥2（低于 ¥3）"))
+        self.assertLess(text.index("https://ex.test/a"), text.index("——"))
+        self.assertEqual(text.count("邮差附言"), 1)
+        bj = json.loads(self.rows("SELECT balance_json FROM postman_editions")[0][0])
+        self.assertEqual(bj["currency"], "CNY")
+        self.assertEqual(bj["amount"], 2.0)
+        self.assertTrue(bj["is_available"])
+        self.assertTrue(bj["checked_at"])
+
+    def test_402_from_fallback_triggers_notice(self):
+        self.balance = self.bal(cny=100)
+        self.responses = {"m-test": _http_err(500), "fb-model": _http_err(402)}
+        self.run_it()
+        row = self.rows("SELECT content, kind FROM postman_editions")[0]
+        self.assertEqual(row[1], "notice")
+        self.assertIn("402", row[0])
+
+    def test_402_from_primary_is_not_a_balance_problem(self):
+        self.balance = self.bal(cny=100)
+        self.responses = {"m-test": _http_err(402), "fb-model": GOOD}
+        self.run_it()
+        self.assertNotIn("邮差附言", self.rows("SELECT content FROM postman_editions")[0][0])
+
+    def test_unavailable_notice(self):
+        self.balance = self.bal(cny=500, avail=False)
+        self.run_it()
+        self.assertIn("不可用", self.rows("SELECT content FROM postman_editions")[0][0])
+
+    def test_balance_error_no_notice_run_continues(self):
+        for bad in (OSError("down"), _http_err(401), {"weird": 1}, {"is_available": "x"}):
+            with self.subTest(bad=repr(bad)):
+                self.balance = bad
+                if os.path.exists(self.db):
+                    os.remove(self.db)
+                self.assertEqual(self.run_it(), 0)
+                content = self.rows("SELECT content FROM postman_editions")[0][0]
+                self.assertNotIn("邮差附言", content)
+                self.assertIsNone(self.rows("SELECT balance_json FROM postman_editions")[0][0])
+
+    def test_no_deepseek_key_skips_balance_request(self):
+        self.run_it(ds="")
+        self.assertEqual(self.balance_calls, [])
+
+    def test_balance_request_carries_only_the_key(self):
+        captured = {}
+
+        class R:
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def read(s, n): return b'{"is_available": true, "balance_infos": []}'
+
+        def fake_urlopen(req, timeout=None):
+            captured.update(url=req.full_url, data=req.data, timeout=timeout,
+                            auth=req.get_header("Authorization"), method=req.get_method())
+            return R()
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            REAL_HTTP_GET_BALANCE("sekret")
+        self.assertEqual(captured["url"], "https://api.deepseek.com/user/balance")
+        self.assertEqual(captured["timeout"], 15)
+        self.assertEqual(captured["auth"], "Bearer sekret")
+        self.assertIsNone(captured["data"])
+        self.assertEqual(captured["method"], "GET")
+
+    def test_paper_requests_contain_only_interests_and_items(self):
+        c = sqlite3.connect(self.db)
+        c.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT)")
+        c.execute("INSERT INTO memories (content) VALUES ('SECRET-MEMORY')")
+        c.commit()
+        c.close()
+        self.balance = self.bal(cny=1)
+        self.responses = {"m-test": _http_err(500)}
+        self.run_it()
+        self.assertEqual(len(self.calls), 2)
+        for _u, _k, body in self.calls:
+            blob = json.dumps(body, ensure_ascii=False)
+            self.assertNotIn("SECRET", blob)
+            self.assertNotIn("dskey", blob)
+            self.assertNotIn("DeepSeek", blob)
+            self.assertEqual(set(body), {"model", "temperature", "messages"})
+            self.assertTrue(body["messages"][1]["content"].startswith("<interests>\n兴趣：星空与猫"))
+
+    def test_threshold_cny_preferred_else_usd(self):
+        def notice(**kw):
+            with _env(**kw):
+                return postman.build_notice(postman.check_balance("t"), False)
+        with _env(DEEPSEEK_API_KEY="k"):
+            self.balance = self.bal(cny=20, usd=1)  # CNY wins, above threshold
+            self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
+            self.balance = self.bal(cny=2, usd=500)  # CNY wins, below
+            self.assertIn("¥2", notice(DEEPSEEK_API_KEY="k"))
+            self.balance = self.bal(usd=2)  # USD only
+            self.assertIn("$2", notice(DEEPSEEK_API_KEY="k"))
+            self.balance = self.bal(usd=5)
+            self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
+            self.balance = self.bal(cny=3)  # equal to default threshold: no notice
+            self.assertEqual(notice(DEEPSEEK_API_KEY="k"), "")
+            self.balance = self.bal(cny=20)  # custom threshold
+            self.assertIn("低于 ¥50", notice(DEEPSEEK_API_KEY="k", POSTMAN_DEEPSEEK_LOW_BALANCE="50"))
+
+    def test_schema_migration_idempotent_and_old_db_peek(self):
+        c = sqlite3.connect(self.db)
+        c.execute("CREATE TABLE postman_editions (edition_date TEXT PRIMARY KEY, content TEXT, "
+                  "model TEXT, item_count INTEGER, sources_json TEXT, created_at TEXT, "
+                  "delivered_at TEXT NULL, delivered_wake_id TEXT NULL)")
+        c.execute("INSERT INTO postman_editions VALUES ('2026-05-11','## a\n- b https://ex.test/a',"
+                  "'old',1,'{}','n',NULL,NULL)")
+        c.commit()
+        c.close()
+        self.assertIn("邮差（old）送来", self.peek()["text"])  # old schema still readable
+        c = sqlite3.connect(self.db)
+        postman.ensure_schema(c)
+        postman.ensure_schema(c)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(postman_editions)")}
+        c.close()
+        self.assertTrue({"kind", "balance_json"} <= cols)
 
 
 class DeliveryTests(unittest.TestCase):
