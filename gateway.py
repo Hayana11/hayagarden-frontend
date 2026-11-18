@@ -11796,6 +11796,59 @@ def debug_provider():
     })
 
 
+_WAKE_PROMPT_PREVIEW_MODES = (
+    ('normal', '普通唤醒'),
+    ('morning', '早安'),
+    ('nightwatch', '巡夜'),
+    ('self_trigger', '自主提醒'),
+)
+
+
+@app.route('/wake/prompt-preview', methods=['GET'])
+def wake_prompt_preview():
+    """Read-only view of the Unified Wake trigger text for the Profile page.
+
+    The text is built by the same function the live round uses, with sample
+    clock values; nothing is stored, no model is called, no wake is run.
+    The skeleton lives in code, so every mode is view-only.
+    """
+    from wake.runners import wake_mode_disabled
+    from chat.behavior_authority_b3 import unified_normal_wake_enabled
+    unified_on = bool(unified_normal_wake_enabled())
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    modes = []
+    for mode, label in _WAKE_PROMPT_PREVIEW_MODES:
+        disabled = bool(wake_mode_disabled(mode))
+        # normal still runs with the Unified route off, but on the older path,
+        # so this text is not what it sends.
+        if disabled:
+            status = 'disabled'
+        elif unified_on:
+            status = 'view_only'
+        else:
+            status = 'not_in_use'
+        try:
+            text = _build_normal_wake_main_chat_trigger(
+                now=now, t2_hours=2.0, t_hours=2.0, mode=mode,
+                last_user_at=None, activity_desc='',
+                self_trigger_note='（到期提醒的原文）' if mode == 'self_trigger' else '',
+            )
+            error = ''
+        except Exception as exc:
+            text, error = '', str(exc)
+        modes.append({
+            'mode': mode, 'label': label, 'status': status,
+            'editable': False, 'prompt': text, 'error': error,
+        })
+    return jsonify({
+        'ok': True,
+        'unified_main_chat_route': unified_on,
+        'source': 'gateway.py · _build_normal_wake_main_chat_trigger',
+        'sample_note': '时间与间隔为示例值，实际唤醒时按当下真实时钟填入。',
+        'modes': modes,
+    })
+
+
 @app.route('/api/debug/wake_check', methods=['GET'])
 def debug_wake_check():
     """Health-check endpoint: call build_wake_system() inside the running process

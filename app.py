@@ -1942,6 +1942,16 @@ def get_display_thinking_prompt_config():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/profile/wake-prompts', methods=['GET'])
+def get_profile_wake_prompts():
+    """Read-only Wake trigger preview, served by frontend-gw."""
+    data = _gw_json_request('GET', '/wake/prompt-preview', timeout=5)
+    if not isinstance(data, dict) or not data.get('ok'):
+        detail = data.get('error') if isinstance(data, dict) else 'unreachable'
+        return jsonify({'ok': False, 'error': f'Wake 提示词暂时读不到：{detail}'}), 502
+    return jsonify(data)
+
+
 @app.route('/api/profile/display-thinking-prompt', methods=['PUT', 'DELETE'])
 def set_display_thinking_prompt_config():
     from chat.display_thinking import (

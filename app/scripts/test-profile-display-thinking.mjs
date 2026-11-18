@@ -42,4 +42,18 @@ assert.match(css, /color:\s*#C45C78/);
 assert.match(css, /color:\s*#E2A8B6/);
 assert.doesNotMatch(css, /\.profile-tool-prompt-preview__title\s*\{[^}]*gap:/);
 assert.match(indexHtml, /family=JetBrains\+Mono/);
+
+// Three tabs: 主设定 / 特殊设定 / 其他设定
+assert.match(profile, /label: '主设定'/);
+assert.match(profile, /label: '特殊设定'/);
+assert.match(profile, /label: '其他设定'/);
+assert.match(profile, /role="tablist"/);
+// Wake prompts are view-only: no save path, and the page says so.
+assert.ok(profile.includes('/api/profile/wake-prompts'));
+assert.doesNotMatch(profile, /http\.(post|put)<[^>]*>\('\/api\/profile\/wake-prompts'/);
+assert.match(profile, /这里只能查看/);
+assert.match(profile, /不是 Claude 原生 thinking/);
+assert.ok(app.includes("@app.route('/api/profile/wake-prompts', methods=['GET'])"), 'wake prompts route must be GET-only');
+assert.doesNotMatch(css, /\.profile-tabs\s*\{[^}]*gap:/);
+assert.doesNotMatch(css, /\.profile-heading-actions\s*\{[^}]*gap:/);
 console.log('profile display-thinking contract: PASS');

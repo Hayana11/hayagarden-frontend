@@ -6,34 +6,28 @@
 <title>gallery · 我们家</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
 <link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#7c6a8a">
+<meta name="theme-color" content="#F7F1EE">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 :root{
-  --bg:#F5F3EE;--card:#FFFFFF;--text:#1A1815;--muted:#9A958B;
-  --primary:#7c6a8a;--amber:#d4a574;--amber-bg:#fdf4e7;--amber-text:#412402;--border:#EDE9E0;
+  --bg:#F7F1EE;--card:#FFFFFF;--text:#4A3F3C;--muted:#8C7B76;
+  --primary:#B76E79;--amber:#C08497;--amber-bg:#F9E8EE;--amber-text:#9C3B4A;--border:#F0E6E2;
+  --rose:#B76E79;--pink-soft:#F9E8EE;--blue-soft:#E7EFF8;--sand:#D7BA87;
 }
 html,body{height:100%;}
 body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;min-height:100%;}
-.hd{flex-shrink:0;background:rgba(245,243,238,.97);backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top,0px) + 14px) 18px 10px;border-bottom:.5px solid var(--border);}
+.hd{flex-shrink:0;background:rgba(247,241,238,.97);backdrop-filter:blur(10px);padding:calc(env(safe-area-inset-top,0px) + 14px) 18px 10px;border-bottom:.5px solid var(--border);}
 .hd-title{font-family:Georgia,serif;font-size:20px;color:var(--text);letter-spacing:.5px;}
 .hd-sub{font-size:11px;color:var(--muted);margin-top:2px;}
 .gsearch{width:100%;margin-top:9px;padding:8px 12px;border:1px solid var(--border);border-radius:12px;background:var(--card);font-size:13px;color:var(--text);font-family:inherit;outline:none;}
-.gsearch:focus{border-color:rgba(212,165,116,.5);}
-.ph .emo{position:absolute;top:6px;left:6px;background:rgba(212,165,116,.92);color:#fff;font-size:10px;padding:2px 7px;border-radius:9px;}
-.ph .star{position:absolute;bottom:6px;right:6px;color:#ffd75e;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.5);}
+.gsearch:focus{border-color:rgba(183,110,121,.45);}
+.ph .emo{position:absolute;top:6px;left:6px;background:rgba(192,132,151,.92);color:#fff;font-size:10px;padding:2px 7px;border-radius:9px;}
+.ph .star{position:absolute;bottom:6px;right:6px;color:#F3A9BC;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.4);}
 .alb.add{color:var(--amber);border-style:dashed;}
-.lb-kw{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;margin-top:8px;}
-.lb-kw span{font-size:11px;color:#d4a574;background:rgba(212,165,116,.16);padding:2px 9px;border-radius:9px;}
-.lb-acts{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;justify-content:center;}
-.lb-act{display:flex;align-items:center;gap:5px;font-size:12.5px;color:#eee;background:rgba(255,255,255,.12);border:none;padding:8px 14px;border-radius:20px;cursor:pointer;font-family:inherit;}
-.lb-act.on{background:rgba(212,165,116,.85);color:#fff;}
-.lb-act.del{color:#ff9b8f;}
-.lb-act .ti{font-size:15px;}
 .albums{display:flex;gap:7px;overflow-x:auto;padding:10px 16px 6px;flex-shrink:0;-webkit-overflow-scrolling:touch;}
 .albums::-webkit-scrollbar{display:none;}
 .alb{flex-shrink:0;font-size:12.5px;padding:6px 13px;border-radius:14px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;white-space:nowrap;font-family:inherit;transition:all .15s;}
-.alb.on{background:var(--amber-bg);border-color:rgba(212,165,116,.5);color:var(--amber-text);font-weight:600;}
+.alb.on{background:var(--amber-bg);border-color:rgba(192,132,151,.5);color:var(--amber-text);font-weight:600;}
 .alb .n{opacity:.55;font-size:11px;margin-left:3px;}
 .grid{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 16px 90px;align-content:start;}
 .ph{position:relative;border-radius:12px;overflow:hidden;background:var(--card);border:1px solid var(--border);cursor:pointer;aspect-ratio:3/4;}
@@ -42,15 +36,33 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .ph .src{position:absolute;top:6px;right:6px;background:rgba(0,0,0,.35);color:#fff;font-size:13px;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;}
 .empty{grid-column:1/-1;text-align:center;color:var(--muted);font-size:13px;padding:60px 20px;line-height:1.9;}
 .empty .ti{font-size:34px;opacity:.4;display:block;margin-bottom:10px;}
-/* lightbox */
-.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:300;flex-direction:column;align-items:center;justify-content:center;padding:20px;}
-.lb.on{display:flex;}
-.lb img{max-width:100%;max-height:80vh;border-radius:10px;box-shadow:0 8px 40px rgba(0,0,0,.5);}
-.lb-note{color:#eee;font-size:13px;margin-top:14px;text-align:center;max-width:90%;line-height:1.6;}
-.lb-meta{color:#999;font-size:11px;margin-top:6px;}
-.lb-close{position:absolute;top:calc(env(safe-area-inset-top,0px) + 14px);right:18px;color:#fff;background:rgba(255,255,255,.15);border:none;width:38px;height:38px;border-radius:50%;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+/* photo detail: light post card */
+.lb{display:none;position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(247,241,238,.97);z-index:300;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(env(safe-area-inset-top,0px) + 16px) 14px calc(env(safe-area-inset-bottom,0px) + 24px);}
+.lb.on{display:block;}
+.post{max-width:440px;margin:0 auto;background:var(--card);border:1px solid var(--border);border-radius:22px;box-shadow:0 10px 30px rgba(183,110,121,.10);overflow:hidden;}
+.post-hd{display:flex;align-items:center;padding:12px 12px 10px 14px;}
+.post-av{flex-shrink:0;width:38px;height:38px;border-radius:50%;border:1.5px solid #E9B9C6;background:var(--pink-soft);color:var(--rose);display:flex;align-items:center;justify-content:center;font-size:17px;}
+.post-who{flex:1;min-width:0;margin-left:10px;}
+.post-src{font-size:14px;color:var(--rose);font-weight:600;letter-spacing:.3px;}
+.post-date{font-size:11.5px;color:var(--muted);margin-top:1px;}
+.lb-close{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:20px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.post-img{margin:0 10px;border-radius:16px;background:var(--pink-soft);display:flex;align-items:center;justify-content:center;min-height:180px;}
+.post-img img{display:block;max-width:100%;max-height:68vh;object-fit:contain;border-radius:16px;}
+.post-acts{display:flex;align-items:center;padding:10px 8px 2px;}
+.pa{border:none;background:none;color:var(--amber);cursor:pointer;font-family:inherit;display:flex;align-items:center;padding:6px 6px;font-size:12px;white-space:nowrap;}
+.pa .ti{font-size:23px;}
+.pa span{margin-left:3px;color:var(--muted);}
+.pa.on{color:#E0607E;}
+.pa.del{margin-left:auto;color:#C9A0A6;}
+.pa-orig{text-decoration:none;}
+.post-body{padding:4px 16px 16px;}
+.lb-note{color:var(--text);font-size:14.5px;line-height:1.75;white-space:pre-wrap;word-break:break-word;}
+.lb-note.empty-note{color:var(--muted);font-size:13px;}
+.lb-kw{display:flex;flex-wrap:wrap;margin-top:8px;}
+.lb-kw span{font-size:11.5px;color:var(--rose);background:var(--pink-soft);padding:3px 10px;border-radius:10px;margin:0 6px 6px 0;}
+.lb-meta{color:var(--muted);font-size:11.5px;margin-top:6px;padding-top:8px;border-top:1px solid #F3EBDD;}
 /* nav */
-.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;display:flex;background:rgba(245,243,238,.97);backdrop-filter:blur(10px);border-top:.5px solid var(--border);padding:8px 0 calc(env(safe-area-inset-bottom,0px) + 8px);z-index:50;}
+.bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;display:flex;background:rgba(247,241,238,.97);backdrop-filter:blur(10px);border-top:.5px solid var(--border);padding:8px 0 calc(env(safe-area-inset-bottom,0px) + 8px);z-index:50;}
 .ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;border:none;background:none;cursor:pointer;color:#b8b0b8;font-size:10px;letter-spacing:.4px;font-family:inherit;padding:2px 0;transition:color .18s;}
 .ni.act{color:var(--amber);}
 .ni i{font-size:19px;}
@@ -67,17 +79,29 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 <div class="grid" id="grid"><div class="empty">加载中…</div></div>
 
 <div class="lb" id="lb" onclick="closeLb(event)">
-  <button class="lb-close" onclick="closeLb(event,true)">×</button>
-  <img id="lb-img" src="" alt="">
-  <div class="lb-note" id="lb-note"></div>
-  <div class="lb-kw" id="lb-kw"></div>
-  <div class="lb-meta" id="lb-meta"></div>
-  <div class="lb-acts" onclick="event.stopPropagation()">
-    <button class="lb-act" id="lb-fav" onclick="lbToggleFav()"><i class="ti ti-star"></i><span>收藏</span></button>
-    <button class="lb-act" onclick="lbEditNote()"><i class="ti ti-pencil"></i>备注</button>
-    <button class="lb-act" onclick="lbMove()"><i class="ti ti-folder"></i>移动</button>
-    <button class="lb-act del" onclick="lbDelete()"><i class="ti ti-trash"></i>删除</button>
-  </div>
+  <article class="post" onclick="event.stopPropagation()">
+    <div class="post-hd">
+      <div class="post-av"><i class="ti ti-photo" id="lb-av"></i></div>
+      <div class="post-who">
+        <div class="post-src" id="lb-src">相册</div>
+        <div class="post-date" id="lb-date"></div>
+      </div>
+      <button class="lb-close" aria-label="关闭" onclick="closeLb(event,true)">×</button>
+    </div>
+    <div class="post-img"><img id="lb-img" src="" alt=""></div>
+    <div class="post-acts">
+      <button class="pa" id="lb-fav" onclick="lbToggleFav()" aria-label="收藏"><i class="ti ti-heart"></i><span>收藏</span></button>
+      <button class="pa" onclick="lbEditNote()" aria-label="编辑备注"><i class="ti ti-pencil"></i><span>备注</span></button>
+      <button class="pa" onclick="lbMove()" aria-label="移动相册"><i class="ti ti-folder"></i><span>移动</span></button>
+      <a class="pa pa-orig" id="lb-orig" href="#" target="_blank" rel="noopener" aria-label="查看原图"><i class="ti ti-arrows-maximize"></i><span>原图</span></a>
+      <button class="pa del" onclick="lbDelete()" aria-label="删除"><i class="ti ti-trash"></i></button>
+    </div>
+    <div class="post-body">
+      <div class="lb-note" id="lb-note"></div>
+      <div class="lb-kw" id="lb-kw"></div>
+      <div class="lb-meta" id="lb-meta"></div>
+    </div>
+  </article>
 </div>
 
 <nav class="bnav">
@@ -89,6 +113,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 
 <script>
 var SRC_ICON = {chat:'ti-message-2', screenshot_chat:'ti-message-2', read_webpage:'ti-browser', upload:'ti-upload'};
+var SRC_LABEL = {chat:'来自聊天', screenshot_chat:'聊天截图', read_webpage:'来自网页', upload:'上传'};
 var curAlbum = null, albums = [], photosCache = [], searchQ = '', searchTimer = null;
 var favMode = false, lbPid = null;
 
@@ -157,30 +182,48 @@ async function newAlbum(){
   await loadAlbums();
 }
 
+function setLbNote(p){
+  var el = document.getElementById('lb-note');
+  var txt = p ? (p.note || p.summary || '') : '';
+  el.textContent = txt || '还没有备注';
+  el.className = 'lb-note' + (txt ? '' : ' empty-note');
+}
+function setLbFav(isFav){
+  var favBtn = document.getElementById('lb-fav');
+  favBtn.classList.toggle('on', !!isFav);
+  favBtn.querySelector('i').className = 'ti ' + (isFav ? 'ti-heart-filled' : 'ti-heart');
+  favBtn.querySelector('span').textContent = isFav ? '已收藏' : '收藏';
+}
 function openLb(pid){
   lbPid = pid;
   var p = photosCache.find(function(x){ return x.pid===pid; });
-  document.getElementById('lb-img').src = '/api/gallery/photo/'+pid;
-  document.getElementById('lb-note').textContent = p ? (p.summary || p.note || '') : '';
+  var src = '/api/gallery/photo/'+pid;
+  document.getElementById('lb-img').src = src;
+  document.getElementById('lb-orig').href = src;
+  var st = p ? p.source_type : '';
+  document.getElementById('lb-av').className = 'ti ' + (SRC_ICON[st] || 'ti-photo');
+  document.getElementById('lb-src').textContent = SRC_LABEL[st] || '相册';
+  document.getElementById('lb-date').textContent = p ? (p.saved_at||'').slice(0,16) : '';
+  setLbNote(p);
   var kws = (p && p.keywords) || [];
-  document.getElementById('lb-kw').innerHTML = kws.map(function(k){ return '<span>'+esc(k)+'</span>'; }).join('');
-  var meta = p ? (p.saved_at||'').slice(0,16) : '';
-  if(p && p.emotion) meta = p.emotion + ' · ' + meta;
-  document.getElementById('lb-meta').textContent = meta;
-  var favBtn = document.getElementById('lb-fav');
-  var isFav = p && p.favorite;
-  favBtn.classList.toggle('on', !!isFav);
-  favBtn.querySelector('span').textContent = isFav ? '已收藏' : '收藏';
-  document.getElementById('lb').classList.add('on');
+  document.getElementById('lb-kw').innerHTML = kws.map(function(k){ return '<span>#'+esc(k)+'</span>'; }).join('');
+  var meta = document.getElementById('lb-meta');
+  var parts = [];
+  if(p && p.emotion) parts.push(p.emotion);
+  if(p && p.note && p.summary) parts.push(p.summary);
+  meta.textContent = parts.join(' · ');
+  meta.style.display = parts.length ? '' : 'none';
+  setLbFav(p && p.favorite);
+  var lb = document.getElementById('lb');
+  lb.scrollTop = 0;
+  lb.classList.add('on');
 }
 
 async function lbToggleFav(){
   if(!lbPid) return;
   var r = await fetch('/api/gallery/photo/'+lbPid+'/favorite', {method:'POST'});
   var d = await r.json();
-  var favBtn = document.getElementById('lb-fav');
-  favBtn.classList.toggle('on', d.favorite===1);
-  favBtn.querySelector('span').textContent = d.favorite===1 ? '已收藏' : '收藏';
+  setLbFav(d.favorite===1);
   var p = photosCache.find(function(x){ return x.pid===lbPid; });
   if(p) p.favorite = d.favorite;
   loadPhotos();
@@ -192,8 +235,7 @@ async function lbEditNote(){
   var note = prompt('给这张画面写句备注', cur);
   if(note===null) return;
   await fetch('/api/gallery/photo/'+lbPid+'/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note:note})});
-  if(p) p.note = note;
-  document.getElementById('lb-note').textContent = note || (p && p.summary) || '';
+  if(p){ p.note = note; setLbNote(p); }
   loadPhotos();
 }
 async function lbMove(){

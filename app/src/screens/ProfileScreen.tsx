@@ -9,6 +9,7 @@ import {
   validateDisplayThinkingPrompt,
 } from '../lib/displayThinking';
 import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
+import { ROUTES } from '../navigation';
 import './ProfileScreen.css';
 
 const LIGHT_VARS: Record<string, string> = {
@@ -17,6 +18,7 @@ const LIGHT_VARS: Record<string, string> = {
   '--line': '#F0E6E2', '--rose': '#B76E79', '--deep': '#9C3B4A', '--rosebg': 'rgba(183,110,121,0.10)',
   '--shadow': 'rgba(183,110,121,0.10)', '--shadow2': 'rgba(183,110,121,0.20)',
   '--ok': '#7A9B6D', '--err': '#C25450', '--gold': '#D9A441',
+  '--pink-soft': '#F9E8EE', '--blue-soft': '#E7EFF8', '--sand': '#D7BA87',
   '--serif': FONT_CN, '--display': FONT_DISPLAY,
 };
 
@@ -26,10 +28,30 @@ const DARK_VARS: Record<string, string> = {
   '--line': '#3B302D', '--rose': '#C98A93', '--deep': '#D89AA2', '--rosebg': 'rgba(201,138,147,0.16)',
   '--shadow': 'rgba(0,0,0,0.28)', '--shadow2': 'rgba(0,0,0,0.45)',
   '--ok': '#8FAF80', '--err': '#D97B76', '--gold': '#DFB25E',
+  '--pink-soft': '#3A2A2E', '--blue-soft': '#262C35', '--sand': '#9C8562',
   '--serif': FONT_CN, '--display': FONT_DISPLAY,
 };
 
 type PersonaResponse = { ok?: boolean; content?: string; error?: string };
+
+type ProfileTab = 'main' | 'special' | 'other';
+
+type WakePromptStatus = 'view_only' | 'not_in_use' | 'disabled';
+
+type WakePromptsResponse = {
+  ok?: boolean;
+  error?: string;
+  unified_main_chat_route: boolean;
+  source: string;
+  sample_note: string;
+  modes: Array<{ mode: string; label: string; status: WakePromptStatus; editable: boolean; prompt: string; error: string }>;
+};
+
+const WAKE_STATUS_LABEL: Record<string, string> = {
+  view_only: '仅查看',
+  not_in_use: '未使用此文本',
+  disabled: '已停用',
+};
 
 function cloneHints(value: ToolCompanionHints): ToolCompanionHints {
   return JSON.parse(JSON.stringify(value)) as ToolCompanionHints;
@@ -125,6 +147,9 @@ export function ProfileScreen() {
   const [resetDisplayThinking, setResetDisplayThinking] = useState(false);
   const [draftHints, setDraftHints] = useState<ToolCompanionHints | null>(null);
   const [toolHintsLoadError, setToolHintsLoadError] = useState('');
+  const [activeTab, setActiveTab] = useState<ProfileTab>('main');
+  const [wakePrompts, setWakePrompts] = useState<WakePromptsResponse | null>(null);
+  const [wakeLoadError, setWakeLoadError] = useState('');
 
   const personaDirty = personaLoaded && draftPersona !== savedPersona;
   const displayThinkingDirty = displayThinkingLoaded
@@ -152,6 +177,8 @@ export function ProfileScreen() {
     setPersonaLoadError('');
     setDisplayThinkingLoadError('');
     setToolHintsLoadError('');
+    setWakePrompts(null);
+    setWakeLoadError('');
     const [personaResult, displayThinkingResult, hintsResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
       fetchDisplayThinkingPrompt(),
@@ -209,6 +236,28 @@ export function ProfileScreen() {
   }, [showToast]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (activeTab !== 'special' || wakePrompts || wakeLoadError) return;
+    let cancelled = false;
+    http.get<WakePromptsResponse>('/api/profile/wake-prompts')
+      .then((response) => {
+        if (cancelled) return;
+        if (response.ok === false || !Array.isArray(response.modes)) {
+          setWakeLoadError(response.error || 'Wake 提示词暂时读不到');
+          return;
+        }
+        setWakePrompts(response);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const detail = error instanceof HttpError && error.detail
+          ? error.detail
+          : error instanceof Error ? error.message : 'Wake 提示词暂时读不到';
+        setWakeLoadError(detail);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, wakePrompts, wakeLoadError]);
 
   useEffect(() => {
     const warnBeforeLeave = (event: BeforeUnloadEvent) => {
@@ -289,6 +338,17 @@ export function ProfileScreen() {
     showToast,
   ]);
 
+  const tabs: Array<{ key: ProfileTab; label: string }> = [
+    { key: 'main', label: '主设定' },
+    { key: 'special', label: '特殊设定' },
+    { key: 'other', label: '其他设定' },
+  ];
+
+  const openFlowStudio = useCallback(() => {
+    if (dirty && !window.confirm('档案有尚未保存的修改，确定离开吗？')) return;
+    navigate(ROUTES.flowStudio);
+  }, [dirty, navigate]);
+
   return (
     <div className="profile-root dash-fullscreen-page" style={{ ...(vars as CSSProperties) }}>
       {loading ? <div className="profile-loading">正在读取费佳档案…</div> : (
@@ -301,119 +361,201 @@ export function ProfileScreen() {
             </button>
           </header>
 
-          <section className="profile-hero">
-            <div className="profile-avatar" aria-hidden="true">Θ</div>
-            <div className="profile-hero-copy">
+          <section className="profile-cover-card" aria-label="费佳">
+            <div className="profile-banner" aria-hidden="true" />
+            <div className="profile-cover-body">
+              <div className="profile-avatar" aria-hidden="true">Θ</div>
               <div className="profile-hero-name">费奥多尔</div>
               <div className="profile-hero-alias"><span className="font-display">Fyodor</span><span> · </span><span className="font-cn">费佳</span></div>
               <div className="profile-hero-tagline">他的身份、关系与工具直觉，都在这里保持透明。</div>
+              {personaLoaded && (
+                <div className="profile-hero-stats" aria-label="人设信息">
+                  <span><strong>{characterCount.toLocaleString()}</strong> <span>字符</span></span>
+                  <span><strong>{lineCount.toLocaleString()}</strong> <span>行</span></span>
+                  <span><strong>{personaTokenCount.toLocaleString()}</strong> <span>token</span></span>
+                </div>
+              )}
             </div>
+            <nav className="profile-tabs" role="tablist" aria-label="设定分类">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab.key}
+                  className={'profile-tab' + (activeTab === tab.key ? ' is-active' : '')}
+                  onClick={() => setActiveTab(tab.key)}
+                >
+                  {tab.label}
+                  {tab.key === 'main' && personaDirty ? <i className="profile-tab-dot" aria-label="未保存" /> : null}
+                  {tab.key === 'special' && displayThinkingDirty ? <i className="profile-tab-dot" aria-label="未保存" /> : null}
+                </button>
+              ))}
+            </nav>
           </section>
 
-          <section className="profile-meta-grid" aria-label="人设信息">
-            <div className="profile-meta-card"><strong>{characterCount.toLocaleString()}</strong><span>字符</span></div>
-            <div className="profile-meta-card"><strong>{lineCount.toLocaleString()}</strong><span>行</span></div>
-            <div className="profile-meta-card"><strong className="profile-meta-token">{personaTokenCount.toLocaleString()}</strong><span>token</span></div>
-          </section>
-
-          <section className="profile-section">
-            <div className="profile-persona-heading">
-              <div>
-                <div className="profile-section-title">PROFILE</div>
-                <div className="profile-help-text profile-section-hint">直接读取写入 persona.md</div>
+          {activeTab === 'main' && (
+            <section className="profile-section">
+              <div className="profile-persona-heading">
+                <div>
+                  <div className="profile-section-title">PROFILE</div>
+                  <div className="profile-help-text profile-section-hint">直接读取写入 persona.md</div>
+                </div>
+                <div className="profile-heading-actions">
+                  <button type="button" className="profile-reload-button" disabled={saving} onClick={reload}>重新读取</button>
+                  {!personaLoadError && (
+                    <button
+                      type="button"
+                      className={'profile-reload-button profile-edit-toggle' + (personaEditing ? ' is-on' : '')}
+                      onClick={() => setPersonaEditing((value) => !value)}
+                    >
+                      {personaEditing ? '完成' : '编辑'}
+                    </button>
+                  )}
+                </div>
               </div>
-              <button type="button" className="profile-reload-button" disabled={saving} onClick={reload}>重新读取</button>
-            </div>
-            <div className="profile-persona-card">
-              {personaLoadError ? (
-                <div className="profile-help-text">读取 persona.md 失败：{personaLoadError}。当前不展示伪造的人设内容，请稍后重新读取。</div>
-              ) : (
-                <div className={'profile-persona-editor-shell' + (personaEditing ? ' is-editing' : '')}>
-                  <pre
-                    className="profile-persona-highlight"
-                    tabIndex={0}
-                    onClick={() => setPersonaEditing(true)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setPersonaEditing(true);
-                      }
+              <div className="profile-persona-card">
+                {personaLoadError ? (
+                  <div className="profile-help-text profile-card-pad">读取 persona.md 失败：{personaLoadError}。当前不展示伪造的人设内容，请稍后重新读取。</div>
+                ) : (
+                  <div className={'profile-persona-editor-shell' + (personaEditing ? ' is-editing' : '')}>
+                    <pre
+                      className="profile-persona-highlight"
+                      tabIndex={0}
+                      onDoubleClick={() => setPersonaEditing(true)}
+                    >{personaMarkdown}{'\n'}</pre>
+                    <textarea
+                      ref={personaEditorRef}
+                      className="profile-persona-editor"
+                      value={draftPersona}
+                      spellCheck={false}
+                      aria-label="费佳的完整人设正文"
+                      onChange={(event) => setDraftPersona(event.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+              <div className="profile-persona-note">保存会写入 persona.md 并重启 frontend-gw。系统不会自动截断或改写原文。</div>
+            </section>
+          )}
+
+          {activeTab === 'special' && (
+            <>
+              <section className="profile-section">
+                <div className="profile-persona-heading">
+                  <div>
+                    <div className="profile-section-title">自我状态</div>
+                    <div className="profile-help-text profile-section-hint">心里话 · 可编辑</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="profile-reload-button"
+                    disabled={saving || !displayThinkingDefaultPrompt}
+                    onClick={() => {
+                      setDraftDisplayThinkingPrompt(displayThinkingDefaultPrompt);
+                      setResetDisplayThinking(true);
                     }}
-                  >{personaMarkdown}{'\n'}</pre>
-                  <textarea
-                    ref={personaEditorRef}
-                    className="profile-persona-editor"
-                    value={draftPersona}
-                    spellCheck={false}
-                    aria-label="费佳的完整人设正文"
-                    onBlur={() => setPersonaEditing(false)}
-                    onChange={(event) => setDraftPersona(event.target.value)}
-                  />
+                  >
+                    恢复默认
+                  </button>
                 </div>
-              )}
-            </div>
-          </section>
-
-          <section className="profile-section">
-            <div className="profile-persona-heading">
-              <div>
-                <div className="profile-section-title">自我状态</div>
-                <div className="profile-help-text profile-section-hint">心里话</div>
-              </div>
-              <button
-                type="button"
-                className="profile-reload-button"
-                disabled={saving || !displayThinkingDefaultPrompt}
-                onClick={() => {
-                  setDraftDisplayThinkingPrompt(displayThinkingDefaultPrompt);
-                  setResetDisplayThinking(true);
-                }}
-              >
-                恢复默认
-              </button>
-            </div>
-            <div className="profile-persona-card">
-              {displayThinkingLoadError ? (
-                <div className="profile-help-text">读取自我状态失败：{displayThinkingLoadError}。当前不展示伪造的 prompt，请稍后重新读取。</div>
-              ) : (
-                <textarea
-                  className="profile-persona-editor profile-thinking-editor"
-                  value={draftDisplayThinkingPrompt}
-                  spellCheck={false}
-                  aria-label="自我状态 prompt"
-                  maxLength={12000}
-                  onChange={(event) => {
-                    setDraftDisplayThinkingPrompt(event.target.value);
-                    setResetDisplayThinking(false);
-                  }}
-                />
-              )}
-            </div>
-          </section>
-
-          <section className="profile-section">
-            <div className="profile-tool-heading">
-              <div>
-                <div className="profile-section-title">TOOL</div>
-                <div className="profile-help-text profile-section-hint">工具注入预览</div>
-              </div>
-            </div>
-            {toolHintsLoadError ? (
-              <div className="profile-help-text">工具直觉暂时读不到：{toolHintsLoadError}。当前不展示伪造的注入预览，请稍后重新读取。</div>
-            ) : draftHints?.prompt_preview ? (
-              <div className="profile-tool-prompt-preview">
-                <div className="profile-tool-prompt-preview__title">
-                  <span>Prompt / Usage</span>
-                  <small>当前注入预览</small>
+                <div className="profile-help-text">
+                  这是写给界面展示的公开自述，不是 Claude 原生 thinking。原生 thinking 由模型自己产生，这里改不到，也不会显示出来。
                 </div>
-                <p>{draftHints.prompt_preview}</p>
-              </div>
-            ) : (
-              <div className="profile-help-text">当前没有可展示的工具直觉注入预览。</div>
-            )}
-          </section>
+                <div className="profile-persona-card">
+                  {displayThinkingLoadError ? (
+                    <div className="profile-help-text profile-card-pad">读取自我状态失败：{displayThinkingLoadError}。当前不展示伪造的 prompt，请稍后重新读取。</div>
+                  ) : (
+                    <textarea
+                      className="profile-persona-editor profile-thinking-editor"
+                      value={draftDisplayThinkingPrompt}
+                      spellCheck={false}
+                      aria-label="自我状态 prompt"
+                      maxLength={12000}
+                      onChange={(event) => {
+                        setDraftDisplayThinkingPrompt(event.target.value);
+                        setResetDisplayThinking(false);
+                      }}
+                    />
+                  )}
+                </div>
+                <div className="profile-persona-note">自我状态保存后下一轮聊天生效，不修改 persona.md。</div>
+              </section>
 
-          <div className="profile-persona-note">Persona 保存会写入 persona.md 并重启 frontend-gw。自我状态保存只影响界面展示的公开自述，不修改 persona.md。系统不会自动截断或改写原文。</div>
+              <section className="profile-section">
+                <div className="profile-persona-heading">
+                  <div>
+                    <div className="profile-section-title">WAKE</div>
+                    <div className="profile-help-text profile-section-hint">主动唤醒的触发文本</div>
+                  </div>
+                </div>
+                {wakeLoadError ? (
+                  <div className="profile-help-text">{wakeLoadError}</div>
+                ) : wakePrompts ? (
+                  <div className="profile-wake-list">
+                    <div className="profile-help-text">
+                      {wakePrompts.unified_main_chat_route
+                        ? '当前走 Unified Wake：唤醒在主聊天会话里进行一轮。'
+                        : 'Unified Wake 当前关闭，早安 / 巡夜 / 自主提醒不会运行。'}
+                      这些文本写在代码里（{wakePrompts.source}），这里只能查看。{wakePrompts.sample_note}
+                    </div>
+                    {wakePrompts.modes.map((item) => (
+                      <details key={item.mode} className={'profile-wake-item is-' + item.status}>
+                        <summary>
+                          <span className="profile-wake-name">{item.label}</span>
+                          <code>{item.mode}</code>
+                          <span className={'profile-wake-badge is-' + item.status}>{WAKE_STATUS_LABEL[item.status] || item.status}</span>
+                        </summary>
+                        {item.error
+                          ? <p className="profile-help-text">生成预览失败：{item.error}</p>
+                          : <pre className="profile-wake-text">{item.prompt}</pre>}
+                      </details>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="profile-help-text">正在读取 Wake 提示词…</div>
+                )}
+              </section>
+            </>
+          )}
+
+          {activeTab === 'other' && (
+            <>
+              <section className="profile-section">
+                <div className="profile-tool-heading">
+                  <div>
+                    <div className="profile-section-title">TOOL</div>
+                    <div className="profile-help-text profile-section-hint">工具注入预览 · 仅查看</div>
+                  </div>
+                </div>
+                {toolHintsLoadError ? (
+                  <div className="profile-help-text">工具直觉暂时读不到：{toolHintsLoadError}。当前不展示伪造的注入预览，请稍后重新读取。</div>
+                ) : draftHints?.prompt_preview ? (
+                  <div className="profile-tool-prompt-preview">
+                    <div className="profile-tool-prompt-preview__title">
+                      <span>Prompt / Usage</span>
+                      <small>当前注入预览</small>
+                    </div>
+                    <p>{draftHints.prompt_preview}</p>
+                  </div>
+                ) : (
+                  <div className="profile-help-text">当前没有可展示的工具直觉注入预览。</div>
+                )}
+              </section>
+
+              <section className="profile-section">
+                <div className="profile-section-title">HIDDEN FLOW</div>
+                <button type="button" className="profile-nav-row" onClick={openFlowStudio}>
+                  <span className="profile-nav-row-title">
+                    全局 / 阶段提示词
+                    <span className="profile-nav-row-note">在 Flow Studio 里编辑，提示词只存一份</span>
+                  </span>
+                  <span className="profile-nav-chevron" aria-hidden="true">›</span>
+                </button>
+                <div className="profile-help-text">梦境、摘要的提示词目前没有稳定的编辑入口，这里暂不提供。</div>
+              </section>
+            </>
+          )}
         </div>
       )}
       {toast && <div className="profile-toast"><span>{toast}</span></div>}
