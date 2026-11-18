@@ -358,6 +358,10 @@ def pocket_settings_page():
 def letters():
     return send_from_directory('/opt/frontend/static', 'letters.html')
 
+@app.route('/privacy')
+def privacy():
+    return send_from_directory('/opt/frontend/static', 'privacy.html')
+
 @app.route('/manifest.json')
 def manifest():
     return send_from_directory('/opt/frontend/static', 'manifest.json')
