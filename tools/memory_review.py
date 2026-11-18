@@ -641,8 +641,11 @@ def review_candidate(ctx: Context, conn: sqlite3.Connection, candidate: dict[str
         except EvidenceUnavailable as exc:  # could not read it right now: retry later
             transient.append(f"{ref}={exc}")
             continue
-        except Exception as exc:  # anything but a definitive "not found" (None) is infrastructure
+        except (OSError, sqlite3.Error) as exc:  # IO / database trouble: retry later
             transient.append(f"{ref}=resolver_error:{type(exc).__name__}")
+            continue
+        except Exception as exc:  # a malformed ref fails the same way every run: a person must look
+            problems.append(f"{ref}=invalid_ref:{type(exc).__name__}")
             continue
         if item is None:
             problems.append(f"{ref}={'no_resolver' if resolver is None else 'not_found'}")

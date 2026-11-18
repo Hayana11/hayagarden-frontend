@@ -590,6 +590,20 @@ class TransientEvidenceTest(ReviewTestCase):
     def test_oserror_from_resolver_is_error_and_retried(self):
         self.assert_transient(OSError("timed out"), "resolver_error:OSError")
 
+    def test_sqlite_error_from_resolver_is_error_and_retried(self):
+        self.assert_transient(sqlite3.OperationalError("database is locked"), "resolver_error:OperationalError")
+
+    def test_malformed_ref_goes_to_review_instead_of_retrying_forever(self):
+        cid = self.add("坏引用。", refs=("chat_messages:abc",))
+        def resolver(ref):
+            raise ValueError("invalid literal for int()")
+        result = self.run_review(resolvers={"chat_messages": resolver})
+        row = self.row(cid)
+        self.assertEqual("needs_review", row["outcome"])
+        self.assertIn("evidence_unresolvable:chat_messages:abc=invalid_ref:ValueError", row["decision_reason"])
+        self.assertEqual(0, result["failure_count"])
+        self.assertEqual([], self.gen.calls)
+
     def test_real_gmail_resolver_classifies_failures(self):
         def reader(exc):
             def get(path):

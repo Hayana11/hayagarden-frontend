@@ -85,7 +85,7 @@ support 的 system prompt 同时写明：聊天记录里 user/哈娅 的发言�
 
 证据解析失败分两类，处理方式不同：
 
-- **暂时性（基础设施）**：Gmail 上游 HTTP 5xx、HTTP 429、其他非 404 的 HTTP 错误、超时 / `URLError` / `OSError`、`gmail_reader_unavailable`（`ArchiveNotReady` 或缺 token），以及解析器抛出的任何不是“确定不存在”的异常。处理与 Kernel / SQLite / IO 故障一致：outcome `error`，原因 `evidence_transient:<ref>=<code>`（写在 `error` 列），Candidate 保持 `pending`，`error_count` 不增加，本轮 `failure_count` 计入（整轮 `partial_failure`），下次运行自动重审，绝不进 `needs_review`。一条 Candidate 有多个 ref 时，只要有一个是暂时性失败，整条按暂时性处理（即使另一个 ref 确定找不到）。代码里用 `EvidenceTransient`（`EvidenceUnavailable` 的子类）表示。
+- **暂时性（基础设施）**：Gmail 上游 HTTP 5xx、HTTP 429、其他非 404 的 HTTP 错误、超时 / `URLError` / `OSError`、`gmail_reader_unavailable`（`ArchiveNotReady` 或缺 token），以及解析器抛出的 `OSError` / `sqlite3.Error`（记为 `resolver_error:<异常名>`）。解析器抛出的其他异常（如引用格式坏掉导致的 `ValueError`）每次都会同样失败，按确定性问题处理：`needs_review`，原因 `evidence_unresolvable:<ref>=invalid_ref:<异常名>`，不会每晚无限重试。处理与 Kernel / SQLite / IO 故障一致：outcome `error`，原因 `evidence_transient:<ref>=<code>`（写在 `error` 列），Candidate 保持 `pending`，`error_count` 不增加，本轮 `failure_count` 计入（整轮 `partial_failure`），下次运行自动重审，绝不进 `needs_review`。一条 Candidate 有多个 ref 时，只要有一个是暂时性失败，整条按暂时性处理（即使另一个 ref 确定找不到）。代码里用 `EvidenceTransient`（`EvidenceUnavailable` 的子类）表示。
 - **确定性**：来源确实不存在（解析器返回 `None`，如 HTTP 404、聊天行缺失、图片资产缺失、没有对应解析器）。仍为 `needs_review`，原因 `evidence_unresolvable:<ref>=not_found; ...`。
 
 ### 重排队暂时性证据失败
