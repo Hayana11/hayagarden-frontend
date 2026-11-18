@@ -1896,7 +1896,7 @@ export function ChatScreen() {
     setSending(true);
     setChatError(null);
     const realityContext = decision === 'approve'
-      ? realityPromptProjection.getSnapshot().text
+      ? realityPromptProjection.forCurrentTurn().text
       : undefined;
     const streamResult = await runStream(null, {
       confirmation: { approvalId, pendingActionId, decision },
@@ -1931,7 +1931,7 @@ export function ChatScreen() {
       || uploadingFileCount > 0
       || compressingImageCount > 0) return;
     const sendStartedAt = performance.now();
-    const realityContext = realityPromptProjection.getSnapshot().text;
+    const realityContext = realityPromptProjection.forCurrentTurn().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
     setSending(true);
@@ -1981,7 +1981,7 @@ export function ChatScreen() {
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
     if (!choice || sending) return false;
-    const realityContext = realityPromptProjection.getSnapshot().text;
+    const realityContext = realityPromptProjection.forCurrentTurn().text;
     setSending(true);
     setChatError(null);
     uploadCoordinatorRef.current.beginChoicePost();

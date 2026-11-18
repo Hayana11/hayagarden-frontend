@@ -10,6 +10,7 @@ export interface ElpisPhysicalBridge {
 }
 
 export interface ElpisActivityBridge {
+  setMotionEnabled?: (enabled: boolean) => void;
   getActivityState?: () => unknown;
 }
 
@@ -339,4 +340,8 @@ export function startRealityRuntime(): void {
 
 export function stopRealityRuntime(): void {
   productionRuntime.stop();
+}
+
+export function setMotionEnabled(enabled: boolean): void {
+  window.ElpisActivity?.setMotionEnabled?.(enabled);
 }

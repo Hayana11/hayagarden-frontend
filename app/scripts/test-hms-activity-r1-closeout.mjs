@@ -21,8 +21,8 @@ for (const token of [
 }
 
 for (const token of [
-  'HMS Activity',
-  'userActivity',
+  '运动状态',
+  'reportedActivity',
   'activity age',
   'activity source',
   'possibility',
@@ -37,7 +37,7 @@ for (const token of [
   'getActivityFreshness',
   'window.setInterval(refreshActivityUi, 1000)',
   'visibilitychange',
-  '复用既有 ElpisActivity bridge',
+  '暂无运动识别数据',
 ]) {
   assert.ok(toolroom.includes(token), `tool room missing diagnostic token: ${token}`);
 }
@@ -50,8 +50,7 @@ assert.equal(toolroom.includes('window.ElpisActivity'), false, 'tool room must n
 for (const token of ['activitySampledAt', 'REALITY_ACTIVITY_MAX_AGE_MS', 'getActivityFreshness', 'getFreshUserActivity']) {
   assert.ok(store.includes(token), `activity freshness contract missing: ${token}`);
 }
-assert.ok(compiler.includes('getActivityFreshness'));
-assert.ok(compiler.includes('getActivitySemanticConfidence'));
+assert.ok(compiler.includes('getFreshUserActivity'));
 assert.ok(compiler.includes('lightSemanticLabel'));
 assert.ok(compiler.includes('orientationSemanticLabel'));
 assert.ok(compiler.includes('环境【'));
