@@ -5627,6 +5627,7 @@ def _split_wake_silence(raw_text):
 def _build_normal_wake_main_chat_trigger(
     *, now, t2_hours, t_hours, observation_bundle=None, mode='normal',
     last_user_at=None, activity_desc='', self_trigger_note='',
+    postman_paper='',
 ) -> str:
     """Build the provider-only trigger from the already-read reality clock.
 
@@ -5702,8 +5703,33 @@ def _build_normal_wake_main_chat_trigger(
         from chat.wake_read_observation import format_observation_trigger_appendix
         appendix = format_observation_trigger_appendix(observation_bundle)
         if appendix:
-            return text + '\n\n' + appendix
+            text = text + '\n\n' + appendix
+    # 邮差的今日报纸：已带固定包装（真实抓取的数据，不是指令）；见 tools/postman.py。
+    paper = str(postman_paper or '').strip()
+    if paper:
+        text = text + '\n\n' + paper
     return text
+
+
+def _postman_peek_for_wake(now):
+    """Today's undelivered postman paper for an autonomous wake, or None. Read-only."""
+    try:
+        from tools.postman import peek_undelivered_paper
+        return peek_undelivered_paper(now=now, db_path=DB_PATH)
+    except Exception:
+        app.logger.exception('[postman] peek failed')
+        return None
+
+
+def _postman_mark_delivered(edition_date, wake_run_id):
+    """Consume the paper only after the wake that carried it was delivered."""
+    if not edition_date:
+        return
+    try:
+        from tools.postman import mark_delivered
+        mark_delivered(str(edition_date), str(wake_run_id or ''), db_path=DB_PATH)
+    except Exception:
+        app.logger.exception('[postman] mark delivered failed')
 
 
 def _retire_shared_resident_after_observation_failure(
@@ -5847,6 +5873,7 @@ def _run_proactive_cold_wake_turn(
         static_parts = build_cc_daily_static_parts()
         full_system = static_parts['full_system']
         display_mode, display_prompt = get_display_thinking_snapshot()
+        postman_paper = _postman_peek_for_wake(now)
         plan = _rt.prepare_proactive_cold_turn(
             wake_run_id=rid,
             trigger_text=_build_normal_wake_main_chat_trigger(
@@ -5854,6 +5881,7 @@ def _run_proactive_cold_wake_turn(
                 observation_bundle=observation_bundle, mode=mode,
                 last_user_at=last_user_at, activity_desc=activity_desc,
                 self_trigger_note=self_trigger_note,
+                postman_paper=(postman_paper or {}).get('text', ''),
             ),
             now=now,
             db_path=DB_PATH,
@@ -5958,6 +5986,7 @@ def _run_proactive_cold_wake_turn(
             'display_segments': segments.to_json(),
             'tool_calls': tool_calls,
             'one_shot_claims': claims,
+            'postman_edition_date': (postman_paper or {}).get('date'),
             'provider': 'claude_code',
             'model_identity': str(
                 getattr(resident, '_model_identity', None) or 'claude-code:shared-resident'
@@ -6076,6 +6105,7 @@ def _run_unified_normal_main_chat_turn(
         )
     try:
         display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
+        postman_paper = None  # peeked below, hot path only (cold path peeks its own)
         ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
         _wake_live_trace(
             trace_id,
@@ -6159,6 +6189,7 @@ def _run_unified_normal_main_chat_turn(
         if watermark is None:
             raise UnifiedNormalWakeSharedUnavailable(reason)
 
+        postman_paper = _postman_peek_for_wake(now)
         lease = issue_turn_lease(
             turn_id='uh-a1-main-chat:' + str(wake_run_id or 'normal').strip(),
             turn_mode='wake',
@@ -6226,6 +6257,7 @@ def _run_unified_normal_main_chat_turn(
                         last_user_at=last_user_at,
                         activity_desc=activity_desc,
                         self_trigger_note=self_trigger_note,
+                        postman_paper=(postman_paper or {}).get('text', ''),
                     ),
                 }],
                 user_turn=False,
@@ -6420,6 +6452,7 @@ def _run_unified_normal_main_chat_turn(
             'display_segments': display_segments.to_json(),
             'tool_calls': tool_calls,
             'one_shot_claims': one_shot_claims,
+            'postman_edition_date': (postman_paper or {}).get('date'),
             'provider': 'claude_code',
             'model_identity': str(
                 getattr(resident, '_model_identity', None)
@@ -10753,6 +10786,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 _proactive_cold_abort(main_turn, 'proactive_cold_delivery_rejected')
             if not cold_receipt:
                 main_turn['one_shot_claims'] = {}   # kept: the session that saw it is gone
+                main_turn['postman_edition_date'] = None  # same: paper kept for the next wake
             _wake_live_trace(wake_run_id, 'PROACTIVE_COLD_FINALIZED', receipt_committed=cold_receipt)
         if delivery_fence is not None:
             delivery_fence.finish(
@@ -10793,6 +10827,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 ).get('pending_mail_ids') or [],
             },
         )
+        _postman_mark_delivered(main_turn.get('postman_edition_date'), wake_run_id)
         _wake_run_id_mark(wake_run_id)
         _wake_live_trace(
             wake_run_id,
