@@ -220,18 +220,14 @@ class PipelineTest(ReviewTestCase):
 
     def test_unresolvable_evidence_needs_review_without_model_call(self):
         missing = self.add("甲", refs=("chat_messages:404",))
-        flaky = self.add("乙", refs=("gmail_message:x",))
+        gone = self.add("乙", refs=("gmail_message:x",))
         unresolved = self.add("丙", refs=(), provenance="unresolved")
-
-        def resolver(ref):
-            if ref == "gmail_message:x":
-                raise review.EvidenceUnavailable("gmail_reader_unavailable")
-            return None
+        resolver = lambda ref: None  # noqa: E731
 
         self.run_review(resolvers={"chat_messages": resolver, "gmail_message": resolver})
-        reasons = {c: self.row(c)["decision_reason"] for c in (missing, flaky, unresolved)}
+        reasons = {c: self.row(c)["decision_reason"] for c in (missing, gone, unresolved)}
         self.assertIn("not_found", reasons[missing])
-        self.assertIn("gmail_reader_unavailable", reasons[flaky])
+        self.assertTrue(reasons[gone].startswith("evidence_unresolvable:gmail_message:x=not_found"))
         self.assertEqual("provenance_unresolved", reasons[unresolved])
         self.assertTrue(all(self.row(c)["outcome"] == "needs_review" and self.row(c)["decision_by"] is None
                             for c in reasons))
@@ -556,6 +552,137 @@ class SpeakerAndHayaTest(ReviewTestCase):
         self.assertEqual("derived_from_evidence", state.epistemic_status)
         self.assertEqual("haya", state.structured_value["review"]["attribution"])
         self.assertIn("haya 表示", self.gen.calls[0].system_text)
+
+
+class TransientEvidenceTest(ReviewTestCase):
+    def flaky(self, error):
+        state = {"down": True}
+
+        def resolver(ref):
+            if state["down"]:
+                raise error
+            return self.evidence[ref]
+        return resolver, state
+
+    def assert_transient(self, error, expect):
+        cid = self.add("甲。", refs=("gmail_message:g1",))
+        resolver, state = self.flaky(error)
+        result = self.run_review(resolvers={"gmail_message": resolver})
+        self.assertEqual(1, result["failure_count"])
+        self.assertEqual("partial_failure", result["status"])
+        self.assertEqual({}, result["outcomes"])
+        row = self.row(cid)
+        self.assertEqual(("error", 0), (row["outcome"], row["error_count"]))
+        self.assertIn("evidence_transient:gmail_message:g1=" + expect, row["error"])
+        self.assertEqual("pending", self.status(cid))
+        self.assertEqual([], self.gen.calls)
+        state["down"] = False
+        again = self.run_review(resolvers={"gmail_message": resolver})
+        self.assertEqual({"committed_new": 1}, again["outcomes"])
+        self.assertEqual("committed", self.status(cid))
+
+    def test_gmail_502_is_error_and_retried(self):
+        self.assert_transient(review.EvidenceTransient("gmail_http_502"), "gmail_http_502")
+
+    def test_gmail_429_is_error_and_retried(self):
+        self.assert_transient(review.EvidenceTransient("gmail_http_429"), "gmail_http_429")
+
+    def test_oserror_from_resolver_is_error_and_retried(self):
+        self.assert_transient(OSError("timed out"), "resolver_error:OSError")
+
+    def test_real_gmail_resolver_classifies_failures(self):
+        def reader(exc):
+            def get(path):
+                raise exc
+            return get
+        for exc, code in ((urllib.error.HTTPError("p", 502, "x", None, None), "gmail_http_502"),
+                          (urllib.error.HTTPError("p", 429, "x", None, None), "gmail_http_429"),
+                          (urllib.error.URLError("down"), "gmail_reader_unavailable"),
+                          (TimeoutError("t"), "gmail_reader_unavailable")):
+            with self.assertRaises(review.EvidenceTransient) as caught:
+                review.resolve_gmail_message("gmail_message:abc", reader=reader(exc))
+            self.assertEqual(code, str(caught.exception))
+
+    def test_not_found_stays_needs_review(self):
+        cid = self.add("甲。", refs=("gmail_message:g1",))
+        result = self.run_review(resolvers={"gmail_message": lambda ref: None})
+        self.assertEqual({"needs_review": 1}, result["outcomes"])
+        row = self.row(cid)
+        self.assertEqual(("needs_review", None), (row["outcome"], row["decision_by"]))
+        self.assertEqual("evidence_unresolvable:gmail_message:g1=not_found", row["decision_reason"])
+        self.assertEqual("needs_review", self.status(cid))
+
+    def test_mixed_refs_one_transient_is_error(self):
+        cid = self.add("甲。", refs=("chat_messages:1", "gmail_message:g1"))
+
+        def down(ref):
+            raise review.EvidenceTransient("gmail_http_502")
+
+        result = self.run_review(resolvers={"chat_messages": self.resolve, "gmail_message": down})
+        self.assertEqual(1, result["failure_count"])
+        self.assertEqual(("error", 0, "pending"), (self.row(cid)["outcome"], self.row(cid)["error_count"], self.status(cid)))
+
+    def test_transient_beats_not_found_in_same_candidate(self):
+        cid = self.add("甲。", refs=("chat_messages:404", "gmail_message:g1"))
+
+        def down(ref):
+            raise review.EvidenceTransient("gmail_http_503")
+
+        self.run_review(resolvers={"chat_messages": lambda ref: None, "gmail_message": down})
+        self.assertEqual(("error", "pending"), (self.row(cid)["outcome"], self.status(cid)))
+
+
+class RequeueTransientEvidenceTest(ReviewTestCase):
+    G1, G2 = "1a1c" + "0" * 12, "2b2d" + "0" * 12
+
+    def needs_review(self, content, reason, *, by=None, status="needs_review", dry_run=0, outcome="needs_review"):
+        cid = self.add(content, refs=("gmail_message:" + self.G1,))
+        conn = sqlite3.connect(self.db)
+        review.ensure_review_schema(conn)
+        conn.execute("INSERT INTO memory_candidate_reviews (candidate_id, outcome, decision_by, decision_reason, "
+                     "dry_run, created_at) VALUES (?,?,?,?,?, 'x')", (cid, outcome, by, reason, dry_run))
+        conn.execute("UPDATE memory_candidates SET status=? WHERE candidate_id=?", (status, cid))
+        conn.commit()
+        conn.close()
+        return cid
+
+    def test_requeues_only_transient_only_rows(self):
+        g1, g2 = "gmail_message:" + self.G1, "gmail_message:" + self.G2
+        hit1 = self.needs_review("甲。", f"evidence_unresolvable:{g1}=gmail_http_502; {g2}=gmail_http_502")
+        hit2 = self.needs_review("乙。", f"evidence_unresolvable:{g1}=gmail_http_429")
+        hit3 = self.needs_review("丙。", f"evidence_unresolvable:{g1}=gmail_reader_unavailable; {g2}=gmail_http_503")
+        not_found = self.needs_review("丁。", f"evidence_unresolvable:{g1}=gmail_http_502; {g2}=not_found")
+        http4 = self.needs_review("戊。", f"evidence_unresolvable:{g1}=gmail_http_403")
+        penpal = self.needs_review("己。", "penpal_claim_about_fedya_or_haya")
+        human = self.needs_review("庚。", f"evidence_unresolvable:{g1}=gmail_http_502", by="haya")
+        committed = self.needs_review("辛。", "committed_new", status="committed", outcome="committed_new")
+        dry = self.needs_review("壬。", f"evidence_unresolvable:{g1}=gmail_http_502", status="pending", dry_run=1)
+        self.assertEqual(3, review.requeue_transient_evidence(self.db))
+        for cid in (hit1, hit2, hit3):
+            self.assertEqual(("pending", "requeued", None), (
+                self.status(cid), self.row(cid)["outcome"], self.row(cid)["decision_by"]))
+            self.assertTrue(self.row(cid)["decision_reason"].startswith("requeued_from_transient_evidence: evidence_unresolvable:"))
+        for cid, status in ((not_found, "needs_review"), (http4, "needs_review"), (penpal, "needs_review"),
+                            (human, "needs_review"), (committed, "committed"), (dry, "pending")):
+            self.assertEqual(status, self.status(cid))
+            self.assertNotEqual("requeued", self.row(cid)["outcome"])
+        self.assertEqual("haya", self.row(human)["decision_by"])
+        self.assertEqual("committed_new", self.row(committed)["outcome"])
+        self.assertEqual(0, review.requeue_transient_evidence(self.db))
+
+    def test_requeued_candidate_is_reviewed_and_committed_next_run(self):
+        cid = self.needs_review("甲。", f"evidence_unresolvable:gmail_message:{self.G1}=gmail_http_502")
+        self.assertEqual(1, review.requeue_transient_evidence(self.db))
+        result = self.run_review()
+        self.assertEqual({"committed_new": 1}, result["outcomes"])
+        self.assertEqual("committed", self.status(cid))
+
+    def test_cli_flag_exits_before_ombre(self):
+        self.needs_review("甲。", f"evidence_unresolvable:gmail_message:{self.G1}=gmail_http_502")
+        with mock.patch("builtins.print") as shown, \
+                mock.patch.object(projection.OmbreRuntime, "from_env", side_effect=AssertionError("ombre")):
+            self.assertEqual(0, review.main(["--requeue-transient-evidence", "--db", self.db]))
+        self.assertIn('"requeued": 1', shown.call_args[0][0])
 
 
 class RequeueTest(ReviewTestCase):

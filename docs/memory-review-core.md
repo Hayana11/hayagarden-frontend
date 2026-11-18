@@ -10,7 +10,7 @@ memory_candidates(pending) → Review → memory_candidate_reviews（每条的�
 ```
 
 - Candidate 行不会被改写，只有 `status` 列会变。判定、依据和决定人都写在单独的 `memory_candidate_reviews`。
-- `python3 -m tools.memory_review [--dry-run] [--limit N] [--status] [--requeue-policy-rejected]`。`--limit` 默认 50；`--status` 只打印健康信息；`--requeue-policy-rejected` 见下文“规则改动后重排队”。
+- `python3 -m tools.memory_review [--dry-run] [--limit N] [--status] [--requeue-policy-rejected] [--requeue-transient-evidence]`。`--limit` 默认 50；`--status` 只打印健康信息；`--requeue-policy-rejected` 见下文“规则改动后重排队”。
 - **`--dry-run`**：跑完整条流水线，写 `dry_run=1` 的判定行，**不写 Kernel，不改 Candidate 状态**。定时任务现在正式运行、不带 `--dry-run`（`deploy/cron.d/hayagarden-memory-review`，20:15 UTC = 北京 04:15，在 19:15 和 19:45 两个脱水任务之后）。dry-run 的判定行会被之后的正式运行覆盖；已经正式判定的行不会被 dry-run 改写。
 - 顺序：priority 高的先，同级按创建时间从早到晚。
 
@@ -80,6 +80,21 @@ support 的 system prompt 同时写明：聊天记录里 user/哈娅 的发言�
 ## 规则改动后重排队
 
 `python3 -m tools.memory_review --requeue-policy-rejected`：把“最近一次正式（非 dry-run）审核为 `rejected_unsupported`、`decision_by='policy'`、状态为 `rejected`”的 Candidate 改回 `pending`，打印 `{"requeued": N}` 后退出（不需要 Ombre，不写 Kernel）。已经是 `pending` 的不动；人工拒绝（`decision_by` 为 fedya / haya）、已提交、重复、`needs_review` 的都不碰。只有 dry-run 审核时 Candidate 本来就是 `pending`，结果为 0。因为一条 Candidate 只有一行审核记录，被重排队的那一行保留但 `outcome` 改成 `requeued`（`decision` / `decision_by` 清空，原因前缀 `requeued_from_rejected_unsupported:`），否则它会被当作“已决定”而不再重审；下次运行会用新结果覆盖这一行。
+
+## 证据读取失败：暂时性 vs 确定性
+
+证据解析失败分两类，处理方式不同：
+
+- **暂时性（基础设施）**：Gmail 上游 HTTP 5xx、HTTP 429、其他非 404 的 HTTP 错误、超时 / `URLError` / `OSError`、`gmail_reader_unavailable`（`ArchiveNotReady` 或缺 token），以及解析器抛出的任何不是“确定不存在”的异常。处理与 Kernel / SQLite / IO 故障一致：outcome `error`，原因 `evidence_transient:<ref>=<code>`（写在 `error` 列），Candidate 保持 `pending`，`error_count` 不增加，本轮 `failure_count` 计入（整轮 `partial_failure`），下次运行自动重审，绝不进 `needs_review`。一条 Candidate 有多个 ref 时，只要有一个是暂时性失败，整条按暂时性处理（即使另一个 ref 确定找不到）。代码里用 `EvidenceTransient`（`EvidenceUnavailable` 的子类）表示。
+- **确定性**：来源确实不存在（解析器返回 `None`，如 HTTP 404、聊天行缺失、图片资产缺失、没有对应解析器）。仍为 `needs_review`，原因 `evidence_unresolvable:<ref>=not_found; ...`。
+
+### 重排队暂时性证据失败
+
+`python3 -m tools.memory_review --requeue-transient-evidence`：把历史上因证据服务故障被误判的 Candidate 改回 `pending`，打印 `{"requeued": N}` 后退出（不需要 Ombre，不写 Kernel）。条件：最近一次正式（非 dry-run）审核为 `needs_review`、`decision_by` 为空（没有人决定过）、原因以 `evidence_unresolvable:` 开头，且列出的**每一个** ref 的失败码都是暂时性的（`gmail_http_5xx` 任意 5xx、`gmail_http_429`、`gmail_reader_unavailable`）。含 `not_found`、`gmail_http_403` 等其他码，或原因是笔友守卫 / same-event 等的 `needs_review`，以及人工已决定和已提交的行，一律不动。审核行的处理与 `--requeue-policy-rejected` 相同：`outcome` 改为 `requeued`，原因前缀 `requeued_from_transient_evidence:`，下次运行重新审核并覆盖。
+
+### 事故记录
+
+Gmail OAuth refresh token 失效（`invalid_grant`）期间，上游 `/readonly/messages/<id>` 返回 502，当时的代码把 `gmail_http_502` 当作内容问题，13 条邮件 Candidate 被记成 `needs_review`（`decision_by` 为空，原因形如 `evidence_unresolvable:gmail_message:1a1c...=gmail_http_502; ...`）并永远停在那里。根因：OAuth 应用处于 Testing 状态时 refresh token 7 天后过期；应用已改为 Production。修复后基础设施故障不再进 `needs_review`，已受影响的 13 条用 `--requeue-transient-evidence` 恢复。
 
 ## 健康记录
 

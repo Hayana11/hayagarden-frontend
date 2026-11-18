@@ -13,6 +13,7 @@ nothing to the Kernel and leaves every Candidate pending.
 
 Usage:
     python3 -m tools.memory_review [--dry-run] [--limit N] [--status] [--requeue-policy-rejected]
+                                     [--requeue-transient-evidence]
 """
 from __future__ import annotations
 
@@ -95,6 +96,13 @@ class ReviewAbort(RuntimeError):
 
 class EvidenceUnavailable(RuntimeError):
     """A source could not be read right now (not the same as 'it does not exist')."""
+
+
+class EvidenceTransient(EvidenceUnavailable):
+    """Evidence resolution hit an infrastructure failure (HTTP 5xx / 429 / timeout / token / IO).
+
+    Handled like a Kernel or SQLite fault: the run records outcome ``error``, the Candidate stays
+    pending and is retried, error_count is unchanged, and it never becomes needs_review."""
 
 
 @dataclass(frozen=True)
@@ -365,9 +373,9 @@ def resolve_gmail_message(ref: str, *, reader: Callable[..., Any] | None = None)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
-        raise EvidenceUnavailable(f"gmail_http_{exc.code}") from exc
-    except (mail.ArchiveNotReady, OSError) as exc:
-        raise EvidenceUnavailable("gmail_reader_unavailable") from exc
+        raise EvidenceTransient(f"gmail_http_{exc.code}") from exc
+    except (mail.ArchiveNotReady, OSError) as exc:  # URLError / timeouts are OSError
+        raise EvidenceTransient("gmail_reader_unavailable") from exc
     try:
         occurred = parsedate_to_datetime(str(message.get("date") or "")).isoformat()
     except (TypeError, ValueError):
@@ -625,21 +633,23 @@ def review_candidate(ctx: Context, conn: sqlite3.Connection, candidate: dict[str
     refs = candidate["source_refs"]
     if candidate["provenance_status"] != "resolved" or not refs:
         return Verdict("needs_review", "provenance_unresolved")
-    resolved, problems = [], []
+    resolved, problems, transient = [], [], []
     for ref in refs:
         resolver = ctx.resolvers.get(ref.split(":", 1)[0])
         try:
             item = resolver(ref) if resolver else None
-        except EvidenceUnavailable as exc:
-            problems.append(f"{ref}={exc}")
+        except EvidenceUnavailable as exc:  # could not read it right now: retry later
+            transient.append(f"{ref}={exc}")
             continue
-        except (ValueError, sqlite3.Error, OSError) as exc:
-            problems.append(f"{ref}=resolver_error:{type(exc).__name__}")
+        except Exception as exc:  # anything but a definitive "not found" (None) is infrastructure
+            transient.append(f"{ref}=resolver_error:{type(exc).__name__}")
             continue
         if item is None:
             problems.append(f"{ref}={'no_resolver' if resolver is None else 'not_found'}")
         else:
             resolved.append(item)
+    if transient:  # any transient ref makes the whole Candidate transient (even next to a missing one)
+        raise EvidenceTransient("evidence_transient:" + "; ".join(transient + problems))
     if problems:
         return Verdict("needs_review", "evidence_unresolvable:" + "; ".join(problems))
     evidence = tuple(resolved)
@@ -856,7 +866,7 @@ def run_review(
                 _LOG.warning("memory review failed for %s: %s", cid, type(exc).__name__)
                 failures.append({"candidate_id": cid, "error": type(exc).__name__})
                 ombre_failures += isinstance(exc, OmbreFailure)
-                message = f"{type(exc).__name__}:{exc}"[:300]
+                message = (str(exc) if isinstance(exc, EvidenceTransient) else f"{type(exc).__name__}:{exc}")[:300]
                 # Only failures that tend to repeat for the same Candidate (an unusable support reply, Ombre)
                 # escalate to a human. Kernel / SQLite / IO faults stay error -> pending and retry.
                 escalates = isinstance(exc, (SupportOutputError, OmbreFailure))
@@ -910,6 +920,50 @@ def requeue_policy_rejected(candidate_db: str) -> int:
             conn.execute("UPDATE memory_candidate_reviews SET outcome=?, decision=NULL, decision_by=NULL, "
                          "decision_reason=? || COALESCE(decision_reason, '') WHERE candidate_id=?",
                          (REQUEUED, "requeued_from_rejected_unsupported: ", cid))
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+TRANSIENT_EVIDENCE_CODE = re.compile(r"gmail_http_(5\d\d|429)|gmail_reader_unavailable")
+
+
+def _only_transient_evidence(reason: str) -> bool:
+    """True when every ``<ref>=<code>`` in an ``evidence_unresolvable:`` reason is a transient code."""
+    body = reason[len("evidence_unresolvable:"):]
+    parts = [p.strip() for p in body.split(";") if p.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        _, sep, code = part.rpartition("=")
+        if not sep or not TRANSIENT_EVIDENCE_CODE.fullmatch(code.strip()):
+            return False
+    return True
+
+
+def requeue_transient_evidence(candidate_db: str) -> int:
+    """Put needs_review Candidates back to 'pending' when only a transient evidence outage put them there.
+
+    Touches a Candidate only when its non-dry review is ``needs_review`` with ``decision_by`` NULL and
+    a reason ``evidence_unresolvable:...`` in which EVERY ref failed with a transient code (gmail 5xx,
+    429, gmail_reader_unavailable). Human-decided, committed and every other needs_review reason
+    (404 / not_found, penpal guard, same-event ...) are left alone. The review row is re-marked
+    ``requeued`` exactly as --requeue-policy-rejected does. Returns the number changed."""
+    conn = _connect(candidate_db)
+    try:
+        ensure_review_schema(conn)
+        rows = conn.execute(
+            "SELECT c.candidate_id, r.decision_reason FROM memory_candidates c JOIN memory_candidate_reviews r "
+            "ON r.candidate_id = c.candidate_id WHERE c.status='needs_review' AND r.dry_run=0 "
+            "AND r.outcome='needs_review' AND r.decision_by IS NULL "
+            "AND r.decision_reason LIKE 'evidence_unresolvable:%' ORDER BY c.candidate_id").fetchall()
+        ids = [row[0] for row in rows if _only_transient_evidence(row[1] or "")]
+        for cid in ids:
+            conn.execute("UPDATE memory_candidates SET status='pending' WHERE candidate_id=? AND status='needs_review'", (cid,))
+            conn.execute("UPDATE memory_candidate_reviews SET outcome=?, decision=NULL, decision_by=NULL, "
+                         "decision_reason=? || COALESCE(decision_reason, '') WHERE candidate_id=?",
+                         (REQUEUED, "requeued_from_transient_evidence: ", cid))
         conn.commit()
         return len(ids)
     finally:
@@ -990,6 +1044,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true", help="print review health and exit")
     parser.add_argument("--requeue-policy-rejected", action="store_true",
                         help="set policy-rejected (rejected_unsupported) Candidates back to pending and exit")
+    parser.add_argument("--requeue-transient-evidence", action="store_true",
+                        help="set needs_review Candidates that only failed on transient evidence outages back to pending and exit")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="chat / candidate database")
     parser.add_argument("--kernel-db", default=str(kernel_db_path()))
     args = parser.parse_args(argv)
@@ -999,6 +1055,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.requeue_policy_rejected:
         print(json.dumps({"requeued": requeue_policy_rejected(args.db)}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.requeue_transient_evidence:
+        print(json.dumps({"requeued": requeue_transient_evidence(args.db)}, ensure_ascii=False, sort_keys=True))
         return 0
     started = False
     try:
