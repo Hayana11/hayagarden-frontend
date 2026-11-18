@@ -26,6 +26,10 @@ export class RealityPromptProjection {
     return this.current;
   }
 
+  forCurrentTurn(): CompiledRealityPrompt {
+    return compileRealityContext(this.store.getSnapshot(), Date.now());
+  }
+
   subscribe(listener: () => void): () => void {
     if (this.disposed) {
       return () => {};

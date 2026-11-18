@@ -1,12 +1,12 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { getActivitySemanticConfidence, lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
+import { lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
-import { getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
+import { getFreshUserActivity, getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
 import './ToolroomScreen.css';
 
 type ElpisNativeBridge = {
@@ -1155,12 +1155,8 @@ export function ToolroomScreen() {
   const freshness = getRealityFreshness(reality, Date.now());
   const activityFreshness = getActivityFreshness(reality, activityNow);
   const activity = reality.activity;
-  const activityConfidence = activity.source === 'hms'
-    && activityFreshness.status === 'fresh'
-    ? getActivitySemanticConfidence(activity.possibility)
-    : 'hidden';
-  const activitySemanticReady = activityConfidence !== 'hidden'
-    && activity.userActivity !== 'unknown';
+  const reportedActivity = getFreshUserActivity(reality, activityNow);
+  const activitySemanticReady = reportedActivity !== null;
   const facts = reality.physical.facts;
   const statusLabel = freshness.status === 'fresh'
     ? '实时'
@@ -1725,14 +1721,14 @@ export function ToolroomScreen() {
             <div className="toolroom-hms-activity-head">
               <span>
                 <strong>Semantic</strong>
-                <small>只读；stale / unknown 不进入 prompt</small>
+                <small>仅向费佳报告置信度达到 80% 的近期活动</small>
               </span>
               <em className={activitySemanticReady ? 'is-live' : undefined}>
                 {activitySemanticReady ? 'fresh' : activityFreshness.status}
               </em>
             </div>
             <dl>
-              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
+              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[reportedActivity] : '—'}</dd></div>
               <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
               <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
               <div><dt>activity source</dt><dd>{activity.source}</dd></div>

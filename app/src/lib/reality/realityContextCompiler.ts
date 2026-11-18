@@ -1,5 +1,5 @@
 import type { RealitySnapshot, UserActivity } from "./realityStore";
-import { getActivityFreshness } from "./realityStore";
+import { getFreshUserActivity } from "./realityStore";
 import type { PhysicalMotion } from "./physicalMotion";
 
 export type RealityPromptDynamicKey =
@@ -16,8 +16,6 @@ export interface CompiledRealityPrompt {
 }
 
 type PromptClause = { key: RealityPromptDynamicKey; text: string };
-
-export type ActivitySemanticConfidence = "hidden" | "low" | "normal";
 
 export function lightSemanticLabel(
   light: RealitySnapshot["physical"]["facts"]["lightExposure"],
@@ -38,11 +36,6 @@ export function orientationSemanticLabel(
   return null;
 }
 
-export function getActivitySemanticConfidence(possibility: number | null): ActivitySemanticConfidence {
-  if (typeof possibility !== "number" || !Number.isFinite(possibility) || possibility < 50) return "hidden";
-  return possibility < 70 ? "low" : "normal";
-}
-
 function lightClause(snapshot: RealitySnapshot): PromptClause | null {
   const text = lightSemanticLabel(snapshot.physical.facts.lightExposure);
   return text === null ? null : { key: "lightExposure", text: `环境【${text}】` };
@@ -60,20 +53,14 @@ function motionClause(motion: PhysicalMotion): PromptClause | null {
 }
 
 function activityClause(snapshot: RealitySnapshot, nowMs: number): PromptClause | null {
-  const activity = snapshot.activity;
-  const userActivity = activity?.userActivity;
-  if (!activity || activity.source !== "hms" || userActivity === "unknown"
-    || getActivityFreshness(snapshot, nowMs).status !== "fresh"
-    || typeof activity.possibility !== "number" || !Number.isFinite(activity.possibility)) return null;
-
-  const confidence = getActivitySemanticConfidence(activity.possibility);
-  if (confidence === "hidden") return null;
+  const userActivity = getFreshUserActivity(snapshot, nowMs);
+  if (userActivity === null) return null;
   const labels: Record<Exclude<UserActivity, "unknown">, string> = {
     still: "静止", walking: "步行", running: "跑步", cycling: "骑行", in_vehicle: "车载",
   };
   const label = labels[userActivity];
   if (!label) return null;
-  return { key: "userActivity", text: `推断【${label}${confidence === "low" ? "（低置信）" : ""}】` };
+  return { key: "userActivity", text: `推断【${label}】` };
 }
 
 function compileClauses(snapshot: RealitySnapshot, nowMs: number): PromptClause[] {

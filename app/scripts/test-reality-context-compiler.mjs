@@ -250,10 +250,11 @@ const activityCompile = (possibility, extra = {}) => compile({
   ...extra,
   now: extra.now ?? 0,
 });
-assert.equal(activityCompile(49).text, "设备当前【移动中】，正在充电，电量【12%】。");
-assert.equal(activityCompile(50).text, "设备当前【移动中】，推断【步行（低置信）】，正在充电，电量【12%】。");
-assert.equal(activityCompile(69).text, "设备当前【移动中】，推断【步行（低置信）】，正在充电，电量【12%】。");
-assert.equal(activityCompile(70).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
+for (const possibility of [null, 49, 70, 79, 101, NaN]) {
+  assert.equal(activityCompile(possibility).text, "设备当前【移动中】，正在充电，电量【12%】。");
+}
+assert.equal(activityCompile(80).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
+assert.equal(activityCompile(80, { userActivity: "in_vehicle" }).text, "设备当前【移动中】，推断【车载】，正在充电，电量【12%】。");
 assert.equal(activityCompile(100).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
 assert.equal(activityCompile(100, { now: 180001 }).text, "设备当前【移动中】，正在充电，电量【12%】。");
 
@@ -366,7 +367,7 @@ rawOnlyProjection.subscribe(() => {
   rawOnlyNotifications += 1;
 });
 rawOnlyStore.ingestPhysical(
-  raw({ at: 0, charging: true, batteryLevel: 80, lux: 10 }),
+  raw({ at: 0, charging: true, batteryLevel: 80, lux: 800 }),
   0,
 );
 rawOnlyNotifications = 0;

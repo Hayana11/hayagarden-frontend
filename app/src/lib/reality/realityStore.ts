@@ -115,6 +115,8 @@ export function getFreshUserActivity(
   if (
     !activity ||
     activity.source !== "hms" ||
+    typeof activity.possibility !== "number" ||
+    !(activity.possibility >= 80 && activity.possibility <= 100) ||
     activity.userActivity === "unknown" ||
     getActivityFreshness(snapshot, nowMs, maxAgeMs).status !== "fresh"
   ) {
