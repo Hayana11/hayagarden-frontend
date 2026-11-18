@@ -19,6 +19,7 @@ import dayblock_shadow
 from chat.background_generation import BackgroundGenerationResult
 from tools import daily_memory_dehydrator as daily
 from tools import dayblock_scheduled_runner as runner
+from tools import daily_profile_updater as profile
 from tools import mail_memory_dehydrator as mail
 from tools import memory_review as review
 from tools.memory_candidates import CandidateSourceTrace
@@ -195,6 +196,37 @@ class ReviewGuardScopeTest(GuardScopeTestCase):
             self.assertEqual("committed", conn.execute("SELECT status FROM memory_candidates").fetchone()[0])
         finally:
             conn.close()
+
+
+class ProfileGuardScopeTest(GuardScopeTestCase):
+    def test_profile_document_writes_happen_outside_guard_and_each_model_call_inside(self):
+        trace = CandidateSourceTrace(
+            source_refs=("chat_messages:101", "chat_messages:102"), derived_refs=("dayblock:2026-11-07:g",),
+            unresolved_refs=(), evidence_text="x",
+            raw_messages=({"id": 101, "author": "hayana", "content": "哈娅：" + "猫" * 120},
+                          {"id": 102, "author": "assistant", "content": "费奥多尔：" + "星" * 120}))
+        block = SimpleNamespace(source_day="2026-11-07", created_at="2026-11-08T00:00:00Z",
+                                generation_id="g", chunk_id="c")
+        self.reply = {"SELF": {"changed": True, "updated_document": "费奥多尔爱星星。", "evidence_message_ids": [102]},
+                      "HAYA": {"changed": True, "updated_document": "哈娅喜欢猫。", "evidence_message_ids": [101]}}
+        self.track(profile, "_save")
+        with mock.patch.object(profile, "load_ready_dayblocks", return_value=((block,), ())), \
+             mock.patch.object(profile, "trace_ready_dayblock", return_value=trace):
+            result = profile.update_day("2026-11-07", chat_db_path=self.db, profile_db_path=self.db,
+                                        dayblock_db_path="unused", chunk_chars=80)
+        self.assertEqual(2, result["chunk_count"])
+        self.assertEqual(["SELF", "HAYA"], result["updated_targets"])
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(2, conn.execute("SELECT COUNT(*) FROM profile_documents").fetchone()[0])
+            self.assertEqual(2, conn.execute("SELECT COUNT(*) FROM profile_document_revisions").fetchone()[0])
+        finally:
+            conn.close()
+        self.assertEqual([("authority", 1), ("model", 1), ("model", 1)],
+                         [e for e in self.events if e[0] != "_save"])
+        saves = [e for e in self.events if e[0] == "_save"]
+        self.assertEqual(2, len(saves))
+        self.assertTrue(all(depth == 0 for _, depth in saves))
 
 
 if __name__ == "__main__":

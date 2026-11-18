@@ -264,18 +264,12 @@ def update_day(
             authority=authority_capture(), generate_fn=background_generator, chunk_chars=chunk_chars,
         )
 
-    from tools.dayblock_scheduled_runner import _formal_config_read_guard
-    with _formal_config_read_guard(chat_db_path) as formal:
-        _request_cls, generate_background, _authority_cls, token_getter = formal
-        from chat.provider_router import capture_generation_authority
-        authority = capture_generation_authority()
-        return update_from_trace(
-            profile_db_path, source_day=source_day, trace=trace, authority=authority,
-            generate_fn=lambda request, frozen: generate_background(
-                request, frozen, cc_token_getter=token_getter,
-            ),
-            chunk_chars=chunk_chars,
-        )
+    from tools.dayblock_scheduled_runner import formal_background_generation
+    authority, generate_fn = formal_background_generation(chat_db_path)
+    return update_from_trace(
+        profile_db_path, source_day=source_day, trace=trace, authority=authority,
+        generate_fn=generate_fn, chunk_chars=chunk_chars,
+    )
 
 
 def _yesterday() -> str:
