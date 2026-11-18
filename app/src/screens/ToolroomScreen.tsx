@@ -1691,7 +1691,7 @@ export function ToolroomScreen() {
             <span role="status">{locationNotice}</span>
           </div>
           <div className="toolroom-section-heading">
-            <div><strong>显示传感器</strong><span>Physical Reality 与 HMS Activity 只读观测</span></div>
+            <div><strong>显示传感器</strong><span>手机传感器与运动状态</span></div>
           </div>
           <div className="toolroom-sensor-panels">
             {sensorPanels.map((sensor) => (
@@ -1716,8 +1716,8 @@ export function ToolroomScreen() {
 
           <div className="toolroom-section-heading">
             <div>
-              <strong>HMS Activity</strong>
-              <span>实时状态 · 复用既有 ElpisActivity bridge</span>
+              <strong>运动状态</strong>
+              <span>{activity.source === 'hms' ? '来自华为运动识别' : '暂无运动识别数据'}</span>
             </div>
             <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
           </div>
