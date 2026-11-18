@@ -120,20 +120,9 @@ class LeaseSignerContractTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "DENIED_CAPABILITY")
 
     def test_c_chat_and_wake_share_manifest_derived_defaults(self):
-        self.assertEqual(
-            default_allowed_capabilities("wake"),
-            default_allowed_capabilities("chat"),
-        )
-        self.assertEqual(
-            DEFAULT_ALLOWED_CAPABILITIES["wake"],
-            DEFAULT_ALLOWED_CAPABILITIES["chat"],
-        )
-        self.assertIs(
-            DEFAULT_ALLOWED_CAPABILITIES["wake"],
-            DEFAULT_ALLOWED_CAPABILITIES["chat"],
-        )
+        wake_defaults = tuple(c for c in CHAT_WAKE_DEFAULTS if c != "ledger.write")
+        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["wake"], wake_defaults)
         self.assertEqual(default_allowed_capabilities("chat"), CHAT_WAKE_DEFAULTS)
-        self.assertEqual(default_allowed_capabilities("wake"), CHAT_WAKE_DEFAULTS)
         self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["task"], TASK_DEFAULTS)
         self.assertEqual(TASK_DEFAULT_ALLOWED_CAPABILITIES, TASK_DEFAULTS)
         self.assertEqual(default_chat_wake_auto_capabilities(), CHAT_WAKE_DEFAULTS)
@@ -143,7 +132,7 @@ class LeaseSignerContractTests(unittest.TestCase):
 
         for mode, expected in (
             ("chat", CHAT_WAKE_DEFAULTS),
-            ("wake", CHAT_WAKE_DEFAULTS),
+            ("wake", wake_defaults),
             ("task", TASK_DEFAULTS),
         ):
             lease = issue_turn_lease(
@@ -155,7 +144,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             self.assertEqual(default_allowed_capabilities(mode), expected)
             if mode in {"chat", "wake"}:
                 self.assertIn("todo.write", lease["allowed_capabilities"])
-                self.assertIn("ledger.write", lease["allowed_capabilities"])
+                self.assertEqual("ledger.write" in lease["allowed_capabilities"], mode == "chat")
                 self.assertIn("health.read", lease["allowed_capabilities"])
                 self.assertIn("diary.write", lease["allowed_capabilities"])
                 self.assertIn("web.search", lease["allowed_capabilities"])
@@ -211,8 +200,8 @@ class LeaseSignerContractTests(unittest.TestCase):
             issued_from="default_policy",
         )
         self.assertIn("todo.write", wake["allowed_capabilities"])
-        self.assertEqual(wake["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
-        self.assertEqual(wake["allowed_capabilities"], turn_n1["allowed_capabilities"])
+        self.assertNotIn("ledger.write", wake["allowed_capabilities"])
+        self.assertEqual(set(wake["allowed_capabilities"]), set(turn_n1["allowed_capabilities"]) - {"ledger.write"})
 
     def test_e_explicit_user_intent_signs_write_without_ask(self):
         lease = issue_turn_lease(
@@ -413,7 +402,6 @@ class LeaseSignerContractTests(unittest.TestCase):
                 self.assertNotIsInstance(values["wake"], ast.Tuple)
                 self.assertIsInstance(values["chat"], ast.Name)
                 self.assertIsInstance(values["wake"], ast.Name)
-                self.assertEqual(values["chat"].id, values["wake"].id)
 
     def test_k_default_policy_subset_lease_can_only_reduce(self):
         subset = issue_default_policy_subset_lease(

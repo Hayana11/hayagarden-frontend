@@ -44,8 +44,10 @@ class ProactiveTriggerTextTests(unittest.TestCase):
     SHARED = (
         '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；',
         '你有自己的眼睛和手',
-        '本轮最多只使用一个只读工具',
-        '也可以不调用工具，直接自然地开口。',
+        '本轮最多调用工具 5 次',
+        '灯光和记账不在这段时间里做',
+        '[[ACTIVITY]]',
+        '想对她说话，就直接说。',
         '这些时间只是现实背景，不是行动命令。',
     )
 
@@ -53,6 +55,7 @@ class ProactiveTriggerTextTests(unittest.TestCase):
         self.build = _trigger_builder()
 
     def _assert_shared(self, text):
+        self.assertNotIn('一个只读工具', text)
         for phrase in self.SHARED:
             self.assertIn(phrase, text)
         self.assertIn('\n\n', text)
@@ -373,7 +376,7 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         result, sent = self._run(events=self._done(' [[SILENT]] '))
         self.assertTrue(result['silent'])
         self.assertEqual(result['text'], '')
-        self.assertIn('只回复 [[SILENT]]，它不会发给她', sent[0])
+        self.assertIn('什么都没做就只回 [[SILENT]]', sent[0])
         self.assertTrue(
             result['cache_info']['transcript_skip']['skipped_provider_round']
         )

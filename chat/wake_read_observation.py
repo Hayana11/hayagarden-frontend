@@ -24,7 +24,7 @@ _FACT_LIMIT = 400
 
 _OBSERVATION_PROMPT = (
     '这是一次内部 Wake Read Observation。只读取、不写入，不要对用户说话，'
-    '不要决定 Action。需要时调用当前可用的只读工具，然后只返回一个 JSON：'
+    '不要决定 Action。需要时最多调用 3 次当前可用的只读工具，然后只返回一个 JSON：'
     '{"observations":[{"source":"capability_id","fact":"短事实"}]}。'
     'fact 尽量短，不要粘贴大段原文。没有值得记下的事实时返回 '
     '{"observations":[]}。'

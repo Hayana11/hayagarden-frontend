@@ -4555,7 +4555,9 @@ def log_dream_event():
 
 # ── Wake Log (Phase 2) ─────────────────────────────────────
 def _init_wake_tables():
+    from wake.activity import ensure_schema
     conn = get_db()
+    ensure_schema(conn)
     conn.execute("""CREATE TABLE IF NOT EXISTS wake_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         woke_at TIMESTAMP DEFAULT (datetime('now','+8 hours')),

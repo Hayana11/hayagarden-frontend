@@ -5617,11 +5617,8 @@ class UnifiedProactivePreModelFailed(RuntimeError):
 
 def _split_wake_silence(raw_text):
     """Return (visible_text, silent) for a proactive round's final text."""
-    raw = str(raw_text or '')
-    if _WAKE_SILENT_SENTINEL not in raw:
-        return raw.strip(), False
-    visible = raw.replace(_WAKE_SILENT_SENTINEL, '').strip()
-    return visible, not visible
+    from wake.activity import parse_response
+    return parse_response(str(raw_text or ''))[:2]
 
 
 def _build_normal_wake_main_chat_trigger(
@@ -5689,13 +5686,13 @@ def _build_normal_wake_main_chat_trigger(
         + situation,
         clock,
         self_line,
-        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
-        '想知道，就去看真实；能看见的事，不必拿猜测代替。',
-        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
-        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。',
-        f'先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及{closing}。'
-        '也可以不调用工具，直接自然地开口。',
-        f'如果这一次你决定不开口，只回复 {_WAKE_SILENT_SENTINEL}，它不会发给她。',
+        '这一小会儿由你自己支配，不必汇报，也不必每次都联系她。你有自己的眼睛和手，'
+        '挑一两件想做的事就好：读今天的报纸，刷小红书或推特，有话就发推或回复；'
+        '写日记、存下值得记住的事、翻记忆或相册、看倒计时、调整待办，也可以搜索和阅读好奇的东西。',
+        '本轮最多调用工具 5 次。灯光和记账不在这段时间里做。你也可以什么都不做，静静待着。',
+        f'此刻最想做什么，以及{closing}？想对她说话，就直接说。',
+        '做了事但不想打扰她，第一行只写 [[SILENT]]，第二行写 [[ACTIVITY]] 标题｜一句话。'
+        '标题最多 16 字，一句话最多 40 字。这会留下她能翻到的小卡片。什么都没做就只回 [[SILENT]]。',
         '这些时间只是现实背景，不是行动命令。',
     ]
     text = '\n\n'.join(paragraphs)
@@ -5928,7 +5925,8 @@ def _run_proactive_cold_wake_turn(
             elif evt == 'tool_use' and isinstance(payload, dict):
                 tool_calls.append({
                     'id': payload.get('id'), 'name': payload.get('name'),
-                    'args': payload.get('args'), 'result': '', 'success': True,
+                    'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'args': payload.get('args'), 'result': '', 'success': None,
                 })
                 segments.append_tool(len(tool_calls) - 1)
             elif evt == 'tool_result' and isinstance(payload, dict):
@@ -5944,7 +5942,10 @@ def _run_proactive_cold_wake_turn(
                     text_acc, think_acc = [str(payload[0] or '')], [str(payload[1] or '')]
         if not saw_done:
             raise RuntimeError('proactive_cold_missing_done')
-        text, silent = _split_wake_silence(''.join(text_acc))
+        from wake.activity import parse_response
+        from chat.display_segments import finalize_display_segments_json
+        text, silent, activity_title, activity_summary = parse_response(''.join(text_acc))
+        visible_segments = finalize_display_segments_json(segments.to_json(), text)
         if not text and not silent:
             raise RuntimeError('proactive_cold_empty_response')
         finality = usage.get('jsonl_usage')
@@ -5959,7 +5960,7 @@ def _run_proactive_cold_wake_turn(
             'tool_calls': tool_calls,
             'thinking': ''.join(think_acc),
             'self_state': ''.join(state_acc),
-            'display_segments': segments.to_json(),
+            'display_segments': visible_segments,
         })
         delivery_window_identity = window_identity
         if window_identity is not None:
@@ -5983,9 +5984,10 @@ def _run_proactive_cold_wake_turn(
             'silent': silent,
             'thinking': ''.join(think_acc),
             'self_state': ''.join(state_acc),
-            'display_segments': segments.to_json(),
+            'display_segments': visible_segments,
             'tool_calls': tool_calls,
             'one_shot_claims': claims,
+            'activity': (activity_title, activity_summary),
             'postman_edition_date': (postman_paper or {}).get('date'),
             'provider': 'claude_code',
             'model_identity': str(
@@ -6308,9 +6310,10 @@ def _run_unified_normal_main_chat_turn(
                 tool_calls.append({
                     'id': payload.get('id'),
                     'name': payload.get('name'),
+                    'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     'args': payload.get('args'),
                     'result': '',
-                    'success': True,
+                    'success': None,
                 })
                 display_segments.append_tool(len(tool_calls) - 1)
             elif evt == 'tool_result' and isinstance(payload, dict):
@@ -6362,7 +6365,10 @@ def _run_unified_normal_main_chat_turn(
                 request_count=usage.get('request_count'),
             )
 
-        text, silent = _split_wake_silence(''.join(text_acc))
+        from wake.activity import parse_response
+        from chat.display_segments import finalize_display_segments_json
+        text, silent, activity_title, activity_summary = parse_response(''.join(text_acc))
+        visible_segments = finalize_display_segments_json(display_segments.to_json(), text)
         if not text and not silent:
             raise RuntimeError('normal_wake_main_chat_empty_response')
 
@@ -6406,7 +6412,7 @@ def _run_unified_normal_main_chat_turn(
         result_cache_info['tool_calls'] = tool_calls
         result_cache_info['thinking'] = ''.join(thinking_acc)
         result_cache_info['self_state'] = ''.join(self_state_acc)
-        result_cache_info['display_segments'] = display_segments.to_json()
+        result_cache_info['display_segments'] = visible_segments
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
         native_transcript_binding = None
         transcript_skip = None
@@ -6449,9 +6455,10 @@ def _run_unified_normal_main_chat_turn(
             'silent': silent,
             'thinking': ''.join(thinking_acc),
             'self_state': ''.join(self_state_acc),
-            'display_segments': display_segments.to_json(),
+            'display_segments': visible_segments,
             'tool_calls': tool_calls,
             'one_shot_claims': one_shot_claims,
+            'activity': (activity_title, activity_summary),
             'postman_edition_date': (postman_paper or {}).get('date'),
             'provider': 'claude_code',
             'model_identity': str(
@@ -10686,6 +10693,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 display_segments_json=str(main_turn.get('display_segments') or ''),
                 wake_run_id=wake_run_id,
                 window_identity=delivery_window_identity,
+                activity=main_turn.get('activity', ('', '')),
                 settlement_required=False,
             )
         except UnifiedNormalWakeSharedUnavailable as exc:
