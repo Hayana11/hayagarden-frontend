@@ -5,7 +5,7 @@ import { PageHeader } from '../components/PageHeader';
 import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
-import { realityStore } from '../lib/reality/realityRuntime';
+import { realityStore, setMotionEnabled } from '../lib/reality/realityRuntime';
 import { getFreshUserActivity, getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
 import './ToolroomScreen.css';
 
@@ -1713,7 +1713,11 @@ export function ToolroomScreen() {
           <div className="toolroom-section-heading">
             <div>
               <strong>运动状态</strong>
-              <span>{activity.source === 'hms' ? '来自华为运动识别' : '暂无运动识别数据'}</span>
+              {activity.source === 'google' && <div>
+                <button type="button" onClick={() => setMotionEnabled(true)}>开启运动识别</button>
+                <button type="button" onClick={() => setMotionEnabled(false)}>关闭</button>
+              </div>}
+              <span>{activity.source === 'google' ? 'Google 运动识别 · ' + activity.registration : activity.source === 'hms' ? '来自华为运动识别' : '暂无运动识别数据'}</span>
             </div>
             <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
           </div>

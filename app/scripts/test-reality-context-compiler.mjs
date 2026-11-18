@@ -253,6 +253,12 @@ const activityCompile = (possibility, extra = {}) => compile({
 for (const possibility of [null, 49, 70, 79, 101, NaN]) {
   assert.equal(activityCompile(possibility).text, "设备当前【移动中】，正在充电，电量【12%】。");
 }
+for (const kind of ["walking", "in_vehicle"]) {
+  for (const score of [79, 80]) {
+    const output = activityCompile(score, { activitySource: "google", userActivity: kind });
+    assert.equal(output.segments.some(segment => segment.key === "userActivity"), score === 80);
+  }
+}
 assert.equal(activityCompile(80).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
 assert.equal(activityCompile(80, { userActivity: "in_vehicle" }).text, "设备当前【移动中】，推断【车载】，正在充电，电量【12%】。");
 assert.equal(activityCompile(100).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
