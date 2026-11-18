@@ -35,3 +35,20 @@
   box-shadow: 0 6px 16px var(--shadow);
   color: var(--ink);
 }
+
+.wake-activity-card {
+  align-self: center;
+  box-sizing: border-box;
+  width: 90%;
+  padding: 9px 14px;
+  border-left: 2px solid var(--ghost);
+  color: var(--faint);
+  overflow-wrap: break-word;
+  font-size: .88em;
+  line-height: 1.6;
+}
+.wake-activity-card header { font-size: .9em; }
+.wake-activity-card strong { display: block; color: var(--ink); font-weight: 500; }
+.wake-activity-card p { margin: 2px 0 0; }
+.wake-activity-card details { margin-top: 4px; }
+.wake-activity-card summary { cursor: pointer; }

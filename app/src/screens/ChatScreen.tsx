@@ -161,6 +161,8 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
 import './ChatMessage.css';
+import { useWakeActivity } from '../lib/wakeActivity';
+import { WakeActivityCard } from '../components/WakeActivityCard';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
 import { TaskTimerCard } from '../components/TaskTimerCard';
@@ -2902,6 +2904,11 @@ export function ChatScreen() {
 
   // Modern: all loaded msgs. Legacy: bounded DOM window only (msgs state stays full).
   const visibleMsgs = legacyCompat ? msgs.slice(txWin.start, txWin.end) : msgs;
+  const firstVisible = visibleMsgs[0];
+  const earlierHidden = hasMoreBefore || (legacyCompat && txWin.start > 0);
+  const activitySince = earlierHidden && firstVisible ? firstVisible.createdAt : '';
+  const activityBefore = legacyCompat && txWin.end < msgs.length ? msgs[txWin.end].createdAt : '';
+  const activities = useWakeActivity(initialHistoryReady, activitySince, activityBefore);
   const atLatestWindow = !legacyCompat || isTranscriptWindowAtLatest(txWin, msgs.length);
   const canShowEarlierLoaded = legacyCompat && txWin.start > 0;
   const canFetchEarlier = (!legacyCompat && hasMoreBefore) || (legacyCompat && txWin.start === 0 && hasMoreBefore);
@@ -2937,12 +2944,16 @@ export function ChatScreen() {
   );
   const presentationEntries = buildChatPresentationEntries({
     messages: visibleMsgs,
+    activities,
     handoff: activeHandoff,
     finalMessageId: mountedFinalMessageId,
     liveVisible: liveSlotVisible,
     presentationKeys: presentationByMessageRef.current,
   });
   const rendered = presentationEntries.map((entry) => {
+    if (entry.kind === 'activity') {
+      return <WakeActivityCard key={entry.key} activity={entry.activity} />;
+    }
     if (entry.kind === 'date') {
       const label = entry.dateKey === new Date().toISOString().slice(0, 10)
         ? dateLabel
