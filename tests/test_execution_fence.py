@@ -142,7 +142,7 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertIn("health.read", wake["allowed_capabilities"])
         self.assertEqual(
             wake["allowed_capabilities"],
-            lease["allowed_capabilities"],
+            tuple(c for c in lease["allowed_capabilities"] if c != "ledger.write"),
         )
         self.assertEqual(
             evaluate_tool_call(

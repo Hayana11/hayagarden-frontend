@@ -54,7 +54,7 @@ def execute(action: str, thoughts: str, content: str,
             settlement_required: bool = True,
             tool_calls_json: str = '',
             display_segments_json: str = '',
-            native_transcript_binding=None):
+            native_transcript_binding=None, activity=None):
     """
     action: 'none' | 'message' | 'diary' | 'explore' | 'call'
       ('call' only records the call he placed: an audit row, never pushed or
@@ -270,6 +270,10 @@ def execute(action: str, thoughts: str, content: str,
             ),
             tuple(values),
         ).lastrowid
+        if activity is not None and deliver_chat and rid:
+            from wake.activity import save
+            save(conn, rid, mode, action == "message", *activity,
+                 (wake_cache_info or {}).get("tool_calls", []))
         assistant_message_id = None
 
         # 执行 action：仅在归属仍然有效时写聊天表面

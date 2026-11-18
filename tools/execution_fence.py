@@ -5,8 +5,10 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,8 @@ LEASE_DECISIONS = frozenset(
     {"ALLOW", "DENIED_CAPABILITY", "LEASE_MISMATCH"}
 )
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
+WAKE_TOOL_BUDGET = 5
+WAKE_OBSERVATION_BUDGET = 3
 DEFAULT_REPO_ROOT = "/opt/frontend"
 
 
@@ -435,6 +439,7 @@ def pretooluse_payload(result):
             "permissionDecision": provider_decision,
             "permissionDecisionReason": (
                 f"UH-A0 {decision}: {result.get('capability_id') or 'unknown'}"
+                + (f" ({result['diagnostic']})" if str(result.get("diagnostic", "")).startswith("wake_tool_budget_") else "")
             ),
         }
     }
@@ -461,6 +466,29 @@ def _hook_result(payload, env):
             lease,
             expected_turn_id=record.get("turn_id"),
         )
+    # Charge only the execution hook. Stream annotations and backend verification
+    # inspect the same call again and must never spend a second slot.
+    if result["lease_decision"] == "ALLOW" and lease["turn_mode"] == "wake":
+        turn_id = lease["turn_id"]
+        observation = turn_id.startswith("wake-read-obs:")
+        budget = WAKE_OBSERVATION_BUDGET if observation else WAKE_TOOL_BUDGET
+        scope = turn_id
+        for prefix in ("uh-a1-cold:", "uh-a1-main-chat:"):
+            if turn_id.startswith(prefix):
+                scope = "main:" + turn_id[len(prefix):]
+                break
+        path = Path(default_turn_lease_path(env=env)).parent / "wake-tool-budget.sqlite3"
+        try:
+            with closing(sqlite3.connect(path, timeout=5)) as conn, conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS wake_budget (scope TEXT PRIMARY KEY, used INTEGER NOT NULL)")
+                spent = conn.execute(
+                    "INSERT INTO wake_budget VALUES (?,1) ON CONFLICT(scope) DO UPDATE "
+                    "SET used=used+1 WHERE used < ?", (scope, budget)).rowcount
+            reason = "" if spent else "wake_tool_budget_exhausted"
+        except sqlite3.Error:
+            reason = "wake_tool_budget_unavailable"
+        if reason:
+            result.update(lease_decision="DENIED_CAPABILITY", diagnostic=reason)
     return pretooluse_payload(result)
 
 
