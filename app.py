@@ -1870,6 +1870,7 @@ def get_context_limits():
     """Expose the read-only resident limit authority to the frontend."""
     soft_limit = config_store.get_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
     return jsonify({
+        'ok': True,
         'context_soft_limit': soft_limit if soft_limit > 0 else 150_000,
     })
 

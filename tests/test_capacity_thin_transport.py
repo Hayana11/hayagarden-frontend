@@ -417,8 +417,8 @@ class ThinCapacityPrepareTests(unittest.TestCase):
 
 
 class ThinCapacityBootstrapTests(unittest.TestCase):
-    def test_history_image_resolution_does_not_change_raw_budget(self):
-        from PIL import Image
+    def test_history_image_file_contents_do_not_change_raw_budget(self):
+        import io
 
         from continuity.context_plan import build_context_plan
         from continuity.sources import row_logical_size
@@ -442,13 +442,22 @@ class ThinCapacityBootstrapTests(unittest.TestCase):
                     ],
                 )
             plan = types.SimpleNamespace(db_path=db_path, user_message_id=125, assembly={})
-            budget_by_size = {}
-            for size in (384, 768, 2048):
-                with self.subTest(size=size):
-                    Image.new('RGB', (size, size)).save(image_path, 'PNG')
-                    with mock.patch.object(
-                        Image, 'open', side_effect=AssertionError('history image decoded'),
-                    ) as decode:
+            image_reads = []
+
+            def guard_image_open(real_open):
+                def guarded_open(file, *args, **kwargs):
+                    if isinstance(file, (str, os.PathLike)) and Path(file).name == image_path.name:
+                        image_reads.append(file)
+                        raise AssertionError('history image file opened')
+                    return real_open(file, *args, **kwargs)
+                return guarded_open
+
+            budgets = []
+            for contents in (b'first file contents', b'different bytes' * 256, b''):
+                with self.subTest(file_size=len(contents)):
+                    image_path.write_bytes(contents)
+                    with mock.patch('builtins.open', side_effect=guard_image_open(open)), \
+                         mock.patch('io.open', side_effect=guard_image_open(io.open)):
                         rows = daily_runtime._load_context_source_rows({123, 124}, db_path=db_path)
                         members = build_source_snapshot(
                             turns=derive_completed_turns(list(rows.values())), events=(),
@@ -461,19 +470,19 @@ class ThinCapacityBootstrapTests(unittest.TestCase):
                             plan, context_plan=context_plan, chunk_bodies={},
                             readable_ids=(representation.representation_id,),
                         )
-                    decode.assert_not_called()
                     self.assertEqual(representation.kind, 'raw')
                     self.assertEqual(representation.estimated_tokens, members[0].logical_size)
                     self.assertLess(representation.estimated_tokens, 512)
-                    budget_by_size[size] = (
+                    budgets.append((
                         row_logical_size(rows[123]), members[0].logical_size,
                         representation.estimated_tokens, context_plan.plan_hash,
-                    )
+                    ))
                     self.assertEqual(
                         blocks[0]['body'],
                         '[TURN]\nUSER:\n你看这张图\n[历史图片 message_id=123]\n\nASSISTANT:\n看到了',
                     )
-            self.assertEqual(len(set(budget_by_size.values())), 1)
+            self.assertEqual(image_reads, [])
+            self.assertEqual(len(set(budgets)), 1)
 
     def test_case4_chunk_and_readable_raw_install_once_in_plan_order(self):
         members = _members()
