@@ -496,7 +496,7 @@ _WAKE_LIVE_TRACE_FIELDS = frozenset({
     'stream_totals', 'jsonl_totals', 'stream_totals_match', 'jsonl_requests',
     'request_count', 'duplicate_rows_ignored', 'conflicting_duplicate_rows',
     'finality_state', 'assistant_message_id', 'wake_log_id',
-    'frontend_visible', 'exception_type', 'error_code', 'action',
+    'frontend_visible', 'exception_type', 'error_code', 'retryable', 'action',
 })
 
 
@@ -5614,6 +5614,12 @@ _WAKE_SILENT_SENTINEL = '[[SILENT]]'
 class UnifiedProactivePreModelFailed(RuntimeError):
     """The proactive round failed before its trigger reached the model."""
 
+    def __init__(self, detail, *, error_code=None, message=None, retryable=None):
+        super().__init__(detail)
+        self.error_code = error_code
+        self.message = message
+        self.retryable = retryable
+
 
 def _split_wake_silence(raw_text):
     """Return (visible_text, silent) for a proactive round's final text."""
@@ -6028,10 +6034,19 @@ def _run_proactive_cold_wake_turn(
                          reason='proactive_cold_failed')
         else:
             _gen_release(None)
+        runtime_error = exc if isinstance(exc, _rt.DailyRuntimeError) and not flushed else None
+        failure_code = 'normal_wake_main_chat_failed' if flushed else 'normal_wake_pre_model_failed'
         _wake_live_trace(
             rid, 'FAILED', exception_type=type(exc).__name__,
-            error_code='normal_wake_main_chat_failed' if flushed else 'normal_wake_pre_model_failed',
+            error_code=runtime_error.error_code if runtime_error is not None else failure_code,
+            retryable=runtime_error.retryable if runtime_error is not None else None,
         )
+        if runtime_error is not None:
+            # Preserve the message for callers without logging exception text.
+            raise UnifiedProactivePreModelFailed(
+                runtime_error.error_code, error_code=runtime_error.error_code,
+                message=str(runtime_error), retryable=runtime_error.retryable,
+            ) from exc
         if not flushed:
             raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
         raise
@@ -10718,8 +10733,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             _wake_live_trace(
                 wake_run_id,
                 'FAILED',
-                exception_type=str(exc),
-                error_code='NORMAL_WAKE_PRE_MODEL_FAILED',
+                exception_type=type(exc.__cause__).__name__ if exc.error_code else str(exc),
+                error_code=exc.error_code or 'NORMAL_WAKE_PRE_MODEL_FAILED',
+                retryable=exc.retryable,
             )
             app.logger.warning('[normal_wake_main_chat] failed before model: %s', exc)
             return jsonify({
