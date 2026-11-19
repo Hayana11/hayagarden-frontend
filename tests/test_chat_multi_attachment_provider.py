@@ -163,10 +163,15 @@ class ChatMultiAttachmentProviderTests(unittest.TestCase):
     def test_daily_hot_cold_respawn_each_keep_all_current_images(self):
         from chat.daily_runtime import format_resident_turn_content
 
+        from io import BytesIO
+        from PIL import Image
+
+        image = BytesIO()
+        Image.new('RGB', (1, 1)).save(image, 'PNG')
         attachments = [self._image("%d.png" % n) for n in range(4)]
         with mock.patch(
             "chat.cc_vision_bridge.resolve_image_bytes",
-            return_value=(self.image_bytes, "image/png"),
+            return_value=(image.getvalue(), "image/png"),
         ):
             for is_cold, is_respawn in ((False, False), (True, False), (False, True)):
                 content = format_resident_turn_content(

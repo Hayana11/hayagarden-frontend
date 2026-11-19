@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -134,7 +134,11 @@ def _render_tool_outcomes(assistant_row: Any) -> list[str]:
     return rendered
 
 
-def _render_turn(source_ref: str, rows_by_id: Mapping[int, Any]) -> str:
+def _render_turn(
+    source_ref: str,
+    rows_by_id: Mapping[int, Any],
+    render_user_text: Callable[[Any], str] | None = None,
+) -> str:
     user_id, assistant_id = _turn_ids(source_ref)
     user_row = rows_by_id.get(user_id)
     assistant_row = rows_by_id.get(assistant_id)
@@ -143,7 +147,8 @@ def _render_turn(source_ref: str, rows_by_id: Mapping[int, Any]) -> str:
     body = [
         '[TURN]',
         'USER:',
-        str(_value(user_row, 'content', '') or ''),
+        render_user_text(user_row) if render_user_text is not None
+        else str(_value(user_row, 'content', '') or ''),
         '',
         'ASSISTANT:',
         str(_value(assistant_row, 'content', '') or ''),
@@ -167,6 +172,8 @@ def _render_wake(source_ref: str, rows_by_id: Mapping[int, Any]) -> str:
 def materialize_source_members(
     members: Iterable[SourceMember],
     rows: Iterable[Any],
+    *,
+    render_user_text: Callable[[Any], str] | None = None,
 ) -> MaterializedSource:
     """Materialize exact ContextPlan raw membership with canonical renderers."""
     selected = tuple(members)
@@ -199,7 +206,7 @@ def materialize_source_members(
                 f'source revision/content drift: {source_ref}'
             )
         if member.source_kind == 'completed_turn':
-            rendered.append(_render_turn(source_ref, rows_by_id))
+            rendered.append(_render_turn(source_ref, rows_by_id, render_user_text))
         elif member.source_kind == 'autonomous_event':
             rendered.append(_render_wake(source_ref, rows_by_id))
         else:

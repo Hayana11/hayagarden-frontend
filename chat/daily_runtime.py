@@ -16,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Collection, Iterator, Mapping, Optional, Sequence
 
 import cc_resident
 import config_store
@@ -28,6 +28,9 @@ from chat import turn_birth
 from chat import context_window as cw
 from chat.attachment_contract import (
     AttachmentValidationError,
+    MAX_PROVIDER_IMAGE_DIMENSION,
+    historical_image_text,
+    image_attachment_urls,
     provider_current_turn_attachment_parts,
     provider_current_turn_attachments,
 )
@@ -709,6 +712,7 @@ def format_resident_turn_content(
         content = build_claude_user_content(
             text=text,
             attachment_parts=attachment_parts,
+            max_image_dimension=MAX_PROVIDER_IMAGE_DIMENSION,
         )
     from chat.display_thinking import append_display_thinking_suffix
     content = append_display_thinking_suffix(
@@ -2128,6 +2132,7 @@ def _project_context_plan_history(
     *,
     context_plan: Any,
     chunk_bodies: dict[str, str],
+    capacity_readable_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project canonical representations into the existing formatter fields."""
     from continuity.materialization import materialize_source_members
@@ -2145,6 +2150,16 @@ def _project_context_plan_history(
                     )
                 message_ids.update(ids)
     rows = _load_context_source_rows(message_ids, db_path=store_path)
+
+    def render_capacity_user_text(row: dict[str, Any]) -> str:
+        return historical_image_text(
+            str(row.get('content') or ''),
+            message_id=int(row['id']),
+            image_count=len(image_attachment_urls(
+                row.get('attachments'), legacy_image_url=row.get('image_url') or '',
+            )),
+        )
+
     history: list[dict[str, Any]] = []
     representation_blocks: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
@@ -2179,6 +2194,11 @@ def _project_context_plan_history(
             materialized = materialize_source_members(
                 representation.source_members,
                 rows.values(),
+                render_user_text=(
+                    render_capacity_user_text
+                    if str(representation.representation_id) in capacity_readable_ids
+                    else None
+                ),
             )
         except Exception as exc:
             raise DailyRuntimeError(
@@ -2311,6 +2331,7 @@ def _capacity_readable_raw_blocks(
             plan,
             context_plan=context_plan,
             chunk_bodies=chunk_bodies,
+            capacity_readable_ids=wanted,
         ).get('context_plan_representation_blocks') or []
         if str(block.get('kind') or '') == 'raw'
         and str(block.get('representation_id') or '') in wanted

@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging, uuid
+import os, re, sqlite3, json, base64, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging, uuid
 # Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
 # must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
@@ -1921,37 +1921,27 @@ from chat.context_continuity import (
 )
 
 
-def img_block(url, max_dim=1568):
-    """
-    读图片转base64 block。会先压缩到Claude API推荐的最大边长(1568px)以内，
-    避免手机原图(动辄4000x3000+几MB)直接塞进payload，
-    撑爆请求体大小、拖垮上传时间，表现为聊天"一直转圈/卡死"。
-    """
-    if not url:
-        return None
-    path = STATIC_DIR + url[7:] if url.startswith('/static/') else None
-    if not path or not os.path.exists(path):
+def img_block(url):
+    """Build the legacy Chat provider's in-memory image copy."""
+    from chat.attachment_contract import (
+        AttachmentValidationError,
+        MAX_PROVIDER_IMAGE_DIMENSION,
+        reencode_chat_image,
+    )
+    from chat.cc_vision_bridge import build_image_content_block
+
+    path = STATIC_DIR + url[7:] if url and url.startswith('/static/') else None
+    if not path:
         return None
     try:
-        from PIL import Image
-        import io as _io
-        img = Image.open(path)
-        if img.mode in ('RGBA', 'P'):
-            img = img.convert('RGB')
-        w, h = img.size
-        if max(w, h) > max_dim:
-            scale = max_dim / max(w, h)
-            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        buf = _io.BytesIO()
-        img.save(buf, format='JPEG', quality=82)
-        data = base64.standard_b64encode(buf.getvalue()).decode()
-        return {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': data}}
-    except Exception:
-        # Pillow处理失败则退回原图（极端兜底，正常不会走到这里）
-        mime = mimetypes.guess_type(path)[0] or 'image/jpeg'
-        with open(path, 'rb') as f:
-            data = base64.standard_b64encode(f.read()).decode()
-        return {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': data}}
+        with open(path, 'rb') as fh:
+            data, _, mime = reencode_chat_image(
+                fh.read(), max_dimension=MAX_PROVIDER_IMAGE_DIMENSION,
+            )
+    except (OSError, AttachmentValidationError):
+        return None
+    return build_image_content_block(data, mime)
+
 
 # 工具结果的跨轮格式化放在 chat.context_continuity，便于独立回归测试。
 

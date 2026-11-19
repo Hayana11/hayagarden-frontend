@@ -295,9 +295,13 @@ def _canonical_user_payload_from_db(
     attachments: object = None,
     file_url: str = '',
     file_name: str = '',
+    historical_message_id: int | None = None,
 ) -> Any:
     """DB-authoritative user body from ordered canonical attachments."""
-    from chat.attachment_contract import provider_current_turn_attachment_parts
+    from chat.attachment_contract import (
+        historical_image_text,
+        provider_current_turn_attachment_parts,
+    )
     from chat.cc_vision_bridge import VisionBridgeError, build_claude_user_content
 
     raw_text = str(content or '').strip()
@@ -307,6 +311,12 @@ def _canonical_user_payload_from_db(
         legacy_file_name=file_name,
         legacy_image_url=image_url,
     )
+    if historical_message_id is not None:
+        image_count = sum(part['type'] == 'image' for part in attachment_parts)
+        raw_text = historical_image_text(
+            raw_text, message_id=historical_message_id, image_count=image_count,
+        )
+        attachment_parts = [part for part in attachment_parts if part['type'] != 'image']
     if not attachment_parts:
         return raw_text
     try:

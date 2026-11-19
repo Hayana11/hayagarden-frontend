@@ -28,6 +28,7 @@ MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8192
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_IMAGE_STORED_DIMENSION = 2048
+MAX_PROVIDER_IMAGE_DIMENSION = 768
 MAX_IMAGE_OUTPUT_BYTES = 8 * 1024 * 1024
 
 
@@ -374,6 +375,16 @@ def image_attachment_urls(
     ]
 
 
+def historical_image_text(content: str, *, message_id: int, image_count: int) -> str:
+    """Render a DB-backed history reference in place of image bytes."""
+    if not image_count:
+        return content
+    text = '' if content.strip() == '[image]' else content
+    count = f'，共{image_count}张' if image_count > 1 else ''
+    marker = f'[历史图片 message_id={message_id}{count}]'
+    return f'{text}\n{marker}' if text else marker
+
+
 def uploaded_file_urls(
     value: object,
     *,
@@ -417,7 +428,9 @@ def write_limited_text_upload(
     return len(data)
 
 
-def reencode_chat_image(data: bytes) -> tuple[bytes, str, str]:
+def reencode_chat_image(
+    data: bytes, *, max_dimension: int = MAX_IMAGE_STORED_DIMENSION,
+) -> tuple[bytes, str, str]:
     """Decode, bound, resize and metadata-strip JPEG/PNG/WebP bytes."""
     from PIL import Image, ImageOps
 
@@ -444,9 +457,9 @@ def reencode_chat_image(data: bytes) -> tuple[bytes, str, str]:
     except Exception as exc:
         raise AttachmentValidationError('图片解码失败') from exc
 
-    if max(image.size) > MAX_IMAGE_STORED_DIMENSION:
+    if max(image.size) > max_dimension:
         image.thumbnail(
-            (MAX_IMAGE_STORED_DIMENSION, MAX_IMAGE_STORED_DIMENSION),
+            (max_dimension, max_dimension),
             Image.Resampling.LANCZOS,
         )
 
