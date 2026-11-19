@@ -19,6 +19,7 @@ from chat import daily_context as dc
 from chat import daily_runtime
 from chat.capacity_swap_runtime import (
     CapacitySwapStagedHooks,
+    _load_mapping_for_messages,
     prepare_capacity_swap_for_context_plan,
     run_capacity_swap_handoff,
 )
@@ -163,6 +164,7 @@ def _context_plan(members, *, anchor_status='ANCHOR_UNAVAILABLE', chunk=False):
     return types.SimpleNamespace(
         plan_hash='plan-hash', window_anchor=None,
         window_anchor_status=anchor_status, representations=tuple(representations),
+        ordered_sections=(),
     )
 
 
@@ -175,7 +177,7 @@ def _plan(user_message_id=14800):
 
 
 class ThinCapacityPrepareTests(unittest.TestCase):
-    def _prepare(self, members, *, graph, rows, plan=None, registry=None):
+    def _prepare(self, members, *, graph, rows, plan=None, registry=None, canonical_db=None):
         registry = registry or {
             'scan_status': 'ready', 'transcript_path': '/tmp/source.jsonl',
             'claude_session_id': SID, 'scan_offset': 1000,
@@ -199,7 +201,10 @@ class ThinCapacityPrepareTests(unittest.TestCase):
             return_value=[{'id': 14716}, {'id': 14717}, {'id': 14720}, {'id': 14721}],
         ), mock.patch(
             'chat.capacity_swap_runtime._load_mapping_for_messages',
-            return_value=(canonical, {14716: 't1u', 14720: 't2u'}, {}),
+            side_effect=lambda _conn, ids: (
+                _load_mapping_for_messages(canonical_db, ids) if canonical_db is not None
+                else (canonical, {14716: 't1u', 14720: 't2u'}, {})
+            ),
         ), mock.patch(
             'chat.capacity_swap_runtime._load_mapping_rows_for_messages', return_value=rows,
         ), mock.patch(
@@ -270,6 +275,79 @@ class ThinCapacityPrepareTests(unittest.TestCase):
         self.assertEqual(
             result.candidate.selected_message_ids, (14716, 14717, 14720, 14721),
         )
+
+    def test_history_images_become_one_db_reference_in_either_transport(self):
+        db_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(db_dir.cleanup)
+        db_path = os.path.join(db_dir.name, 'images.db')
+        conn = sqlite3.connect(db_path)
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
+            'created_at TEXT, source_kind TEXT, image_url TEXT, attachments TEXT)'
+        )
+        conn.execute(
+            'CREATE TABLE chat_message_claude_events (event_uuid TEXT, message_id INT, role TEXT, '
+            'claude_session_id TEXT, context_id INT, context_epoch INT, resident_generation INT, '
+            'jsonl_byte_offset INT)'
+        )
+        image_urls = ['/static/uploads/first.png', '/static/uploads/second.png']
+        attachments = json.dumps([{'type': 'image', 'url': url} for url in image_urls])
+        conn.executemany(
+            'INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [
+                (14716, 'hayana', '你看这张图', '2026-11-07 10:00:00', 'chat', image_urls[0], attachments),
+                (14717, 'assistant', '图片里的文字', '2026-11-07 10:01:00', 'chat', '', '[]'),
+                (14800, 'hayana', 'CURRENT_ONLY', '2026-11-07 10:02:00', 'chat', image_urls[1], '[]'),
+            ],
+        )
+        mappings = TURN_ROWS[:2]
+        conn.executemany(
+            'INSERT INTO chat_message_claude_events VALUES '
+            '(:event_uuid, :message_id, :role, :claude_session_id, :context_id, '
+            ':context_epoch, :resident_generation, :jsonl_byte_offset)', mappings,
+        )
+        conn.commit()
+        rows = daily_runtime._load_context_source_rows({14716, 14717}, db_path=db_path)
+        members = build_source_snapshot(
+            turns=derive_completed_turns(list(rows.values())), events=(),
+            local_day='2026-11-07', source_watermark=14717, created_at='2026-11-07T12:00:00Z',
+        ).members
+        graph = _graph(wake_native=False)
+        graph.by_uuid['t1u'].raw['message']['content'] = [
+            {'type': 'text', 'text': '你看这张图'},
+            {'type': 'image', 'source': {'type': 'base64', 'data': 'aGlzdG9yeS1pbWFnZQ=='}},
+        ]
+        graph.by_uuid['t1a'].raw['message']['content'][0]['text'] = '图片里的文字'
+        plan = _plan()
+        plan.db_path, plan.assembly = db_path, {}
+        marker = '[历史图片 message_id=14716，共2张]'
+
+        native = self._prepare(members, graph=graph, rows=mappings, plan=plan, canonical_db=conn)
+        self.assertTrue(native.ok, (native.error_code, native.warnings))
+        self.assertEqual(native.candidate.readable_raw_representation_ids, ())
+        output = native.candidate.serialized_jsonl
+        self.assertEqual(output.count(marker), 1)
+        self.assertIn('你看这张图', output)
+        self.assertIn('图片里的文字', output)
+        for absent in ('"type":"image"', 'aGlzdG9yeS1pbWFnZQ==', *image_urls, 'CURRENT_ONLY'):
+            self.assertNotIn(absent, output)
+
+        old_mappings = tuple(dict(row, resident_generation=0) for row in mappings)
+        readable = self._prepare(members, graph=graph, rows=old_mappings, plan=plan, canonical_db=conn)
+        self.assertTrue(readable.ok, (readable.error_code, readable.warnings))
+        self.assertEqual(readable.candidate.serialized_jsonl, '')
+        blocks = daily_runtime._capacity_readable_raw_blocks(
+            plan, context_plan=_context_plan(members), chunk_bodies={},
+            readable_ids=readable.candidate.readable_raw_representation_ids,
+        )
+        body = blocks[0]['body']
+        self.assertIn('你看这张图\n' + marker, body)
+        self.assertEqual(body.count(marker), 1)
+        self.assertIn('图片里的文字', body)
+        for absent in (*image_urls, 'CURRENT_ONLY'):
+            self.assertNotIn(absent, body)
 
     def test_mapping_of_another_generation_is_not_native_here(self):
         rows = tuple(dict(row, resident_generation=0) for row in TURN_ROWS)

@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 from chat.attachment_contract import (
+    AttachmentValidationError,
     MAX_IMAGE_OUTPUT_BYTES,
+    reencode_chat_image,
     safe_child_path,
 )
 
@@ -186,6 +188,7 @@ def build_claude_user_content(
     *,
     resolve_fn: Optional[Callable[[str], tuple[bytes, str]]] = None,
     attachment_parts: Optional[Sequence[dict[str, str]]] = None,
+    max_image_dimension: Optional[int] = None,
 ) -> Any:
     """Build Claude Code user ``content`` (str or multimodal list).
 
@@ -201,6 +204,16 @@ def build_claude_user_content(
         return str(text or '')
 
     resolve = resolve_fn or (lambda r: resolve_image_bytes(r))
+
+    def image_block(ref: str) -> dict[str, Any]:
+        data, mime = resolve(ref)
+        if max_image_dimension is not None:
+            try:
+                data, _, mime = reencode_chat_image(data, max_dimension=max_image_dimension)
+            except AttachmentValidationError as exc:
+                raise VisionBridgeError(str(exc), code='invalid_image') from exc
+        return build_image_content_block(data, mime)
+
     blocks: list[dict[str, Any]] = []
     text_part = _strip_trailing_image_placeholder(str(text or ''))
     if text_part.strip() == _IMAGE_PLACEHOLDER:
@@ -221,15 +234,13 @@ def build_claude_user_content(
                 ref = str(part.get('ref') or '').strip()
                 if not ref:
                     raise VisionBridgeError('empty image reference', code='missing_attachment')
-                data, mime = resolve(ref)
-                blocks.append(build_image_content_block(data, mime))
+                blocks.append(image_block(ref))
             else:
                 raise VisionBridgeError('unexpected attachment part type: %s' % kind,
                                         code='bad_content_part')
     else:
         for ref in refs:
-            data, mime = resolve(ref)
-            blocks.append(build_image_content_block(data, mime))
+            blocks.append(image_block(ref))
 
     if not blocks:
         raise VisionBridgeError('image-only turn produced no content',

@@ -448,7 +448,7 @@ def _load_mapping_for_messages(
         file_name_col = 'm.file_name' if 'file_name' in cols else "'' AS file_name"
         attachments_col = 'm.attachments' if 'attachments' in cols else "'' AS attachments"
         db_rows = conn.execute(
-            f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col},
+            f'''SELECT e.event_uuid AS event_uuid, m.id AS message_id, m.content AS content, {image_col},
                        {file_url_col}, {file_name_col}, {attachments_col}
                 FROM chat_message_claude_events e
                 JOIN chat_messages m ON m.id = e.message_id
@@ -462,6 +462,7 @@ def _load_mapping_for_messages(
                 file_url=str(row['file_url'] or ''),
                 file_name=str(row['file_name'] or ''),
                 attachments=row['attachments'],
+                historical_message_id=int(row['message_id']),
             )
     return canonical, mid_to_event, event_to_mid
 
@@ -1057,6 +1058,7 @@ def prepare_capacity_swap_for_context_plan(
             file_url=str(anchor_row.get('file_url') or ''),
             file_name=str(anchor_row.get('file_name') or ''),
             attachments=anchor_row.get('attachments'),
+            historical_message_id=int(anchor_row['id']),
         )
         if anchor_canonical is None:
             return _failure(

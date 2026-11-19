@@ -279,12 +279,20 @@ class VisionBridgeUnitTests(unittest.TestCase):
     def test_t6_hot_resident_image_turn_no_respawn(self):
         import cc_resident
 
+        from PIL import Image
+        from chat import cc_vision_bridge as vb
+        from chat.daily_runtime import format_resident_turn_content
+
         ref = '/static/uploads/probe.webp'
-        content = build_claude_user_content(
-            text='看图',
-            image_refs=[ref],
-            resolve_fn=self._resolve,
-        )
+        path = self.upload_dir / 'probe.webp'
+        Image.new('RGB', (944, 2048)).save(path, 'WEBP')
+        stored_bytes = path.read_bytes()
+        original_files = set(self.upload_dir.iterdir())
+        with mock.patch.object(vb, 'resolve_image_bytes', side_effect=self._resolve):
+            content = format_resident_turn_content(
+                assembly={}, user_content='看图', is_cold=False, is_respawn=False,
+                user_attachments=[{'type': 'image', 'url': ref}],
+            )
 
         writes: list[str] = []
 
@@ -356,7 +364,13 @@ class VisionBridgeUnitTests(unittest.TestCase):
             b for b in payload['message']['content'] if b.get('type') == 'image'
         )
         self.assertEqual(image_block['source']['media_type'], 'image/webp')
-        self.assertTrue(image_block['source']['data'])
+        with Image.open(io.BytesIO(base64.b64decode(image_block['source']['data']))) as image:
+            image.load()
+            self.assertEqual(image.size, (354, 768))
+        with Image.open(path) as stored:
+            self.assertEqual(stored.size, (944, 2048))
+        self.assertEqual(path.read_bytes(), stored_bytes)
+        self.assertEqual(set(self.upload_dir.iterdir()), original_files)
         # No respawn/kill from vision turn itself
         self.assertEqual(kill_calls, [])
         self.assertTrue(any(e[0] == 'done' for e in events))
@@ -610,6 +624,31 @@ class DailyRuntimeVisionWiringTests(unittest.TestCase):
         self.assertEqual(image_block['source']['media_type'], 'image/webp')
         self.assertTrue(image_block['source']['data'])
         assert_claude_user_content_safe(out)
+
+    def test_daily_image_dimensions_preserve_ratio_without_upscaling(self):
+        from PIL import Image
+        from chat import cc_vision_bridge as vb
+        from chat.daily_runtime import format_resident_turn_content
+
+        for filename, mime, size, expected in (
+            ('landscape.jpg', 'image/jpeg', (1536, 864), (768, 432)),
+            ('small.png', 'image/png', (320, 500), (320, 500)),
+        ):
+            with self.subTest(filename=filename):
+                path = self.upload_dir / filename
+                Image.new('RGB', size).save(path)
+                with mock.patch.object(vb, 'resolve_image_bytes', side_effect=lambda ref: (
+                    resolve_image_bytes(ref, upload_dir=str(self.upload_dir))
+                )):
+                    content = format_resident_turn_content(
+                        assembly={}, user_content='', is_cold=False, is_respawn=False,
+                        user_image_url='/static/uploads/' + filename,
+                    )
+                block = next(part for part in content if part['type'] == 'image')
+                self.assertEqual(block['source']['media_type'], mime)
+                with Image.open(io.BytesIO(base64.b64decode(block['source']['data']))) as image:
+                    image.load()
+                    self.assertEqual(image.size, expected)
 
     def test_daily_text_only_unchanged(self):
         from chat.daily_runtime import format_resident_turn_content
