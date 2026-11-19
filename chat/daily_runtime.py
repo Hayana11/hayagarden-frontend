@@ -8703,7 +8703,7 @@ def ensure_resident_and_stream(
         # Generation/session door-lock: before ensure_alive (spawn) and stdin.
         door = peek_registered_respawn_decision(plan, resident, static_system)
         if (
-            plan.turn_mode == 'wake'
+            getattr(plan, 'turn_mode', 'chat') == 'wake'
             and plan.manifest.get('turn_kind') == 'hot'
             and (not door.get('requires_respawn') or door.get('capacity_swap'))
         ):
