@@ -1068,8 +1068,8 @@ export function ChatScreen() {
     [contextLimits.softLimit, msgs],
   );
   const capacityTitle = useMemo(
-    () => `上下文容量；${fmtCapacityK(contextLimits.softLimit)} 为 soft Swap 门槛，另有 ${contextLimits.maxResidentTurns} 轮触发`,
-    [contextLimits.maxResidentTurns, contextLimits.softLimit],
+    () => `上下文容量，${fmtCapacityK(contextLimits.softLimit)} 为容量换页软阈值`,
+    [contextLimits.softLimit],
   );
   const dateLabel = useMemo(() => {
     const now = new Date();

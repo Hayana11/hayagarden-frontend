@@ -372,17 +372,14 @@ export function fmtTokens(n: number): string {
 
 /** Fallbacks used until the read-only runtime authority is available. */
 export const CAPACITY_SOFT_LIMIT = 150000;
-export const MAX_RESIDENT_TURNS = 45;
 
 export interface ChatContextLimits {
   softLimit: number;
-  maxResidentTurns: number;
   authoritative: boolean;
 }
 
 export const DEFAULT_CHAT_CONTEXT_LIMITS: ChatContextLimits = {
   softLimit: CAPACITY_SOFT_LIMIT,
-  maxResidentTurns: MAX_RESIDENT_TURNS,
   authoritative: false,
 };
 
@@ -395,14 +392,10 @@ export function normalizeChatContextLimits(raw: unknown): ChatContextLimits {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_CHAT_CONTEXT_LIMITS };
   const data = raw as Record<string, unknown>;
   const softRaw = data.context_soft_limit ?? data.contextSoftLimit;
-  const turnsRaw = data.max_resident_turns ?? data.maxResidentTurns;
   const softLimit = positiveInteger(softRaw, CAPACITY_SOFT_LIMIT);
-  const maxResidentTurns = positiveInteger(turnsRaw, MAX_RESIDENT_TURNS);
   return {
     softLimit,
-    maxResidentTurns,
-    authoritative: Number.isInteger(Number(softRaw)) && Number(softRaw) > 0
-      && Number.isInteger(Number(turnsRaw)) && Number(turnsRaw) > 0,
+    authoritative: Number.isInteger(Number(softRaw)) && Number(softRaw) > 0,
   };
 }
 

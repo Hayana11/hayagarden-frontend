@@ -643,7 +643,7 @@ class ResidentFileRefTests(unittest.TestCase):
         with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
              mock.patch('chat.cc_runtime.require_managed_claude_runtime', return_value='2.1.280'), \
              mock.patch('chat.cc_runtime.claude_cmd_for_version', side_effect=lambda _version, *a, **k: ['/managed/2.1.280', *a]):
-            sess._spawn('STATIC', {}, reason='turn_limit')
+            sess._spawn('STATIC', {}, reason='soft_context')
         self.assertEqual(sess.committed_file_hashes, set())
 
     def test_commit_stores_url_hash_pairs(self):
@@ -976,10 +976,9 @@ class StreamWatchdogSemanticsTests(unittest.TestCase):
 
 
 class ResidentRespawnTests(unittest.TestCase):
-    def test_turn_limit_triggers_before_next_send(self):
+    def test_soft_context_triggers_before_next_send(self):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
         with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: {
-            'CC_MAX_RESIDENT_TURNS': 2,
             'CC_CONTEXT_SOFT_LIMIT': 90_000,
             'CC_CONTEXT_HARD_LIMIT': 120_000,
             'CC_MIN_TURNS_BETWEEN_RESPAWNS': 5,
@@ -988,14 +987,15 @@ class ResidentRespawnTests(unittest.TestCase):
             sess._cold = False
             sess._system_text = 'STATIC'
             sess._last_used = 10**12
-            sess._resident_turn_count = 2
+            sess._last_round_context = 90_000
+            sess._turns_since_respawn = 5
             with mock.patch.object(sess, '_spawn') as spawn:
                 sess.ensure_alive('STATIC', {})
                 spawn.assert_called()
-                self.assertEqual(spawn.call_args.kwargs.get('reason'), 'turn_limit')
+                self.assertEqual(spawn.call_args.kwargs.get('reason'), 'soft_context')
 
-    def test_r1_hot_thresholds_and_turn_limit_defaults(self):
-        def decide(*, context, turns):
+    def test_context_thresholds_ignore_total_turn_count(self):
+        def decide(*, context, turns, since_respawn=5):
             sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
             sess._proc = FakeProc([])
             sess._cold = False
@@ -1003,14 +1003,16 @@ class ResidentRespawnTests(unittest.TestCase):
             sess._last_used = 10**12
             sess._last_round_context = context
             sess._resident_turn_count = turns
-            sess._turns_since_respawn = 5
+            sess._turns_since_respawn = since_respawn
             with mock.patch('cc_resident._cfg_int', side_effect=lambda key, default: default):
                 return sess._decide_respawn_reason('STATIC')
 
         self.assertIsNone(decide(context=149_999, turns=1))
         self.assertEqual(decide(context=150_000, turns=1), 'soft_context')
-        self.assertEqual(decide(context=180_000, turns=1), 'hard_context')
-        self.assertEqual(decide(context=10_000, turns=45), 'turn_limit')
+        self.assertIsNone(decide(context=150_000, turns=500, since_respawn=4))
+        self.assertEqual(decide(context=180_000, turns=500, since_respawn=4), 'hard_context')
+        self.assertIsNone(decide(context=10_000, turns=45))
+        self.assertIsNone(decide(context=10_000, turns=500))
 
     def test_spawn_resets_snapshots(self):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
@@ -1023,14 +1025,14 @@ class ResidentRespawnTests(unittest.TestCase):
         with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
              mock.patch('chat.cc_runtime.require_managed_claude_runtime', return_value='2.1.280'), \
              mock.patch('chat.cc_runtime.claude_cmd_for_version', side_effect=lambda _version, *a, **k: ['/managed/2.1.280', *a]):
-            sess._spawn('STATIC', {}, reason='turn_limit')
+            sess._spawn('STATIC', {}, reason='soft_context')
         self.assertEqual(sess.last_state_snapshot, {})
         self.assertEqual(sess.last_group_message_id, 0)
         self.assertFalse(sess.group_cursor_initialized)
         self.assertEqual(sess._resident_turn_count, 0)
         self.assertIsNone(sess.last_rel_fingerprint)
         self.assertEqual(sess.turns_since_rel_sent, 0)
-        self.assertEqual(sess.pending_respawn_reason, 'turn_limit')
+        self.assertEqual(sess.pending_respawn_reason, 'soft_context')
 
 
 class GroupQueryContractTests(unittest.TestCase):

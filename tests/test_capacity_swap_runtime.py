@@ -433,7 +433,7 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
 
         old_proc = _Proc()
         new_proc = _Proc()
-        resident = _DoorResident('turn_limit', session_id='sid-seam-old')
+        resident = _DoorResident('soft_context', session_id='sid-seam-old')
         resident.cwd = self.tmp
         resident._proc = old_proc
         resident.generation = 1
@@ -448,7 +448,7 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             source_resident_generation=src_gen,
             target_resident_generation=src_gen + 1,
             candidate_session_id=new_sid,
-            trigger_reason='turn_limit',
+            trigger_reason='soft_context',
         )
         jsonl_path = session_jsonl_path(self.tmp, new_sid)
         assert jsonl_path is not None

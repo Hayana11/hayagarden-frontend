@@ -18,9 +18,8 @@ assert.equal(formatCapacityLabel(49515, 160000), '49.5k / 160k');
 assert.equal(formatCapacityLabel(null), '— / 150k');
 assert.equal(formatCapacityLabel(0), '— / 150k');
 assert.equal(CAPACITY_SOFT_LIMIT, 150000);
-assert.deepEqual(normalizeChatContextLimits({ context_soft_limit: 160000, max_resident_turns: 46 }), {
+assert.deepEqual(normalizeChatContextLimits({ context_soft_limit: 160000 }), {
   softLimit: 160000,
-  maxResidentTurns: 46,
   authoritative: true,
 });
 assert.equal(DEFAULT_CHAT_CONTEXT_LIMITS.softLimit, 150000);
@@ -63,6 +62,6 @@ assert.doesNotMatch(
   screen.slice(screen.indexOf('capacityLabel'), screen.indexOf('capacityLabel') + 400),
   /compactToolbar/,
 );
-assert.match(screen, /contextLimits\.maxResidentTurns/);
+assert.doesNotMatch(screen, /轮触发|maxResidentTurns/);
 
 console.log('test-chat-capacity-header: ok');

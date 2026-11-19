@@ -243,7 +243,6 @@ class ModelChangedDecisionTests(unittest.TestCase):
         sess = self._alive_session(identity=None)
         with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
             with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: {
-                'CC_MAX_RESIDENT_TURNS': 30,
                 'CC_CONTEXT_SOFT_LIMIT': 90_000,
                 'CC_CONTEXT_HARD_LIMIT': 120_000,
                 'CC_MIN_TURNS_BETWEEN_RESPAWNS': 5,
@@ -256,16 +255,15 @@ class ModelChangedDecisionTests(unittest.TestCase):
             with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: d):
                 self.assertIsNone(sess._decide_respawn_reason('STATIC'))
 
-    def test_turn_limit_when_model_unchanged(self):
-        sess = self._alive_session(identity='default', turn_count=2)
+    def test_many_turns_reuse_resident_when_model_unchanged(self):
+        sess = self._alive_session(identity='default', turn_count=500)
         with mock.patch.object(config_store, 'get', side_effect=fake_get({'CC_CHAT_MODEL': ''})):
             with mock.patch('cc_resident._cfg_int', side_effect=lambda k, d: {
-                'CC_MAX_RESIDENT_TURNS': 2,
                 'CC_CONTEXT_SOFT_LIMIT': 90_000,
                 'CC_CONTEXT_HARD_LIMIT': 120_000,
                 'CC_MIN_TURNS_BETWEEN_RESPAWNS': 5,
             }.get(k, d)):
-                self.assertEqual(sess._decide_respawn_reason('STATIC'), 'turn_limit')
+                self.assertIsNone(sess._decide_respawn_reason('STATIC'))
 
     def test_identity_mismatch_means_respawn(self):
         sess = self._alive_session(identity='explicit:claude-sonnet-5')

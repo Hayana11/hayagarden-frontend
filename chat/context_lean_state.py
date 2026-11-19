@@ -21,8 +21,7 @@ from chat.system_builder import format_state_snapshot
 _LOG = logging.getLogger('hayagarden.context_lean_state')
 
 STATE_SCHEMA_VERSION = 1
-# Re-anchor before CC_MAX_RESIDENT_TURNS (default 30); P-CONTEXT-OBS showed
-# stable generation across cold→hot turns 1–3 — periodic anchor limits drift.
+# Periodically re-anchor state to limit drift during long-lived generations.
 REANCHOR_TURN_INTERVAL = 24
 # ~3–4 cumulative delta blocks before forced full anchor.
 REANCHOR_DELTA_CHAR_THRESHOLD = 3500

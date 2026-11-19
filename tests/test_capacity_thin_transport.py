@@ -417,6 +417,73 @@ class ThinCapacityPrepareTests(unittest.TestCase):
 
 
 class ThinCapacityBootstrapTests(unittest.TestCase):
+    def test_history_image_file_contents_do_not_change_raw_budget(self):
+        import io
+
+        from continuity.context_plan import build_context_plan
+        from continuity.sources import row_logical_size
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            db_path = str(root / 'memories.db')
+            image_path = root / 'history.png'
+            image_ref = '/static/uploads/history.png'
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, '
+                    'content TEXT, created_at TEXT, source_kind TEXT, attachments TEXT)'
+                )
+                conn.executemany(
+                    'INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?)',
+                    [
+                        (123, 'hayana', '你看这张图', '2026-11-07 10:00:00', 'chat',
+                         json.dumps([{'type': 'image', 'url': image_ref}])),
+                        (124, 'assistant', '看到了', '2026-11-07 10:01:00', 'chat', '[]'),
+                    ],
+                )
+            plan = types.SimpleNamespace(db_path=db_path, user_message_id=125, assembly={})
+            image_reads = []
+
+            def guard_image_open(real_open):
+                def guarded_open(file, *args, **kwargs):
+                    if isinstance(file, (str, os.PathLike)) and Path(file).name == image_path.name:
+                        image_reads.append(file)
+                        raise AssertionError('history image file opened')
+                    return real_open(file, *args, **kwargs)
+                return guarded_open
+
+            budgets = []
+            for contents in (b'first file contents', b'different bytes' * 256, b''):
+                with self.subTest(file_size=len(contents)):
+                    image_path.write_bytes(contents)
+                    with mock.patch('builtins.open', side_effect=guard_image_open(open)), \
+                         mock.patch('io.open', side_effect=guard_image_open(io.open)):
+                        rows = daily_runtime._load_context_source_rows({123, 124}, db_path=db_path)
+                        members = build_source_snapshot(
+                            turns=derive_completed_turns(list(rows.values())), events=(),
+                            local_day='2026-11-07', source_watermark=124,
+                            created_at='2026-11-07T10:01:00Z',
+                        ).members
+                        context_plan = build_context_plan(members)
+                        representation, = context_plan.representations
+                        blocks = daily_runtime._capacity_readable_raw_blocks(
+                            plan, context_plan=context_plan, chunk_bodies={},
+                            readable_ids=(representation.representation_id,),
+                        )
+                    self.assertEqual(representation.kind, 'raw')
+                    self.assertEqual(representation.estimated_tokens, members[0].logical_size)
+                    self.assertLess(representation.estimated_tokens, 512)
+                    budgets.append((
+                        row_logical_size(rows[123]), members[0].logical_size,
+                        representation.estimated_tokens, context_plan.plan_hash,
+                    ))
+                    self.assertEqual(
+                        blocks[0]['body'],
+                        '[TURN]\nUSER:\n你看这张图\n[历史图片 message_id=123]\n\nASSISTANT:\n看到了',
+                    )
+            self.assertEqual(image_reads, [])
+            self.assertEqual(len(set(budgets)), 1)
+
     def test_case4_chunk_and_readable_raw_install_once_in_plan_order(self):
         members = _members()
         context_plan = _context_plan(members, chunk=True)
@@ -689,7 +756,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
         heartbeat = mock.Mock(failed=False)
         heartbeat.stop.return_value = False
         doors = iter([
-            {'requires_respawn': True, 'capacity_swap': True, 'reason': 'turn_limit'},
+            {'requires_respawn': True, 'capacity_swap': True, 'reason': 'soft_context'},
             {'requires_respawn': False},
         ])
         with mock.patch.object(daily_runtime, 'verify_epoch_token'), \
@@ -894,7 +961,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
                     prepared = prepare_capacity_swap_for_context_plan(
                         plan=carrier_plan,
                         context_plan=context_plan,
-                        trigger_reason='turn_limit',
+                        trigger_reason='soft_context',
                         static_system='TARGET',
                     )
                 sent_carriers.append(prepared)

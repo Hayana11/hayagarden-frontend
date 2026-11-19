@@ -32,11 +32,11 @@ from chat.claude_transcript_transform import (
 from chat.claude_transcript_validator import ValidatorOptions, validate_transcript_events
 from chat.daily_context import _USER_AUTHORS
 
-# Frozen Capacity Swap trigger reasons (must match ``cc_resident._decide_respawn_reason``).
+# Capacity Swap trigger reasons, including historical receipts.
 CAPACITY_SWAP_REASONS = frozenset({
     'soft_context',
     'hard_context',
-    'turn_limit',
+    'turn_limit',  # Legacy read compatibility only; live resident decisions no longer emit turn_limit.
 })
 
 REJECTED_NON_CAPACITY_REASONS = frozenset({
