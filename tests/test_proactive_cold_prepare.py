@@ -318,6 +318,7 @@ class GatewayColdRouteTests(_GatewayBase):
         with self.assertRaises(RuntimeError) as caught:
             self.run_wake('normal', rid='rid-post')
         self.assertNotIsInstance(caught.exception, self.gw.UnifiedProactivePreModelFailed)
+        self.assertEqual(len(self.resident.sent), 1)
         self.assertIsNone(dr.get_local_binding())
         self.assertGreaterEqual(self.resident.killed, 1)
         self.fence.finish.assert_called_once()

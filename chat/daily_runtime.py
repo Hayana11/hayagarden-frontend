@@ -5735,28 +5735,30 @@ def prepare_daily_turn(
                 db_path=db_path,
             )
 
+        binding_plan = DailyTurnPlan(
+            request_id=req_id, chat_id=chat_id, local_day=origin_day,
+            context_id=context_id, context_epoch=context_epoch,
+            resident_generation=resident_generation, resident_key=resident_key,
+            user_message_id=None if wake else int(user_message_id),
+            history_anchor_message_id=anchor, epoch_token={},
+            lease_owner=owner, is_cold=True, is_respawn=False,
+            cursor_before=db_cursor, assembly={}, manifest={},
+            db_path=db_path, tool_profile=DAILY_TOOL_PROFILE,
+            user_created_at=user_created_at, origin_local_day=origin_day,
+            turn_started_at=turn_started_at,
+        )
         is_cold = not _can_hot_turn(
-            plan=DailyTurnPlan(
-                request_id=req_id, chat_id=chat_id, local_day=origin_day,
-                context_id=context_id, context_epoch=context_epoch,
-                resident_generation=resident_generation, resident_key=resident_key,
-                user_message_id=None if wake else int(user_message_id),
-                history_anchor_message_id=anchor, epoch_token={},
-                lease_owner=owner, is_cold=True, is_respawn=False,
-                cursor_before=db_cursor, assembly={}, manifest={},
-                db_path=db_path, tool_profile=DAILY_TOOL_PROFILE,
-                user_created_at=user_created_at, origin_local_day=origin_day,
-                turn_started_at=turn_started_at,
-            ),
-            resident=resident or object(),
-            db_cursor=db_cursor,
+            plan=binding_plan, resident=resident or object(), db_cursor=db_cursor,
         )
         if wake and not is_cold and not (_cold_reprepare or _capacity_swap_reprepare):
-            # The caller proved the resident cold; it turned hot meanwhile.
-            raise DailyRuntimeError(
-                'proactive cold turn found a hot resident',
-                error_code='proactive_cold_resident_became_hot',
-            )
+            # A bound process can still require the registered-session respawn.
+            # Leave its lease, generation and reprepare to the shared stream.
+            door = peek_registered_respawn_decision(binding_plan, resident, static_system)
+            if not door.get('requires_respawn') or door.get('capacity_swap'):
+                raise DailyRuntimeError(
+                    'proactive cold turn found a hot resident',
+                    error_code='proactive_cold_resident_became_hot',
+                )
         if _capacity_swap_reprepare:
             # Same-context Capacity Swap: forged transcript already carries history.
             # Force hot-like assembly (no cold history / carryover / handoff replay).
@@ -8700,6 +8702,16 @@ def ensure_resident_and_stream(
 
         # Generation/session door-lock: before ensure_alive (spawn) and stdin.
         door = peek_registered_respawn_decision(plan, resident, static_system)
+        if (
+            getattr(plan, 'turn_mode', 'chat') == 'wake'
+            and plan.manifest.get('turn_kind') == 'hot'
+            and (not door.get('requires_respawn') or door.get('capacity_swap'))
+        ):
+            # This cold Wake was admitted only to reprepare before stdin.
+            raise DailyRuntimeError(
+                'proactive cold turn found a hot resident',
+                error_code='proactive_cold_resident_became_hot',
+            )
         effective_system = str(door.get('effective_system') or static_system)
         # A capacity_swap generation runs with SYSTEM_SUFFIX_V1 appended, so
         # the live identity check must compare against this effective text,
