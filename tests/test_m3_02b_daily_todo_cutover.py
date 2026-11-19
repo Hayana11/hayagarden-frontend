@@ -38,7 +38,7 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertIn("mcp__capability__memory_search", allowed)
         self.assertNotIn("mcp__home__search_memories", allowed)
         self.assertIn("mcp__home__search_memories", disallowed)
-        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__home__get_countdowns", "mcp__capability__memory_search", "mcp__capability__memory_write", "mcp__capability__diary_write", "mcp__capability__task_timer_start", "mcp__capability__home_light_status", "mcp__capability__todo_read", "mcp__capability__todo_write", "mcp__capability__ledger_read", "mcp__capability__ledger_budget_read", "mcp__capability__ledger_write"})
+        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__home__get_countdowns", "mcp__home__xhs_status", "mcp__home__xhs_read", "mcp__home__x_state", "mcp__home__x_read", "mcp__home__x_post", "mcp__capability__memory_search", "mcp__capability__memory_write", "mcp__capability__diary_write", "mcp__capability__task_timer_start", "mcp__capability__home_light_status", "mcp__capability__todo_read", "mcp__capability__todo_write", "mcp__capability__ledger_read", "mcp__capability__ledger_budget_read", "mcp__capability__ledger_write"})
 
     def test_runtime_off_hides_both_provider_surfaces(self):
         plan = self.plan(RUNTIME_STATE_OFF)

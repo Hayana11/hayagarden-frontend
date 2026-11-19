@@ -1,0 +1,2 @@
+CRON_TZ=UTC
+30 21 * * * root cd /opt/frontend && /usr/bin/flock -n /run/lock/hayagarden-postman.lock /usr/bin/python3.11 -m tools.postman >> /var/log/hayagarden-postman.log 2>&1

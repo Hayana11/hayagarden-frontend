@@ -219,6 +219,10 @@ class LegacyIsolationTests(unittest.TestCase):
                 # Passive recall: reads through memory_kernel_read and skips
                 # itself unless memory.kernel_write is on.
                 "tools/memory_surface.py",
+                # Review Core: the one Candidate -> Kernel committer. It writes through
+                # MemoryKernel directly (never memory_tool) and only on an operator-run
+                # non-dry run; the scheduled run is --dry-run and writes no Kernel rows.
+                "tools/memory_review.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):

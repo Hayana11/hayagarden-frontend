@@ -85,7 +85,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         conn.close()
 
     def test_a_bindings_come_from_capability_manifest(self):
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
             ("health.read",),
@@ -210,11 +210,16 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 1)
+        self.assertEqual(len(home), 6)
         self.assertEqual(
             set(home),
             {
                 "mcp__home__get_countdowns",
+                "mcp__home__xhs_status",
+                "mcp__home__xhs_read",
+                "mcp__home__x_state",
+                "mcp__home__x_read",
+                "mcp__home__x_post",
             },
         )
         for name in NON_P3_HOME_MCP_TOOLS:
@@ -246,6 +251,23 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertTrue(external_cfg["env"]["UH_A0_TURN_LEASE_PATH"])
         self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
+
+    def test_home_http_receives_resident_owned_turn_lease_path(self):
+        lease_path = (
+            "/tmp/hayagarden-uh-a0-turn-leases/"
+            + ("a" * 32)
+            + ".json"
+        )
+        cfg = build_uh_a0_mcp_config(
+            env={"UH_A0_TURN_LEASE_PATH": lease_path}
+        )
+        self.assertEqual(
+            cfg["mcpServers"]["home"]["headers"],
+            {
+                "X-UH-A0-Profile": "uh_a0",
+                "X-UH-A0-Turn-Lease-Path": lease_path,
+            },
+        )
 
     def _external_item(self):
         return {
@@ -333,6 +355,25 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             headers.append(cfg["mcpServers"]["capability"]["headers"]["X-UH-A0-Turn-Lease-Path"])
             self.assertEqual(headers[-1], env["UH_A0_TURN_LEASE_PATH"])
         self.assertNotEqual(headers[0], headers[1])
+
+    def test_upstream_mail_tools_are_in_the_shared_physical_surface(self):
+        tools = tuple(
+            {
+                "surface_tool_name": f"fedya_mail__{name}",
+                "control_id": f"ext:mail:{name}",
+                "fingerprint": (str(index) * 64)[:64],
+                "source_registry_revision": 2,
+            }
+            for index, name in enumerate(("list_recent", "get_message", "send_email"), 1)
+        )
+        with mock.patch(
+            "tools.cc_capability_adapter._external_surface_catalog",
+            return_value=([{"server_id": "mail"}], tools),
+        ):
+            plan = build_uh_a0_spawn_plan(cwd=self._tmp.name, env={})
+        expected = {f"mcp__external__fedya_mail__{name}" for name in ("list_recent", "get_message", "send_email")}
+        self.assertTrue(expected.issubset(set(plan["external_mcp_tools"])))
+        self.assertTrue(expected.issubset(set(plan["surface_allowlist"])))
 
     def test_build_mcp_config_can_omit_external_only(self):
         full = build_uh_a0_mcp_config(env={})

@@ -6,6 +6,8 @@ on:
       - 'chat/context_window.py'
       - 'chat/daily_context.py'
       - 'chat/daily_runtime.py'
+      - 'chat/capacity_swap*.py'
+      - 'tests/test_capacity_*.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
       - 'tests/test_context_window*.py'
@@ -17,6 +19,8 @@ on:
       - 'chat/context_window.py'
       - 'chat/daily_context.py'
       - 'chat/daily_runtime.py'
+      - 'chat/capacity_swap*.py'
+      - 'tests/test_capacity_*.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
       - 'tests/test_context_window*.py'
@@ -59,6 +63,7 @@ jobs:
             tests.test_context_window_resident \
             tests.test_manual_context_runtime \
             tests.test_capacity_swap_runtime \
+            tests.test_capacity_thin_transport \
             tests.test_daily_soft_window \
             tests.test_daily_runtime \
             tests.test_daily_context_bff \

@@ -11,6 +11,7 @@ Inputs are explicit parameters only. This module never:
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
 import uuid
@@ -574,8 +575,8 @@ def transform_transcript(graph: TranscriptGraph, request: TransformRequest) -> T
 
 
 def emit_anchor_user_event(
-    src: TranscriptEvent,
     *,
+    created_at: str,
     new_session_id: str,
     cwd: str,
     version: str,
@@ -583,28 +584,39 @@ def emit_anchor_user_event(
     canonical: Any,
     parent_uuid: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Emit one Window Anchor user row from authoritative DB mapping only."""
-    if src.event_role != EventRole.CANDIDATE_USER:
-        raise TransformError(TransformErrorCode.INVALID_POLICY, 'anchor_not_candidate_user')
+    """Emit one Window Anchor user row from authoritative database fields."""
+    created_at_text = str(created_at or '').strip()
+    if not created_at_text:
+        raise TransformError(TransformErrorCode.INVALID_POLICY, 'anchor_created_at_missing')
+    try:
+        parsed_created_at = datetime.datetime.fromisoformat(
+            created_at_text.replace('Z', '+00:00').replace(' ', 'T', 1)
+        )
+    except ValueError as exc:
+        raise TransformError(
+            TransformErrorCode.INVALID_POLICY, 'anchor_created_at_invalid',
+        ) from exc
+    timestamp = parsed_created_at.isoformat(timespec='milliseconds')
+    if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() == datetime.timedelta(0):
+        timestamp = timestamp.removesuffix('+00:00') + 'Z'
     if isinstance(canonical, str):
         if not canonical.strip():
-            raise TransformError(TransformErrorCode.MAPPING_EMPTY, src.event_uuid)
+            raise TransformError(TransformErrorCode.MAPPING_EMPTY, 'anchor_canonical')
         user_content: Any = canonical
     elif isinstance(canonical, list):
         if not canonical:
-            raise TransformError(TransformErrorCode.MAPPING_EMPTY, src.event_uuid)
+            raise TransformError(TransformErrorCode.MAPPING_EMPTY, 'anchor_canonical')
         user_content = copy.deepcopy(canonical)
     else:
         raise TransformError(
             TransformErrorCode.INVALID_POLICY,
             f'bad_canonical_type:{type(canonical).__name__}',
         )
-    etype = src.event_type.value if src.event_type.value != 'unknown' else src.raw.get('type')
     return {
-        'type': etype,
+        'type': 'user',
         'uuid': new_event_uuid,
         'parentUuid': parent_uuid,
-        'timestamp': src.raw.get('timestamp'),
+        'timestamp': timestamp,
         'sessionId': new_session_id,
         'cwd': cwd,
         'version': version,

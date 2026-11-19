@@ -69,7 +69,7 @@ class GalleryCapabilityCutoverTests(unittest.TestCase):
         self.assertTrue(set(GALLERY_IDS).issubset(DEFAULT_ALLOWED_CAPABILITIES["wake"]))
         self.assertEqual(
             DEFAULT_ALLOWED_CAPABILITIES["wake"],
-            DEFAULT_ALLOWED_CAPABILITIES["chat"],
+            tuple(cid for cid in DEFAULT_ALLOWED_CAPABILITIES["chat"] if cid != "ledger.write"),
         )
         self.assertTrue(set(GALLERY_IDS).isdisjoint(DEFAULT_ALLOWED_CAPABILITIES["task"]))
         self.assertEqual(TURN_LEASE_FIELDS, (

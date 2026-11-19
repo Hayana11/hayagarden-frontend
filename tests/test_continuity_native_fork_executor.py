@@ -145,6 +145,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         def _fake_run_subprocess(*, cmd, cwd, env, stdin_payload, timeout_seconds, popen_factory=None):
             recorded['cmd'] = cmd
             recorded['cwd'] = cwd
+            recorded['env'] = dict(env)
             recorded['stdin_payload'] = stdin_payload
             return SubprocessRunResult(
                 exit_code=kwargs.get('exit_code', 0),
@@ -184,6 +185,9 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(result.usage['cache_read_input_tokens'], 9000)
         self.assertEqual(self.fork_directory, self.parent_cwd)
         self.assertEqual(recorded['cwd'], self.parent_cwd)
+        self.assertEqual(recorded['env']['DISABLE_AUTO_COMPACT'], '1')
+        self.assertEqual(recorded['env']['CLAUDE_CODE_DISABLE_AUTO_MEMORY'], '1')
+        self.assertNotIn('DISABLE_COMPACT', recorded['env'])
         self.assertIn('continuity_native_fork_parent_session_hash', result.usage)
         self.assertEqual(result.usage['continuity_native_fork_scope_completed_turns'], 3)
         self.assertEqual(result.usage['continuity_native_fork_scope_wake_count'], 1)

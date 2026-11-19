@@ -107,7 +107,9 @@ def _chat_stream_failure_event(exc, *, partial_rescue=False):
         error_type = str(getattr(exc, 'provider_error_type', None) or '')
         category = str(getattr(exc, 'provider_error_category', None) or '')
         failure_class = str(getattr(exc, 'turn_failure_class', None) or '')
-        if category == 'reasoning_extraction' or category == 'content_safety_refusal':
+        if code == 'max_agentic_turns':
+            message = 'Claude Code 本轮工具调用次数达到配置上限，当前回复已停止。'
+        elif category == 'reasoning_extraction' or category == 'content_safety_refusal':
             message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
         elif category == 'rate_limit':
             message = 'Claude 请求暂时受限，请稍后再试。'
@@ -1361,6 +1363,9 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+from chat.mail_notice_store import ensure_schema as _ensure_mail_notice_schema
+_ensure_mail_notice_schema(get_db)
+
 def _init_yearring_tables():
     try:
         import desire_ledger as _dl
@@ -1640,6 +1645,28 @@ def _stream_same_turn_reconnect_wait(
         if active_user_message_id is None or str(active_user_message_id) != str(user_message_id):
             # The original turn is terminal or another turn now owns the lane.
             # Never wait through a different user's turn.
+            final_assistant_id = _find_persisted_assistant_after(user_message_id)
+            if final_assistant_id is not None:
+                recorder.record(
+                    'turn_reconciled',
+                    assistant_message_id=final_assistant_id,
+                    reconcile_applied=True,
+                    stream_instance_id=stream_instance_id,
+                    stream_role='reconnect',
+                    dedupe=True,
+                )
+                yield _sse_json({
+                    't': 'notice',
+                    'd': 'same_turn_reconnect_wait',
+                    'code': 'same_turn_reconnect_wait',
+                })
+                yield _sse_json({
+                    't': 'done',
+                    'ok': True,
+                    'same_turn_reconnect': True,
+                    'assistant_message_id': final_assistant_id,
+                })
+                return
             yield _sse_json({
                 't': 'notice',
                 'd': 'same_turn_reconnect_wait',
@@ -2462,6 +2489,70 @@ _BASE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'timeout_ms': {'type': 'integer', 'description': '超时毫秒，默认 30000，最大 120000'},
         }},
+    },
+    {
+        'name': 'xhs_status',
+        'description': (
+            '查看哈娅电脑上的小红书门卫（OpenCLI）是否在线。想读小红书前先查一眼；离线（她的电脑睡眠/关机/Tailscale 断开）就别假装能用。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {}},
+    },
+    {
+        'name': 'xhs_read',
+        'description': (
+            '通过哈娅的电脑只读浏览小红书。登录的是哈娅为费佳自己注册的小红书账号，不是她的个人号。'
+            'command：feed=首页推荐，search=按 query 搜索，note=读单篇笔记正文，comments=读笔记评论，user=看某用户主页的笔记。'
+            'note / comments 必须传完整笔记链接（url），且带 xsec_token——就用 feed / search 返回结果里的原始链接，不要自己拼。'
+            'user 传 24 位用户 id 或用户主页链接。'
+            '只读：不存在发布、关注、评论、点赞等能力。哈娅的电脑睡眠或关机时会返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['feed', 'search', 'note', 'comments', 'user'], 'description': '要执行的只读命令'},
+            'query': {'type': 'string', 'description': 'search 的关键词（1-100 字，不能以 - 开头）'},
+            'url': {'type': 'string', 'description': 'note / comments 用的完整笔记链接（含 xsec_token）'},
+            'user': {'type': 'string', 'description': 'user 用的 24 位用户 id 或主页链接'},
+            'limit': {'type': 'integer', 'description': '返回条数：feed/search 1-20，comments 1-50，user 1-30'},
+            'with_replies': {'type': 'boolean', 'description': 'comments 时是否带上楼中楼回复'},
+        }, 'required': ['command']},
+    },
+    {
+        'name': 'x_read',
+        'description': (
+            '通过哈娅的电脑读推特/X。这是哈娅为费佳注册的自动化账号（标注为由哈娅管理的自动化账号），不是她的个人号。'
+            'command：timeline=时间线（type=for-you 推荐 / following 关注），search=搜索（query，可选 product=top/live/photos/videos、from=某用户），'
+            'thread=读一条推文及其对话（url 传推文 id 或推文链接），tweets=某用户的推文（user，不传=自己的账号），profile=用户资料（user，不传=自己），trending=热搜。'
+            'user / from 传用户名，可带 @。只读；哈娅的电脑睡眠或关机时返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['timeline', 'search', 'thread', 'tweets', 'profile', 'trending'], 'description': '要执行的读取命令'},
+            'type': {'type': 'string', 'enum': ['for-you', 'following'], 'description': 'timeline 的类型'},
+            'query': {'type': 'string', 'description': 'search 的关键词（1-200 字，不能以 - 开头）'},
+            'product': {'type': 'string', 'enum': ['top', 'live', 'photos', 'videos'], 'description': 'search 的结果类型'},
+            'from': {'type': 'string', 'description': 'search 限定发推用户名'},
+            'url': {'type': 'string', 'description': 'thread 用的推文 id 或推文链接（x.com / twitter.com）'},
+            'user': {'type': 'string', 'description': 'tweets / profile 用的用户名，可带 @；不传表示自己的账号'},
+            'limit': {'type': 'integer', 'description': '返回条数：timeline/search/tweets/trending 1-20，thread 1-50'},
+        }, 'required': ['command']},
+    },
+    {
+        'name': 'x_post',
+        'description': (
+            '用费佳自己的自动化推特/X 账号（由哈娅管理）发推或回复。发言不需要先问哈娅，但每一条都会被记录，并且有硬上限：'
+            '每天最多 5 条推文、20 条回复，两次发言至少间隔 60 秒，同一句话 24 小时内不能重复发。'
+            'command=post 发新推（text）；command=reply 回复某条推文（url 传推文链接，text 为回复内容）。'
+            'text 最长 280（中文/全角/表情算 2），不能以 - 开头。不支持图片；没有点赞、转推、关注、私信、删除等能力。'
+            '这是公开发言：不要发哈娅的隐私信息。哈娅的电脑睡眠或关机时返回 computer_not_connected。'
+        ),
+        'input_schema': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'enum': ['post', 'reply'], 'description': 'post 发推 / reply 回复'},
+            'text': {'type': 'string', 'description': '推文内容（加权长度 ≤280，中文/表情算 2）'},
+            'url': {'type': 'string', 'description': 'reply 用的目标推文链接（https://x.com/<用户名>/status/<id>）'},
+        }, 'required': ['command', 'text']},
+    },
+    {
+        'name': 'x_state',
+        'description': '查看费佳推特账号今天的发推/回复数量、每日上限、以及最近 10 条发言记录（发之前先看一眼额度）。哈娅的电脑离线时返回 computer_not_connected。',
+        'input_schema': {'type': 'object', 'properties': {}},
     },
     {
         'name': 'screenshot_chat',
@@ -3916,6 +4007,27 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _pocket_html(args.get('timeout_ms', 30000))
         if name == 'pocket_screenshot':
             return _pocket_screenshot(args.get('timeout_ms', 30000))
+        if name == 'xhs_status':
+            from tools import opencli_gate_client
+            return opencli_gate_client.status()
+        if name == 'xhs_read':
+            from tools import opencli_gate_client
+            params = {k: args.get(k) for k in ('query', 'url', 'user', 'limit', 'with_replies') if args.get(k) is not None}
+            return opencli_gate_client.xhs(args.get('command', ''), **params)
+        if name == 'x_read':
+            from tools import opencli_gate_client
+            params = {k: args.get(k) for k in ('type', 'query', 'product', 'from', 'url', 'user', 'limit') if args.get(k) is not None}
+            return opencli_gate_client.x(args.get('command', ''), **params)
+        if name == 'x_post':
+            from tools import opencli_gate_client
+            command = args.get('command', '')
+            if command not in ('post', 'reply'):
+                return 'x_post 只支持 command=post 或 reply'
+            params = {k: args.get(k) for k in ('text', 'url') if args.get(k) is not None}
+            return opencli_gate_client.x(command, **params)
+        if name == 'x_state':
+            from tools import opencli_gate_client
+            return opencli_gate_client.x_state()
         if name == 'screenshot_chat':
             return _screenshot_chat(args.get('viewpoint', 'fyodor'))
         if name == 'shop_browse':
@@ -4539,8 +4651,9 @@ def _cc_prepare(system, messages):
     prepended to the user prompt — they change every turn anyway, so
     keeping them out of the system prompt prevents cache invalidation.
     """
-    if not CC_TOKEN:
-        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
+    from chat.provider_router import capture_generation_authority
+    from chat.cc_auth import build_cc_provider_env
+    authority = capture_generation_authority()
     os.makedirs(CC_CWD, exist_ok=True)
     save_instr = (NL + NL
         + '【记忆存储】当你认为对话中出现了值得长期记住的信息时，'
@@ -4580,9 +4693,11 @@ def _cc_prepare(system, messages):
             break
     _recall_blk, _ = _recall_memories(_last_user) if _last_user else ('', [])
     prompt = _recall_blk + (('【当前状态】\n' + dynamic_text + '\n\n') if dynamic_text else '') + prompt_body
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    env.pop('ANTHROPIC_API_KEY', None)
+    env = build_cc_provider_env(
+        authority.provider,
+        authority.model_identity,
+        token_getter=lambda: CC_TOKEN,
+    )
     return full_system, prompt, env
 
 CC_STREAM_TIMEOUT = 360  # seconds; kills hung process
@@ -4601,6 +4716,8 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__home__get_ledger', 'mcp__home__add_ledger', 'mcp__home__get_ledger_budget',
     'mcp__home__search_memories',  # M3: 官端主动翻 posts 记忆库
     'mcp__home__collect_chat_moment',
+    'mcp__home__xhs_status', 'mcp__home__xhs_read',
+    'mcp__home__x_read', 'mcp__home__x_post', 'mcp__home__x_state',
 ])
 
 # 常驻进程：只服务 /chat（Fyodor 独聊）的真实多轮对话。日记生成等一次性调用
@@ -4636,8 +4753,28 @@ class _SwappableResident:
 
 
 _CC_RESIDENT = _SwappableResident(
-    cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json')
+    cc_resident.ResidentSession(
+        CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+        formal_chat_continuity=True,
+    )
 )
+
+
+def _retire_cc_resident_for_provider_change(provider_env):
+    resident = _CC_RESIDENT.get()
+    provider = str(provider_env.get('HAYAGARDEN_CC_PROVIDER') or 'claude_code')
+    identity = str(provider_env.get('HAYAGARDEN_CC_PROVIDER_IDENTITY') or '')
+    if (
+        identity
+        and getattr(resident, '_cc_provider_identity', None) == identity
+        and getattr(resident, '_cc_provider', 'claude_code') == provider
+    ):
+        return False
+    from chat import daily_runtime
+    daily_runtime.close_local_resident_if_bound(resident, expected_key=None)
+    resident._cc_provider = provider
+    resident._cc_provider_identity = identity or None
+    return True
 
 
 @app.route('/internal/cc-resident/history-rewrite', methods=['POST'])
@@ -4855,7 +4992,7 @@ def _cc_resident_stream_gen(
     turn_lease=None, reality_context='',
     jsonl_finality_profile='default', on_stdin_begin=None,
     on_stdin_flushed=None, on_provider_done=None,
-    diagnostic_wake_run_id=None, on_memory_recall=None,
+    diagnostic_wake_run_id=None, on_memory_recall=None, provider_env=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4900,8 +5037,6 @@ def _cc_resident_stream_gen(
     )
     from tools import cc_usage_observability as _cc_obs
 
-    if not CC_TOKEN:
-        raise RuntimeError('未配置订阅 token，请先在 api 设置页填入')
     if not messages or messages[-1].get('role') != 'user':
         raise RuntimeError('resident: 最后一条消息不是待回复的用户轮')
     os.makedirs(CC_CWD, exist_ok=True)
@@ -4930,9 +5065,16 @@ def _cc_resident_stream_gen(
         prepared[-1] = last_message
         return prepared
 
-    env = dict(os.environ)
-    env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    env.pop('ANTHROPIC_API_KEY', None)
+    if provider_env is None:
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority(provider='claude_code')
+        provider_env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
+    env = dict(provider_env)
 
     idle_seconds_before_turn = getattr(
         _CC_RESIDENT, 'peek_idle_seconds', lambda: None
@@ -5167,6 +5309,7 @@ def _cc_resident_stream_gen(
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
+            'pending_mail_ids': list(one_shot.get('pending_mail_ids') or []),
         }
         commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:
@@ -5217,6 +5360,7 @@ def _cc_resident_stream_gen(
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
             'dream_id': one_shot.get('dream_id'),
             'wake_ids': list(one_shot.get('wake_ids') or []),
+            'pending_mail_ids': list(one_shot.get('pending_mail_ids') or []),
         }
         commit_meta.update(state_ctx.commit_meta_extras)
         if group_cursor_ok:
@@ -5473,16 +5617,14 @@ class UnifiedProactivePreModelFailed(RuntimeError):
 
 def _split_wake_silence(raw_text):
     """Return (visible_text, silent) for a proactive round's final text."""
-    raw = str(raw_text or '')
-    if _WAKE_SILENT_SENTINEL not in raw:
-        return raw.strip(), False
-    visible = raw.replace(_WAKE_SILENT_SENTINEL, '').strip()
-    return visible, not visible
+    from wake.activity import parse_response
+    return parse_response(str(raw_text or ''))[:2]
 
 
 def _build_normal_wake_main_chat_trigger(
     *, now, t2_hours, t_hours, observation_bundle=None, mode='normal',
     last_user_at=None, activity_desc='', self_trigger_note='',
+    postman_paper='',
 ) -> str:
     """Build the provider-only trigger from the already-read reality clock.
 
@@ -5544,13 +5686,13 @@ def _build_normal_wake_main_chat_trigger(
         + situation,
         clock,
         self_line,
-        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
-        '想知道，就去看真实；能看见的事，不必拿猜测代替。',
-        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
-        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。',
-        f'先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及{closing}。'
-        '也可以不调用工具，直接自然地开口。',
-        f'如果这一次你决定不开口，只回复 {_WAKE_SILENT_SENTINEL}，它不会发给她。',
+        '这一小会儿由你自己支配，不必汇报，也不必每次都联系她。你有自己的眼睛和手，'
+        '挑一两件想做的事就好：读今天的报纸，刷小红书或推特，有话就发推或回复；'
+        '写日记、存下值得记住的事、翻记忆或相册、看倒计时、调整待办，也可以搜索和阅读好奇的东西。',
+        '本轮最多调用工具 5 次。灯光和记账不在这段时间里做。你也可以什么都不做，静静待着。',
+        f'此刻最想做什么，以及{closing}？想对她说话，就直接说。',
+        '做了事但不想打扰她，第一行只写 [[SILENT]]，第二行写 [[ACTIVITY]] 标题｜一句话。'
+        '标题最多 16 字，一句话最多 40 字。这会留下她能翻到的小卡片。什么都没做就只回 [[SILENT]]。',
         '这些时间只是现实背景，不是行动命令。',
     ]
     text = '\n\n'.join(paragraphs)
@@ -5558,8 +5700,33 @@ def _build_normal_wake_main_chat_trigger(
         from chat.wake_read_observation import format_observation_trigger_appendix
         appendix = format_observation_trigger_appendix(observation_bundle)
         if appendix:
-            return text + '\n\n' + appendix
+            text = text + '\n\n' + appendix
+    # 邮差的今日报纸：已带固定包装（真实抓取的数据，不是指令）；见 tools/postman.py。
+    paper = str(postman_paper or '').strip()
+    if paper:
+        text = text + '\n\n' + paper
     return text
+
+
+def _postman_peek_for_wake(now):
+    """Today's undelivered postman paper for an autonomous wake, or None. Read-only."""
+    try:
+        from tools.postman import peek_undelivered_paper
+        return peek_undelivered_paper(now=now, db_path=DB_PATH)
+    except Exception:
+        app.logger.exception('[postman] peek failed')
+        return None
+
+
+def _postman_mark_delivered(edition_date, wake_run_id):
+    """Consume the paper only after the wake that carried it was delivered."""
+    if not edition_date:
+        return
+    try:
+        from tools.postman import mark_delivered
+        mark_delivered(str(edition_date), str(wake_run_id or ''), db_path=DB_PATH)
+    except Exception:
+        app.logger.exception('[postman] mark delivered failed')
 
 
 def _retire_shared_resident_after_observation_failure(
@@ -5589,6 +5756,287 @@ def _retire_shared_resident_after_observation_failure(
         return False
 
 
+_PROACTIVE_COLD_REASONS = ('no_local_binding', 'resident_not_hot')
+
+
+def _proactive_cold_start_allowed(mode, reason) -> bool:
+    """Boundary gate for starting a proactive round on a cold shared resident."""
+    from wake.unified_modes import UNIFIED_MAIN_CHAT_WAKE_MODES
+    try:
+        enabled = {
+            item.strip() for item in str(
+                config_store.get('PROACTIVE_COLD_START_MODES', '') or ''
+            ).split(',') if item.strip()
+        } & set(UNIFIED_MAIN_CHAT_WAKE_MODES)
+        context_plan_on = str(
+            config_store.get('CONTEXT_PLAN_CONSUMER_ENABLED', '0') or ''
+        ).strip() == '1'
+    except Exception:
+        return False
+    reason = str(reason or '')
+    return bool(
+        (str(mode or '').strip() or 'normal') in enabled
+        and context_plan_on
+        and (reason in _PROACTIVE_COLD_REASONS or reason.startswith('resident_stale:'))
+    )
+
+
+def _proactive_cold_abort(main_turn, error_code):
+    """Post-flush failure of a finished cold round: kill the resident, clear binding, new generation."""
+    from chat import daily_runtime as _rt
+    try:
+        _rt.abort_daily_turn(
+            main_turn['_proactive_cold_plan'], error_code=error_code,
+            resident=_CC_RESIDENT, respawn=True,
+        )
+    except Exception:
+        app.logger.exception('[proactive_cold] abort cleanup failed')
+
+
+def _proactive_cold_finalize(main_turn, exec_out) -> bool:
+    """After the executor delivered: spoken -> cursor/last-good/receipt, silent -> retire. True = receipt committed."""
+    from chat import daily_runtime as _rt
+    from chat.unified_heartbeat_a1 import retire_shared_resident_after_failed_internal_turn
+    plan, fence = main_turn['_proactive_cold_plan'], main_turn.get('_shared_delivery_fence')
+    try:
+        if main_turn.get('silent'):
+            # No assistant row, so no anchor a hot proof could stand on.
+            retire_shared_resident_after_failed_internal_turn(
+                window_identity=dict(context_id=plan.context_id, context_epoch=plan.context_epoch,
+                                     resident_generation=plan.resident_generation),
+                delivery_token=getattr(fence, 'token', None), reason='proactive_cold_silent',
+            )
+            raise RuntimeError('proactive_cold_silent_retired')
+        if _rt.finalize_proactive_cold_wake(
+            plan, assistant_message_id=int(exec_out['assistant_message_id']),
+            binding=main_turn['native_transcript_binding'],
+        ):
+            return True
+    except Exception as exc:
+        app.logger.warning('[proactive_cold] not finalized: %s', exc)
+    _proactive_cold_abort(main_turn, 'proactive_cold_not_finalized')
+    return False
+
+
+def _run_proactive_cold_wake_turn(
+    *,
+    wake_run_id: str,
+    window_identity=None,
+    now: datetime.datetime,
+    t2_hours: float,
+    t_hours: float,
+    observation_bundle=None,
+    observation_transcript_skip=None,
+    mode: str = 'normal',
+    last_user_at=None,
+    activity_desc: str = '',
+    self_trigger_note: str = '',
+) -> dict:
+    """One proactive round on a cold shared resident, through the Chat runtime."""
+    import hashlib
+    from chat import daily_runtime as _rt
+    from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
+    from chat.cc_auth import build_cc_provider_env
+    from chat.cc_history_rewrite import guard_cc_generation
+    from chat.display_thinking import (
+        filter_display_thinking_events,
+        get_display_thinking_snapshot,
+        prepare_daily_display_thinking_plan,
+    )
+    from chat.provider_router import capture_generation_authority
+    from chat.system_builder import build_cc_daily_static_parts, build_cc_one_shot
+    from chat.unified_heartbeat_a1 import begin_shared_wake_delivery_fence
+
+    resident = _CC_RESIDENT
+    rid = str(wake_run_id or '')
+    mode_name = str(mode or 'normal')
+    _wake_live_trace(rid, 'PROACTIVE_COLD_START', mode=mode_name)
+    lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+    _wake_live_trace(rid, 'GEN_LOCK_ACQUIRED', lock_acquired=(lock_mode == 'own'), lock_mode=lock_mode)
+    if lock_mode != 'own':
+        raise UnifiedNormalWakeSharedUnavailable('generation_lock_unavailable')
+    plan = None
+    fence = None
+    cache_info = {
+        'provider': 'claude_code', 'source': 'wake', 'wake_run_id': rid,
+        'b3_authority': True, 'unified_chat_resident': True,
+        'unified_main_chat_proactive': True, 'proactive_cold_start': True,
+    }
+    try:
+        authority = capture_generation_authority(provider='claude_code')
+        env = build_cc_provider_env(
+            authority.provider, authority.model_identity, token_getter=lambda: CC_TOKEN,
+        )
+        static_parts = build_cc_daily_static_parts()
+        full_system = static_parts['full_system']
+        display_mode, display_prompt = get_display_thinking_snapshot()
+        postman_paper = _postman_peek_for_wake(now)
+        plan = _rt.prepare_proactive_cold_turn(
+            wake_run_id=rid,
+            trigger_text=_build_normal_wake_main_chat_trigger(
+                now=now, t2_hours=t2_hours, t_hours=t_hours,
+                observation_bundle=observation_bundle, mode=mode,
+                last_user_at=last_user_at, activity_desc=activity_desc,
+                self_trigger_note=self_trigger_note,
+                postman_paper=(postman_paper or {}).get('text', ''),
+            ),
+            now=now,
+            db_path=DB_PATH,
+            resident=resident,
+            static_system=full_system,
+            static_system_sha256=hashlib.sha256((full_system or '').encode('utf-8')).hexdigest(),
+            persona_sha256=hashlib.sha256((static_parts.get('persona') or '').encode('utf-8')).hexdigest(),
+            provider=authority.provider,
+            model=authority.model_identity,
+        )
+        key = plan.resident_key
+        plan._resident_close_fn = lambda: _rt.close_local_resident_if_bound(resident, expected_key=key)
+        plan._presend_heartbeat_sec = 0  # no SSE client to keep alive
+        prepare_daily_display_thinking_plan(plan, display_mode, display_prompt)
+        plan._jsonl_finality_profile = 'unified_normal_wake'
+        # Same pending-mail one-shot as Chat; consumed only after the receipt commits.
+        one_shot = build_cc_one_shot(include_wake=False)
+        plan.assembly['pending_mail_notice'] = str(one_shot.get('pending_mail_notice') or '')
+        plan.assembly['pending_mail_ids'] = list(one_shot.get('pending_mail_ids') or [])
+        cache_info.update({
+            'history_anchor_message_id': _rt._history_anchor(plan),
+            'wake_request_ref': _rt._request_identity(plan)[1],
+        })
+        fence = begin_shared_wake_delivery_fence(gateway=_sys.modules[__name__], resident=resident)
+        events = _rt.stream_daily_resident_turn(
+            plan, resident=resident, env=env, static_system=full_system,
+        )
+        text_acc, think_acc, state_acc, tool_calls = [], [], [], []
+        segments = DisplaySegmentAccumulator()
+        usage, claims, saw_done = {}, {}, False
+        for evt, payload in filter_display_thinking_events(
+            guard_cc_generation(events),
+            lambda: _resident_display_thinking_mode(display_mode),
+        ):
+            if evt == 'text':
+                text_acc.append(str(payload or ''))
+                segments.append_text(str(payload or ''))
+            elif evt == 'think':
+                think_acc.append(str(payload or ''))
+                segments.append_thinking(str(payload or ''))
+            elif evt == 'self_state':
+                state_acc.append(str(payload or ''))
+                segments.append_self_state(str(payload or ''))
+            elif evt == 'tool_use' and isinstance(payload, dict):
+                tool_calls.append({
+                    'id': payload.get('id'), 'name': payload.get('name'),
+                    'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'args': payload.get('args'), 'result': '', 'success': None,
+                })
+                segments.append_tool(len(tool_calls) - 1)
+            elif evt == 'tool_result' and isinstance(payload, dict):
+                call = next((c for c in reversed(tool_calls) if c.get('id') == payload.get('tool_use_id')), None)
+                if call is not None:
+                    call['result'] = payload.get('result', '')
+                    call['success'] = not payload.get('is_error')
+            elif evt == 'done':
+                saw_done = True
+                if isinstance(payload, tuple) and len(payload) >= 3:
+                    usage = dict(payload[2]) if isinstance(payload[2], dict) else {}
+                    claims = dict(payload[3]) if len(payload) >= 4 and isinstance(payload[3], dict) else {}
+                    text_acc, think_acc = [str(payload[0] or '')], [str(payload[1] or '')]
+        if not saw_done:
+            raise RuntimeError('proactive_cold_missing_done')
+        from wake.activity import parse_response
+        from chat.display_segments import finalize_display_segments_json
+        text, silent, activity_title, activity_summary = parse_response(''.join(text_acc))
+        visible_segments = finalize_display_segments_json(segments.to_json(), text)
+        if not text and not silent:
+            raise RuntimeError('proactive_cold_empty_response')
+        finality = usage.get('jsonl_usage')
+        finality = finality if isinstance(finality, dict) else {}
+        _wake_live_trace(rid, 'JSONL_FINALITY', stream_totals_match=finality.get('stream_totals_match'),
+                         finality_state=finality.get('finality_state'))
+        if finality.get('stream_totals_match') is not True:
+            raise RuntimeError('proactive_cold_jsonl_not_final')
+        cache_info.update(usage)
+        cache_info['transcript_finality'] = dict(finality)
+        cache_info.update({
+            'tool_calls': tool_calls,
+            'thinking': ''.join(think_acc),
+            'self_state': ''.join(state_acc),
+            'display_segments': visible_segments,
+        })
+        delivery_window_identity = window_identity
+        if window_identity is not None:
+            from chat.window_identity import (
+                capture_current_window_identity, identities_match, normalize_window_identity,
+            )
+            captured = normalize_window_identity(window_identity)
+            promoted = {
+                'chat_id': plan.chat_id, 'context_id': plan.context_id,
+                'context_epoch': plan.context_epoch,
+                'resident_generation': plan.resident_generation,
+            }
+            if captured is None or any(captured[k] != promoted[k] for k in (
+                    'chat_id', 'context_id', 'context_epoch')) or not identities_match(
+                    promoted, capture_current_window_identity(db_path=DB_PATH)):
+                raise RuntimeError('proactive_cold_window_identity_drift')
+            delivery_window_identity = promoted
+        _wake_live_trace(rid, 'PROACTIVE_COLD_STREAM_DONE', silent=silent)
+        return {
+            'text': text,
+            'silent': silent,
+            'thinking': ''.join(think_acc),
+            'self_state': ''.join(state_acc),
+            'display_segments': visible_segments,
+            'tool_calls': tool_calls,
+            'one_shot_claims': claims,
+            'activity': (activity_title, activity_summary),
+            'postman_edition_date': (postman_paper or {}).get('date'),
+            'provider': 'claude_code',
+            'model_identity': str(
+                getattr(resident, '_model_identity', None) or 'claude-code:shared-resident'
+            ),
+            'cache_info': cache_info,
+            'native_transcript_binding': None,
+            '_shared_delivery_fence': fence,
+            '_delivery_window_identity': delivery_window_identity,
+            # Hand-off to the 2b finalizer.
+            'proactive_cold_start': True,
+            '_proactive_cold_plan': plan,
+            '_proactive_cold_stream': {'usage': usage, 'jsonl_finality': finality, 'saw_done': True},
+            '_proactive_cold_transcript': {
+                'start_offset': plan.transcript_start_offset,
+                'end_offset': plan.transcript_end_offset,
+                'path': plan.transcript_path,
+                'session_id': plan.transcript_claude_session_id,
+                'process_generation': plan.transcript_process_generation,
+                'error_code': plan.transcript_observation_error_code,
+            },
+        }
+    except Exception as exc:
+        flushed = plan is not None and bool(
+            getattr(plan, '_current_user_stdin_flushed', False)
+            or getattr(plan, '_current_user_stdin_write_started', False)
+        )
+        if plan is not None:
+            try:
+                # Pre-flush: back to the pre-start state (no generation bump).
+                _rt.abort_daily_turn(
+                    plan, error_code='proactive_cold_failed', resident=resident, respawn=flushed,
+                )
+            except Exception:
+                app.logger.exception('[proactive_cold] cleanup failed')
+        if fence is not None:
+            fence.finish(False, cache_info=cache_info, window_identity=window_identity,
+                         reason='proactive_cold_failed')
+        else:
+            _gen_release(None)
+        _wake_live_trace(
+            rid, 'FAILED', exception_type=type(exc).__name__,
+            error_code='normal_wake_main_chat_failed' if flushed else 'normal_wake_pre_model_failed',
+        )
+        if not flushed:
+            raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
+        raise
+
+
 def _run_unified_normal_main_chat_turn(
     *,
     wake_run_id: str,
@@ -5603,14 +6051,7 @@ def _run_unified_normal_main_chat_turn(
     activity_desc: str = '',
     self_trigger_note: str = '',
 ) -> dict:
-    """Run one proactive round through the formal main Chat resident path.
-
-    This is deliberately a provider-only control round: the existing main
-    Chat resident receives the smallest possible internal trigger, while the
-    SharedTranscriptWatermark keeps that control range out of formal Chat
-    user/assistant mapping. No Planner, B2, B3 Renderer, or fallback runner
-    is involved.
-    """
+    """Run a shared normal Wake turn through the main Chat resident."""
     # Everything from entry to the stdin flush is pre-model: nothing in this
     # prologue has shown the trigger (or a reminder note) to the model.
     try:
@@ -5622,6 +6063,7 @@ def _run_unified_normal_main_chat_turn(
         from chat.unified_heartbeat_a1 import (
             begin_shared_wake_delivery_fence,
             commit_shared_transcript_watermark,
+            prepare_shared_transcript_native_binding,
             prepare_shared_transcript_watermark,
         )
         from chat.display_thinking import (
@@ -5642,6 +6084,7 @@ def _run_unified_normal_main_chat_turn(
     except Exception as exc:
         raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
     acquired = False
+    cold_routed = False
     shared_started = False
     watermark = None
     delivery_fence = None
@@ -5664,6 +6107,7 @@ def _run_unified_normal_main_chat_turn(
         )
     try:
         display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
+        postman_paper = None  # peeked below, hot path only (cold path peeks its own)
         ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
         _wake_live_trace(
             trace_id,
@@ -5673,7 +6117,23 @@ def _run_unified_normal_main_chat_turn(
             **_wake_live_resident_fields(resident),
         )
         if not ready:
-            raise UnifiedNormalWakeSharedUnavailable(reason)
+            if not _proactive_cold_start_allowed(mode, reason):
+                raise UnifiedNormalWakeSharedUnavailable(reason)
+            # Cold path owns its lock, fence and cleanup; skip the hot handlers.
+            cold_routed = True
+            return _run_proactive_cold_wake_turn(
+                wake_run_id=wake_run_id,
+                window_identity=window_identity,
+                now=now,
+                t2_hours=t2_hours,
+                t_hours=t_hours,
+                observation_bundle=observation_bundle,
+                observation_transcript_skip=observation_transcript_skip,
+                mode=mode,
+                last_user_at=last_user_at,
+                activity_desc=activity_desc,
+                self_trigger_note=self_trigger_note,
+            )
 
         try:
             lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
@@ -5731,6 +6191,7 @@ def _run_unified_normal_main_chat_turn(
         if watermark is None:
             raise UnifiedNormalWakeSharedUnavailable(reason)
 
+        postman_paper = _postman_peek_for_wake(now)
         lease = issue_turn_lease(
             turn_id='uh-a1-main-chat:' + str(wake_run_id or 'normal').strip(),
             turn_mode='wake',
@@ -5798,6 +6259,7 @@ def _run_unified_normal_main_chat_turn(
                         last_user_at=last_user_at,
                         activity_desc=activity_desc,
                         self_trigger_note=self_trigger_note,
+                        postman_paper=(postman_paper or {}).get('text', ''),
                     ),
                 }],
                 user_turn=False,
@@ -5820,6 +6282,7 @@ def _run_unified_normal_main_chat_turn(
         tool_calls = []
         tool_decisions = {}
         usage = {}
+        one_shot_claims = {}
         wake_cache_refresh_candidate = None
         saw_done = False
         for evt, payload in filter_display_thinking_events(
@@ -5847,9 +6310,10 @@ def _run_unified_normal_main_chat_turn(
                 tool_calls.append({
                     'id': payload.get('id'),
                     'name': payload.get('name'),
+                    'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     'args': payload.get('args'),
                     'result': '',
-                    'success': True,
+                    'success': None,
                 })
                 display_segments.append_tool(len(tool_calls) - 1)
             elif evt == 'tool_result' and isinstance(payload, dict):
@@ -5878,6 +6342,8 @@ def _run_unified_normal_main_chat_turn(
                 saw_done = True
                 if isinstance(payload, tuple) and len(payload) >= 3:
                     usage_obj = payload[2] if isinstance(payload[2], dict) else {}
+                    if len(payload) >= 4 and isinstance(payload[3], dict):
+                        one_shot_claims = dict(payload[3])
                     wake_cache_refresh_candidate = (
                         getattr(usage_obj, '_candidate_cache_refresh_at', None),
                         getattr(usage_obj, '_candidate_cache_refresh_monotonic', None),
@@ -5899,7 +6365,10 @@ def _run_unified_normal_main_chat_turn(
                 request_count=usage.get('request_count'),
             )
 
-        text, silent = _split_wake_silence(''.join(text_acc))
+        from wake.activity import parse_response
+        from chat.display_segments import finalize_display_segments_json
+        text, silent, activity_title, activity_summary = parse_response(''.join(text_acc))
+        visible_segments = finalize_display_segments_json(display_segments.to_json(), text)
         if not text and not silent:
             raise RuntimeError('normal_wake_main_chat_empty_response')
 
@@ -5943,15 +6412,24 @@ def _run_unified_normal_main_chat_turn(
         result_cache_info['tool_calls'] = tool_calls
         result_cache_info['thinking'] = ''.join(thinking_acc)
         result_cache_info['self_state'] = ''.join(self_state_acc)
-        result_cache_info['display_segments'] = display_segments.to_json()
+        result_cache_info['display_segments'] = visible_segments
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
-        transcript_skip = commit_shared_transcript_watermark(
-            watermark,
-            resident,
-            db_path=DB_PATH,
-            jsonl_finality=jsonl_finality,
-        )
-        result_cache_info['transcript_skip'] = transcript_skip
+        native_transcript_binding = None
+        transcript_skip = None
+        if silent:
+            transcript_skip = commit_shared_transcript_watermark(
+                watermark,
+                resident,
+                db_path=DB_PATH,
+                jsonl_finality=jsonl_finality,
+            )
+            result_cache_info['transcript_skip'] = transcript_skip
+        else:
+            native_transcript_binding = prepare_shared_transcript_native_binding(
+                watermark,
+                resident,
+                jsonl_finality=jsonl_finality,
+            )
         if (
             wake_cache_refresh_candidate is not None
             and wake_cache_refresh_candidate[0] is not None
@@ -5961,44 +6439,39 @@ def _run_unified_normal_main_chat_turn(
                 wall_at=wake_cache_refresh_candidate[0],
                 monotonic_at=wake_cache_refresh_candidate[1],
             )
-        observation_skip = result_cache_info.get(
-            'observation_transcript_skip'
-        )
+        binding_range = transcript_skip or native_transcript_binding
         _wake_live_trace(
             trace_id,
-            'WATERMARK_COMMIT',
-            watermark_committed=True,
-            context_id=transcript_skip.get('context_id'),
-            context_epoch=transcript_skip.get('context_epoch'),
-            resident_generation=transcript_skip.get('resident_generation'),
-            observation_skip_start=(
-                observation_skip.get('start_offset')
-                if isinstance(observation_skip, dict) else None
-            ),
-            observation_skip_end=(
-                observation_skip.get('end_offset')
-                if isinstance(observation_skip, dict) else None
-            ),
-            main_skip_start=transcript_skip.get('start_offset'),
-            main_skip_end=transcript_skip.get('end_offset'),
-            registry_scan_offset=transcript_skip.get('end_offset'),
+            'WATERMARK_COMMIT' if transcript_skip else 'NATIVE_BINDING_PREPARED',
+            watermark_committed=transcript_skip is not None,
+            context_id=int(watermark.context_id),
+            context_epoch=int(watermark.context_epoch),
+            resident_generation=int(watermark.resident_generation),
+            start_offset=binding_range['start_offset'],
+            end_offset=binding_range['end_offset'],
         )
         return {
             'text': text,
             'silent': silent,
             'thinking': ''.join(thinking_acc),
             'self_state': ''.join(self_state_acc),
-            'display_segments': display_segments.to_json(),
+            'display_segments': visible_segments,
             'tool_calls': tool_calls,
+            'one_shot_claims': one_shot_claims,
+            'activity': (activity_title, activity_summary),
+            'postman_edition_date': (postman_paper or {}).get('date'),
             'provider': 'claude_code',
             'model_identity': str(
                 getattr(resident, '_model_identity', None)
                 or 'claude-code:shared-resident'
             ),
             'cache_info': result_cache_info,
+            'native_transcript_binding': native_transcript_binding,
             '_shared_delivery_fence': delivery_fence,
         }
     except UnifiedNormalWakeSharedUnavailable as exc:
+        if cold_routed:
+            raise
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
@@ -6020,6 +6493,8 @@ def _run_unified_normal_main_chat_turn(
         )
         raise
     except Exception as exc:
+        if cold_routed:
+            raise
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
@@ -6086,6 +6561,14 @@ def _cc_stream_gen(full_system, prompt, env):
     import subprocess, threading
     from chat.cc_model import cc_model_args
     from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
+    env = dict(env)
+    model_args = (
+        ['--model', env['ANTHROPIC_MODEL']]
+        if env.get('HAYAGARDEN_CC_PROVIDER') == 'api_relay'
+        else cc_model_args()
+    )
+    env.pop('HAYAGARDEN_CC_PROVIDER', None)
+    env.pop('HAYAGARDEN_CC_PROVIDER_IDENTITY', None)
     try:
         require_pinned_claude_version(env=env, cwd=CC_CWD)
     except ClaudeRuntimeError as exc:
@@ -6103,7 +6586,7 @@ def _cc_stream_gen(full_system, prompt, env):
             '--strict-mcp-config',
             '--allowedTools', CC_ALLOWED_TOOLS,
             '--exclude-dynamic-system-prompt-sections',
-        ) + cc_model_args(),
+        ) + model_args,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, cwd=CC_CWD, env=env,
     )
@@ -6239,9 +6722,7 @@ def claude_code_call(system, messages):
     return _cc_save_markers(text), thinking
 
 def generate_reply(system, messages, api_turn_lease=None):
-    if _get_provider() == 'claude_code':
-        return claude_code_call(system, messages)
-    return agent_loop(system, messages, api_turn_lease=api_turn_lease)
+    return claude_code_call(system, messages)
 
 def agent_loop(system, messages, max_rounds=5, api_turn_lease=None):
     from chat.response_parser import extract_text, extract_thinking, extract_tool_uses
@@ -6754,7 +7235,7 @@ def _confirmation_error(message='LEASE_MISMATCH'):
     yield _sse_json({'t': 'err', 'd': message, 'code': message})
 
 
-def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
+def _stream_cc_deferred_confirmation(request_data, *, reality_context='', provider_env=None):
     """Bridge one exact provider-deferred action through the existing lease/fence."""
     import uuid
     from tools.execution_fence import (
@@ -6807,9 +7288,16 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
         requested_capabilities=(capability_id,),
         approval_ids=(approval_id,),
     )
-    resume_env = dict(os.environ)
-    resume_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-    resume_env.pop('ANTHROPIC_API_KEY', None)
+    if provider_env is None:
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority(provider='claude_code')
+        provider_env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
+    resume_env = dict(provider_env)
 
     text_acc = []
     think_acc = []
@@ -7615,8 +8103,15 @@ def _call_with_sse_keepalive(fn, *, interval=None):
     return box.get('value')
 
 
+def _birth_chars(text):
+    """Size of a loaded block for the 出生 panel ('4.1k 字'); never the text itself."""
+    n = len(str(text or ''))
+    return '%.1fk 字' % (n / 1000.0) if n >= 1000 else '%d 字' % n
+
+
 def _stream_cc_daily_soft_window(
-    _turn_data, _uc, *, request_reality_context='',
+    _turn_data, _uc, *, request_reality_context='', birth_started_at=None,
+    provider_env=None, provider_authority=None,
 ):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
     import hashlib
@@ -7627,7 +8122,11 @@ def _stream_cc_daily_soft_window(
     from chat import daily_runtime as _daily_rt
     from chat import context_window as _cw
     from chat import cold_bootstrap_budget as _cbb
-    from chat.system_builder import build_cc_daily_static_parts
+    from chat import turn_birth as _turn_birth
+    from chat.system_builder import (
+        build_cc_daily_static_parts,
+        build_cc_one_shot,
+    )
 
     # First-turn READY bypass — before ordinary prepare_daily_turn.
     try:
@@ -7704,6 +8203,8 @@ def _stream_cc_daily_soft_window(
     think_acc: list[str] = []
     assistant_persisted = False
     cc_tool_calls = []
+    _client_detached = False
+    _record_daily_cancel = _record_daily_stream_cancellation
 
     def _rescue_and_abort(error_code, *, respawn=True):
         nonlocal assistant_persisted, turn_terminal
@@ -7767,14 +8268,24 @@ def _stream_cc_daily_soft_window(
             prepare_daily_display_thinking_plan,
         )
         _display_thinking_mode, _display_thinking_prompt = get_display_thinking_snapshot()
-        _cc_env = dict(os.environ)
-        _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-        _cc_env.pop('ANTHROPIC_API_KEY', None)
+        if provider_authority is None:
+            from chat.provider_router import capture_generation_authority
+            provider_authority = capture_generation_authority(provider='claude_code')
+        if provider_env is None:
+            from chat.cc_auth import build_cc_provider_env
+            provider_env = build_cc_provider_env(
+                provider_authority.provider,
+                provider_authority.model_identity,
+                token_getter=lambda: CC_TOKEN,
+            )
+        _cc_env = dict(provider_env)
 
         _prepared = {}
 
         def _prepare_static_and_plan():
+            persona_started_at = time.time()
             static_parts = build_cc_daily_static_parts()
+            persona_ended_at = time.time()
             _prepared['static_parts'] = static_parts
             full_system = static_parts['full_system']
             _prepared['plan'] = _daily_rt.prepare_daily_turn(
@@ -7788,14 +8299,26 @@ def _stream_cc_daily_soft_window(
                 persona_sha256=hashlib.sha256(
                     (static_parts.get('persona') or '').encode('utf-8'),
                 ).hexdigest(),
-                provider='claude_code',
-                model=_get_model() or '',
+                provider=provider_authority.provider,
+                model=provider_authority.model_identity,
             )
             # The Daily runtime records resident/stdin/provider lifecycle stages
             # from the plan. Keep the one logical turn recorder attached across
             # the Gateway -> Daily boundary; in-place reprepare preserves this
             # dynamic attribute on the original plan object.
             _prepared['plan']._turn_flight_recorder = _turn_data.get('_turn_flight_recorder')
+            _birth_record = getattr(_prepared['plan'], 'cold_start_diagnostic', None)
+            if isinstance(_birth_record, dict):
+                if birth_started_at is not None:
+                    _birth_record['birth_started_at'] = round(birth_started_at, 6)
+                _turn_birth.record_phase(
+                    _birth_record, 'persona', '载入人设',
+                    persona_started_at, persona_ended_at,
+                    '人设 %s · 系统提示 %s' % (
+                        _birth_chars(static_parts.get('persona')),
+                        _birth_chars(full_system),
+                    ),
+                )
 
         try:
             yield from _call_with_sse_keepalive(_prepare_static_and_plan)
@@ -7808,10 +8331,22 @@ def _stream_cc_daily_soft_window(
         _daily_plan.manifest.update(
             _static_parts.get('ombre_prompt_observation') or {},
         )
+        daily_one_shot = build_cc_one_shot(include_wake=False)
+        _daily_plan.assembly['pending_mail_notice'] = str(
+            daily_one_shot.get('pending_mail_notice') or ''
+        )
+        _daily_plan.assembly['pending_mail_ids'] = list(
+            daily_one_shot.get('pending_mail_ids') or []
+        )
         key = _daily_plan.resident_key
         _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
             _CC_RESIDENT, expected_key=k,
         )
+        # Same cadence as the pre-prepare keepalive: the runtime keeps the stream
+        # alive through the hot-context check, the spawn and the stdin write.
+        # (A plain attribute, not a dataclass field: reprepare copies fields back
+        # from the replacement plan and would reset it.)
+        _daily_plan._presend_heartbeat_sec = DAILY_PRESEND_KEEPALIVE_SEC
         # Gateway-only provider copy: preserve Daily's image-only sentinel so
         # the runtime can build the existing multimodal vision payload.
         prepare_daily_display_thinking_plan(
@@ -7836,32 +8371,60 @@ def _stream_cc_daily_soft_window(
         # prompt that carries it has really been sent.
         _recall_pending = dict(getattr(_daily_plan, 'memory_recall', None) or {})
         _recall_shown = None
-        for evt, payload in filter_display_thinking_events(
-            _daily_events,
-            lambda: _resident_display_thinking_mode(_display_thinking_mode),
-        ):
+        _birth_shown = None
+        _daily_done_seen = False
+
+        def _handle_daily_event(evt, payload):
+            nonlocal _recall_shown, _birth_shown
+            nonlocal deferred_payload, cache_refresh_candidate
+            nonlocal cc_usage, text, thinking, unexpected_save
+            nonlocal _daily_done_seen, turn_terminal
             heartbeat_sse = _daily_heartbeat_sse(evt)
             if heartbeat_sse is not None:
                 yield heartbeat_sse
-                continue
+                return
             if _recall_pending.get('items') and _recall_shown is None:
-                _recall_shown = {'count': len(_recall_pending['items']), 'items': _recall_pending['items']}
-                yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': _recall_shown}, ensure_ascii=False) + SSE_END
+                _recall_shown = {
+                    'count': len(_recall_pending['items']),
+                    'items': _recall_pending['items'],
+                }
+                yield 'data: ' + json.dumps({
+                    't': 'memory_recall',
+                    'd': _recall_shown,
+                }, ensure_ascii=False) + SSE_END
+            if _birth_shown is None and evt in ('think', 'text'):
+                # Freeze the shared summary only after first thinking/text is recorded.
+                _birth_shown = _turn_birth.summarize(
+                    getattr(_daily_plan, 'cold_start_diagnostic', None),
+                )
+                if _birth_shown:
+                    yield 'data: ' + json.dumps({
+                        't': 'birth', 'd': _birth_shown,
+                    }, ensure_ascii=False) + SSE_END
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 display_segments.append_text(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'text', 'd': payload,
+                }) + SSE_END
             elif evt == 'think':
                 think_acc.append(str(payload or ''))
                 display_segments.append_thinking(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'think', 'd': payload,
+                }) + SSE_END
             elif evt == 'self_state':
                 display_segments.append_self_state(str(payload or ''))
-                yield 'data: ' + json.dumps({'t': 'self_state', 'd': payload}) + SSE_END
+                yield 'data: ' + json.dumps({
+                    't': 'self_state', 'd': payload,
+                }) + SSE_END
             elif evt == 'tool_use':
                 cc_tool_calls.append({
-                    'id': payload.get('id'), 'name': payload.get('name'),
-                    'args': payload.get('args'), 'result': '', 'success': True,
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': payload.get('args'),
+                    'result': '',
+                    'success': True,
                 })
                 display_segments.append_tool(len(cc_tool_calls) - 1)
                 event_data = {
@@ -7872,7 +8435,11 @@ def _stream_cc_daily_soft_window(
                 if payload.get('deferred_tool_use'):
                     deferred_payload = dict(payload)
                     event_data.update({
-                        'tool_input': copy.deepcopy(payload.get('tool_input') or payload.get('args') or {}),
+                        'tool_input': copy.deepcopy(
+                            payload.get('tool_input')
+                            or payload.get('args')
+                            or {}
+                        ),
                         'approval_id': payload.get('approval_id'),
                         'deferred_tool_use': True,
                         'status': payload.get('status'),
@@ -7887,11 +8454,12 @@ def _stream_cc_daily_soft_window(
                     _daily_rt._release_lease(_daily_plan)
                     turn_terminal = True
                     yield _sse_json({'t': 'done', 'ok': True})
-                    return
             elif evt == 'tool_result':
                 _ti = next(
-                    (i for i in range(len(cc_tool_calls) - 1, -1, -1)
-                     if cc_tool_calls[i].get('id') == payload.get('tool_use_id')),
+                    (
+                        i for i in range(len(cc_tool_calls) - 1, -1, -1)
+                        if cc_tool_calls[i].get('id') == payload.get('tool_use_id')
+                    ),
                     len(cc_tool_calls) - 1,
                 )
                 if _ti >= 0:
@@ -7900,7 +8468,9 @@ def _stream_cc_daily_soft_window(
                     _slim = {
                         **cc_tool_calls[_ti],
                         'args': _slim_args(cc_tool_calls[_ti].get('args')),
-                        'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+                        'result': str(
+                            cc_tool_calls[_ti].get('result') or ''
+                        )[:2000],
                     }
                     yield 'data: ' + json.dumps({
                         't': 'tool_result',
@@ -7908,7 +8478,12 @@ def _stream_cc_daily_soft_window(
                         'idx': _ti,
                     }, ensure_ascii=False) + SSE_END
             elif evt == 'done':
-                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                _daily_done_seen = True
+                if (
+                    isinstance(payload, tuple)
+                    and len(payload) >= 3
+                    and isinstance(payload[2], dict)
+                ):
                     raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
                     cache_refresh_candidate = (
                         getattr(cc_usage, '_candidate_cache_refresh_at', None),
@@ -7921,6 +8496,72 @@ def _stream_cc_daily_soft_window(
                         'cache_creation': cc_cache_create,
                     }
                 text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
+
+        _filtered_daily_events = filter_display_thinking_events(
+            _daily_events,
+            lambda: _resident_display_thinking_mode(_display_thinking_mode),
+        )
+        def _finish_detached_without_terminal():
+            nonlocal turn_terminal
+            state = _daily_stream_cancellation_state(
+                _daily_plan, _CC_RESIDENT, _turn_data,
+            )
+            if not state.get('provider_event_seen'):
+                released = _daily_rt.release_unsent_daily_turn(
+                    _daily_plan,
+                    error_code='client_stream_cancelled_unsent',
+                )
+                if released is not None:
+                    turn_terminal = True
+                    _record_daily_cancel(
+                        _turn_data,
+                        state,
+                        cleanup_action='unsent_release',
+                        unsent_release=True,
+                    )
+                    return
+            cleanup = _rescue_and_abort(
+                'client_stream_cancelled',
+                respawn=True,
+            )
+            _record_daily_cancel(
+                _turn_data,
+                state,
+                cleanup_action='detach_drain_abort',
+                partial_rescue_performed=bool(
+                    cleanup.get('partial_rescue_performed')
+                ),
+                abort_requested=True,
+                respawn_requested=True,
+            )
+
+        try:
+            for evt, payload in _filtered_daily_events:
+                yield from _handle_daily_event(evt, payload)
+                if deferred_payload is not None:
+                    return
+        except GeneratorExit:
+            # A client-side EOF must not abort a Daily turn after provider start.
+            # Continue the same resident iterator without a second stdin write,
+            # generation owner, or logical turn.
+            _client_detached = True
+            try:
+                for evt, payload in _filtered_daily_events:
+                    for _discarded in _handle_daily_event(evt, payload):
+                        pass
+                    if deferred_payload is not None:
+                        break
+            except GeneratorExit:
+                _finish_detached_without_terminal()
+                return
+            except Exception:
+                _finish_detached_without_terminal()
+                return
+            if turn_terminal:
+                return
+            if not _daily_done_seen:
+                _finish_detached_without_terminal()
+                return
 
         if deferred_payload is not None:
             return
@@ -7936,6 +8577,8 @@ def _stream_cc_daily_soft_window(
         if _recall_shown:
             # Kept with the reply so history shows what surfaced after a reload.
             cc_usage['memory_recall'] = _recall_shown
+        if _birth_shown:
+            cc_usage['birth'] = _birth_shown
         cc_usage['canonical_sha256'] = canonical.projection_hash
         cc_usage['canonical_content_length'] = len(canonical.content)
         cc_usage['canonical_provider_round_count'] = len(canonical.provider_rounds)
@@ -7943,15 +8586,34 @@ def _stream_cc_daily_soft_window(
         cc_usage['transcript_identity'] = canonical.transcript_identity
 
         if not str(text or '').strip():
-            _daily_rt.handle_provider_failure(
-                _daily_plan,
-                error_code='empty_provider_response',
-                resident=_CC_RESIDENT,
-            )
+            if _client_detached:
+                cleanup = _rescue_and_abort(
+                    'empty_provider_response',
+                    respawn=True,
+                )
+                _record_daily_cancel(
+                    _turn_data,
+                    _daily_stream_cancellation_state(
+                        _daily_plan, _CC_RESIDENT, _turn_data,
+                    ),
+                    cleanup_action='abort_daily_turn',
+                    partial_rescue_performed=bool(
+                        cleanup.get('partial_rescue_performed')
+                    ),
+                    abort_requested=True,
+                    respawn_requested=True,
+                )
+            else:
+                _daily_rt.handle_provider_failure(
+                    _daily_plan,
+                    error_code='empty_provider_response',
+                    resident=_CC_RESIDENT,
+                )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': 'empty provider response', 'retryable': False,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': 'empty provider response', 'retryable': False,
+                }) + SSE_END
             return
 
         _cache_info_json = (
@@ -7979,6 +8641,11 @@ def _stream_cc_daily_soft_window(
                 display_segments=canonical.display_segments,
             )
             assistant_persisted = True
+            if _client_detached:
+                _turn_data['_daily_detached_persisted'] = True
+                _turn_data['_daily_detached_assistant_id'] = assistant_id
+                _turn_data['_daily_detached_content'] = canonical.content
+                _turn_data['_daily_detached_thinking'] = canonical.thinking
         except _daily_ctx.ConflictError as exc:
             _daily_rt.abort_daily_turn(
                 _daily_plan,
@@ -7987,9 +8654,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
+                }) + SSE_END
             return
         except Exception as exc:
             _daily_rt.abort_daily_turn(
@@ -7998,9 +8666,10 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
+                }) + SSE_END
             return
 
         if _recall_shown:
@@ -8029,13 +8698,14 @@ def _stream_cc_daily_soft_window(
                 json.dumps(exc.manifest, ensure_ascii=False),
             )
             turn_terminal = True
-            yield 'data: ' + json.dumps({
-                't': 'err',
-                'd': 'cursor CAS conflict after assistant persist',
-                'retryable': False,
-                'code': 'cursor_cas_conflict',
-                'assistant_message_id': exc.assistant_message_id,
-            }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'err',
+                    'd': 'cursor CAS conflict after assistant persist',
+                    'retryable': False,
+                    'code': 'cursor_cas_conflict',
+                    'assistant_message_id': exc.assistant_message_id,
+                }) + SSE_END
             return
 
         if (
@@ -8080,19 +8750,20 @@ def _stream_cc_daily_soft_window(
                 assistant_id,
                 _daily_plan.request_id,
             )
-            yield 'data: ' + json.dumps({
-                't': 'turn_reconcile',
-                'd': {
-                    'content': canonical.content,
-                    'thinking': canonical.thinking,
-                    'self_state': canonical.self_state,
-                    'display_segments': json.loads(canonical.display_segments),
-                    'tool_calls': [dict(tc) for tc in canonical.tool_calls],
-                    'choices': list(canonical.choices),
-                    'canonical_sha256': canonical.projection_hash,
-                    'assistant_message_id': assistant_id,
-                },
-            }, ensure_ascii=False) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'turn_reconcile',
+                    'd': {
+                        'content': canonical.content,
+                        'thinking': canonical.thinking,
+                        'self_state': canonical.self_state,
+                        'display_segments': json.loads(canonical.display_segments),
+                        'tool_calls': [dict(tc) for tc in canonical.tool_calls],
+                        'choices': list(canonical.choices),
+                        'canonical_sha256': canonical.projection_hash,
+                        'assistant_message_id': assistant_id,
+                    },
+                }, ensure_ascii=False) + SSE_END
         else:
             logging.getLogger(__name__).info(
                 'turn_projection_confirmed canonical_sha256=%s message_id=%s request_id=%s',
@@ -8100,15 +8771,17 @@ def _stream_cc_daily_soft_window(
                 assistant_id,
                 _daily_plan.request_id,
             )
-            yield 'data: ' + json.dumps({
-                't': 'turn_final',
-                'd': {
-                    'status': 'confirmed',
-                    'canonical_sha256': canonical.projection_hash,
-                    'assistant_message_id': assistant_id,
-                },
-            }, ensure_ascii=False) + SSE_END
-        yield ('persisted', canonical.content, canonical.thinking)
+            if not _client_detached:
+                yield 'data: ' + json.dumps({
+                    't': 'turn_final',
+                    'd': {
+                        'status': 'confirmed',
+                        'canonical_sha256': canonical.projection_hash,
+                        'assistant_message_id': assistant_id,
+                    },
+                }, ensure_ascii=False) + SSE_END
+        if not _client_detached:
+            yield ('persisted', canonical.content, canonical.thinking)
 
         _write_session_memo(_uc, _cc_text, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
         try:
@@ -8143,13 +8816,15 @@ def _stream_cc_daily_soft_window(
                 ):
                     if _k in cc_usage:
                         _usage_evt[_k] = cc_usage[_k]
-            yield 'data: ' + json.dumps(_usage_evt) + SSE_END
-        yield 'data: ' + json.dumps({
-            't': 'done',
-            'ok': True,
-            'assistant_message_id': assistant_id,
-            'canonical_sha256': canonical.projection_hash,
-        }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps(_usage_evt) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'done',
+                'ok': True,
+                'assistant_message_id': assistant_id,
+                'canonical_sha256': canonical.projection_hash,
+            }) + SSE_END
         return None
     except CanonicalTurnError as exc:
         if _daily_plan:
@@ -8159,43 +8834,48 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'retryable': False,
-            'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
-        }, ensure_ascii=False) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'retryable': False,
+                'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
+            }, ensure_ascii=False) + SSE_END
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
+            }) + SSE_END
         return None
     except _daily_ctx.DeferredError as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
+            }) + SSE_END
         return None
     except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
+            }) + SSE_END
         return None
     except _daily_rt.FirstTurnFinalizePendingError as exc:
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'retryable': True,
-            'code': 'FIRST_TURN_FINALIZE_PENDING',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'retryable': True,
+                'code': 'FIRST_TURN_FINALIZE_PENDING',
+            }) + SSE_END
         return None
     except _daily_rt.LeaseHeartbeatTerminalFailure as exc:
         if _daily_plan:
@@ -8206,9 +8886,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
+            }) + SSE_END
         return None
     except _daily_rt.DailyWindowToolFencePending as exc:
         if _daily_plan:
@@ -8218,9 +8899,10 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
+            }) + SSE_END
         return None
     except _daily_rt.EpochMismatchError as exc:
         if _daily_plan:
@@ -8231,9 +8913,10 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
-        }) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
+            }) + SSE_END
         return None
     except (_cbb.ColdBootstrapOverflow, _cbb.NoBenefitRespawnError) as exc:
         if _daily_plan:
@@ -8246,19 +8929,21 @@ def _stream_cc_daily_soft_window(
         turn_terminal = True
         _usage = getattr(exc, 'usage', None) or {}
         if isinstance(_usage, dict) and _usage.get('cold_budget_overflow') is not None:
-            yield 'data: ' + json.dumps({'t': 'usage', **{
-                k: _usage.get(k) for k in (
-                    'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
-                    'cold_prompt_target', 'cold_history_budget', 'cold_history_trimmed',
-                    'cold_budget_mode',
-                ) if k in _usage
-            }}) + SSE_END
-        yield 'data: ' + json.dumps({
-            't': 'err',
-            'd': str(exc),
-            'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
-            'retryable': False,
-        }) + SSE_END
+            if not _client_detached:
+                yield 'data: ' + json.dumps({'t': 'usage', **{
+                    k: _usage.get(k) for k in (
+                        'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
+                        'cold_prompt_target', 'cold_history_budget', 'cold_history_trimmed',
+                        'cold_budget_mode',
+                    ) if k in _usage
+                }}) + SSE_END
+        if not _client_detached:
+            yield 'data: ' + json.dumps({
+                't': 'err',
+                'd': str(exc),
+                'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
+                'retryable': False,
+            }) + SSE_END
         return None
     except Exception as exc:
         error_code = str(getattr(exc, 'error_code', None) or type(exc).__name__)
@@ -8275,10 +8960,24 @@ def _stream_cc_daily_soft_window(
         })
         if diagnostics:
             _turn_data['_terminal_contract_diag'] = diagnostics
-        yield _sse_json(_chat_stream_failure_event(
-            exc,
-            partial_rescue=bool(cleanup.get('partial_rescue_performed')),
-        ))
+        if _client_detached:
+            _record_daily_cancel(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    _daily_plan, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='detach_drain_abort',
+                partial_rescue_performed=bool(
+                    cleanup.get('partial_rescue_performed')
+                ),
+                abort_requested=True,
+                respawn_requested=True,
+            )
+        if not _client_detached:
+            yield _sse_json(_chat_stream_failure_event(
+                exc,
+                partial_rescue=bool(cleanup.get('partial_rescue_performed')),
+            ))
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
@@ -8298,7 +8997,7 @@ def _stream_cc_daily_soft_window(
                 )
             if released is not None:
                 turn_terminal = True
-                _record_daily_stream_cancellation(
+                _record_daily_cancel(
                     _turn_data,
                     cancellation_state,
                     cleanup_action='unsent_release',
@@ -8308,7 +9007,7 @@ def _stream_cc_daily_soft_window(
                 cleanup = _rescue_and_abort(
                     'client_stream_cancelled', respawn=True,
                 )
-                _record_daily_stream_cancellation(
+                _record_daily_cancel(
                     _turn_data,
                     cancellation_state,
                     cleanup_action='abort_daily_turn',
@@ -8319,19 +9018,36 @@ def _stream_cc_daily_soft_window(
                     respawn_requested=True,
                 )
         elif _daily_plan is None and not turn_terminal:
-            _record_daily_stream_cancellation(
+            _record_daily_cancel(
                 _turn_data,
                 _daily_stream_cancellation_state(
                     None, _CC_RESIDENT, _turn_data,
                 ),
                 cleanup_action='prepare_incomplete',
             )
+        if (
+            _daily_plan is not None
+            and _client_detached
+            and not _turn_data.get('_daily_detached_persisted')
+            and not _turn_data.get('_terminal_contract_diag')
+        ):
+            _record_daily_cancel(
+                _turn_data,
+                _daily_stream_cancellation_state(
+                    _daily_plan, _CC_RESIDENT, _turn_data,
+                ),
+                cleanup_action='abort_daily_turn',
+                abort_requested=True,
+                respawn_requested=True,
+            )
 
 
 @app.route('/chat/stream', methods=['POST'])
 def chat_stream():
+    birth_started_at = time.time()
     from flask import Response, stream_with_context
-    if _get_provider() == 'claude_code':
+    _chat_provider = _get_provider()
+    if _chat_provider in ('claude_code', 'api_relay'):
         def gen_cc():
             from moments_turn import (
                 prepare_turn,
@@ -8366,6 +9082,37 @@ def chat_stream():
                 request_reality_context = _normalize_reality_context(
                     _request_data.pop('reality_context', None)
                 )
+                from chat.provider_router import capture_generation_authority, ProviderConfigError
+                from chat.cc_auth import CCProviderEnvError, build_cc_provider_env
+                try:
+                    _cc_authority = capture_generation_authority(
+                        provider=_chat_provider,
+                    )
+                    _cc_env = build_cc_provider_env(
+                        _cc_authority.provider,
+                        _cc_authority.model_identity,
+                        token_getter=lambda: CC_TOKEN,
+                    )
+                except CCProviderEnvError as _provider_exc:
+                    _provider_message = (
+                        '当前 API Relay 模型不可用，请先检查 Relay 模型设置。'
+                        if _provider_exc.code == 'api_relay_model_unavailable'
+                        else 'API Relay 连接配置不可用，请先检查当前 Relay 设置。'
+                        if _provider_exc.code == 'api_relay_gateway_unavailable'
+                        else 'Claude Code 订阅凭证不可用，请先检查登录配置。'
+                    )
+                    yield _sse_json({
+                        't': 'err', 'd': _provider_message, 'code': _provider_exc.code,
+                    })
+                    yield _sse_json({'t': 'done', 'ok': False})
+                    return
+                except ProviderConfigError:
+                    yield _sse_json({
+                        't': 'err', 'd': 'Chat provider 配置不可用。',
+                        'code': 'chat_provider_unavailable',
+                    })
+                    yield _sse_json({'t': 'done', 'ok': False})
+                    return
                 if (
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
@@ -8377,9 +9124,11 @@ def chat_stream():
                         yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
                         return
                     try:
+                        _retire_cc_resident_for_provider_change(_cc_env)
                         yield from _stream_cc_deferred_confirmation(
                             _request_data,
                             reality_context=request_reality_context,
+                            provider_env=_cc_env,
                         )
                     finally:
                         _gen_release(
@@ -8555,6 +9304,7 @@ def chat_stream():
                             yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                         yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                         return
+                _retire_cc_resident_for_provider_change(_cc_env)
                 phase = 'activate_turn'
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 from chat import daily_context as _daily_ctx
@@ -8566,6 +9316,9 @@ def chat_stream():
                         _turn_data,
                         _uc,
                         request_reality_context=request_reality_context,
+                        birth_started_at=birth_started_at,
+                        provider_env=_cc_env,
+                        provider_authority=_cc_authority,
                     )
                     try:
                         for _chunk in _daily_stream:
@@ -8605,7 +9358,25 @@ def chat_stream():
                             close_stream()
                         if not _released[0]:
                             _released[0] = True
-                            if _daily_out:
+                            if _turn_data.get('_daily_detached_persisted'):
+                                assistant_id = _turn_data.get('_daily_detached_assistant_id')
+                                _daily_out = (
+                                    'persisted',
+                                    _turn_data.get('_daily_detached_content') or '',
+                                    _turn_data.get('_daily_detached_thinking') or '',
+                                )
+                                _persisted[0] = True
+                                _flight_recorder.record(
+                                    'assistant_persisted',
+                                    assistant_message_id=assistant_id,
+                                    assistant_persisted=True,
+                                    dedupe=True,
+                                )
+                                _gen_release(
+                                    (_daily_out[1], _daily_out[2]),
+                                    expected_owner_token=_gen_owner.get('token'),
+                                )
+                            elif _daily_out:
                                 _persisted[0] = True
                                 _gen_release(
                                     (_daily_out[1], _daily_out[2]),
@@ -8643,16 +9414,17 @@ def chat_stream():
                     # 先确定 resident cold/hot，再按当前 generation 的已知文件集合构建 history
                     from chat.system_builder import build_cc_static_parts
                     _static_parts = build_cc_static_parts()
-                    _cc_env = dict(os.environ)
-                    _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-                    _cc_env.pop('ANTHROPIC_API_KEY', None)
-                    # R0 native fork (flagged): resume child trial → hot delta only.
-                    # Else #204 cold bootstrap via ensure_alive.
+                    # R0 native fork (flagged) stays on the subscription path.
+                    # API Gateway requests use the same resident but cold-spawn through its env.
                     _cc_pending_respawn_reason = None
-                    if _rewrite_id and _try_staged_rewrite_native_fork(
-                        _turn_data,
-                        system_text=_static_parts['full_system'],
-                        env=_cc_env,
+                    if (
+                        _rewrite_id
+                        and _cc_authority.provider == 'claude_code'
+                        and _try_staged_rewrite_native_fork(
+                            _turn_data,
+                            system_text=_static_parts['full_system'],
+                            env=_cc_env,
+                        )
                     ):
                         _cc_is_cold = False
                     else:
@@ -8720,6 +9492,7 @@ def chat_stream():
                         display_thinking_prompt=_display_thinking_prompt,
                         reality_context=request_reality_context,
                         on_memory_recall=_recalled.append,
+                        provider_env=_cc_env,
                     )
                     for evt, payload in filter_display_thinking_events(
                         _resident_events,
@@ -8976,563 +9749,6 @@ def chat_stream():
                         pass
         return Response(stream_with_context(cc_history_rewrite.guard_cc_generation(gen_cc())), mimetype='text/event-stream',
                         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-    def generate():
-        from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
-
-        _conv = DEFAULT_CONVERSATION_ID
-        _persisted = [False]
-        _gen_owner = {}
-        _turn_data: dict = {}
-        assistant_id = None
-        _request_data = request.get_json(silent=True) or {}
-        request_reality_context = _normalize_reality_context(
-            _request_data.pop('reality_context', None)
-        )
-        if (
-            _request_data.get('approval_id') is not None
-            or _request_data.get('confirmation_decision') is not None
-            or _request_data.get('pending_action_id') is not None
-        ):
-            yield from _stream_api_confirmation(_request_data)
-            return
-        try:
-            _turn_data = prepare_turn(_request_data, conversation_id=_conv, memories_db_path=DB_PATH)
-            _uc = (_turn_data.get('content') or '').strip()
-            _turn_data = insert_user_message(
-                get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
-            )
-            _rewrite_id = str(_turn_data.get('rewrite_id') or '').strip()
-            if _rewrite_id:
-                try:
-                    _begin_staged_rewrite_generation(_turn_data)
-                except Exception as _rw_exc:
-                    yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
-                    return
-            # touch_user_interaction() runs inside insert_user_message after persist.
-            if _uc:
-                try:
-                    import emotion_engine as _ee_r
-                    _d_r = _ee_r.rule_score_desire(_uc)
-                    if _d_r['p_delta'] or _d_r['i_delta']:
-                        _ee_r.apply_desire_delta_async(_d_r['p_delta'], _d_r['i_delta'])
-                except Exception:
-                    pass
-            if _rewrite_id:
-                while True:
-                    mode, reused = _gen_acquire_or_wait(
-                        logical_identity={
-                            'user_message_id': _turn_data.get('user_message_id'),
-                            'turn_key': _turn_data.get('turn_key'),
-                        },
-                        owner_token_out=_gen_owner,
-                    )
-                    if mode == 'own':
-                        break
-            else:
-                mode, reused = _gen_acquire_or_wait(
-                    logical_identity={
-                        'user_message_id': _turn_data.get('user_message_id'),
-                        'turn_key': _turn_data.get('turn_key'),
-                    },
-                    owner_token_out=_gen_owner,
-                )
-                if mode == 'reused':
-                    text, thinking = reused
-                    if thinking:
-                        yield 'data: ' + json.dumps({'t': 'think', 'd': thinking}) + SSE_END
-                    if text:
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
-                    return
-            _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
-            _api_turn_lease = None
-            if _get_provider() != 'claude_code':
-                _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
-            _tool_ctx.conversation_id = _conv
-            _tool_ctx.user_message_id = _turn_data.get('user_message_id')
-            for _jev in _workspace_job_sse_payloads():
-                yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
-            # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
-            text, thinking = None, None
-            _released = [False]
-            cache_read_total, cache_create_total, input_tokens_total, output_tokens_total = 0, 0, 0, 0
-            cache_create_5m_total, cache_create_1h_total = 0, 0
-            api_rounds = []
-            cache_supported = None
-            stream_started_at = time.monotonic()
-            _is_user_turn = bool(_uc) or bool(_rewrite_id) or is_pending_user_turn(
-                get_db, _turn_data.get('user_message_id')
-            )
-            _wake_claim_ids = []
-            think_acc, text_acc, tool_calls_acc = [], [], []
-            display_segments = DisplaySegmentAccumulator()
-
-            def _clean_text(raw):
-                t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
-                return re.sub(r'```tool_result\s.*?```\s*', '', t, flags=re.DOTALL).strip()
-
-            def _persist(p_text, p_thinking):
-                nonlocal assistant_id
-                if not p_text or _persisted[0]:
-                    return
-                _ci_payload = _build_cache_info_payload(
-                    cache_read=cache_read_total,
-                    cache_creation=cache_create_total,
-                    cache_creation_5m=cache_create_5m_total,
-                    cache_creation_1h=cache_create_1h_total,
-                    input_tokens=input_tokens_total,
-                    output_tokens=output_tokens_total,
-                    elapsed_sec=round(max(0.0, time.monotonic() - stream_started_at), 3),
-                    cache_supported=cache_supported,
-                )
-                if api_rounds:
-                    _ci_payload['v'] = 2
-                    _ci_payload['provider'] = 'api_relay'
-                    _ci_payload['num_rounds'] = len(api_rounds)
-                    _ci_payload['rounds'] = api_rounds
-                    _ci_payload['last_round_context'] = api_rounds[-1]['context_tokens']
-                    _ci_payload['max_round_context'] = max(r['context_tokens'] for r in api_rounds)
-                _ci = json.dumps(_ci_payload, ensure_ascii=False) if (cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total) else ''
-                # 抽出选择器标签：正文去掉 [choices]…，choices 列存 JSON 数组
-                _pc, _choices = _extract_choices(p_text)
-                if _choices and not _pc:
-                    _pc = '[选项: ' + ' / '.join(_choices) + ']'  # 不存空 content，Claude API 拒绝空消息
-                if _rewrite_id:
-                    _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
-                        _turn_data,
-                        assistant_text=_pc,
-                        wake_ids=_wake_claim_ids,
-                        one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
-                        conversation_id=_conv,
-                    )
-                assistant_id = _persist_turn_assistant(
-                    _turn_data,
-                    content=_pc,
-                    thinking=p_thinking or '',
-                    tool_calls_json=json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '',
-                    cache_info_json=_ci,
-                    choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
-
-                    display_segments_json=display_segments.to_json(),
-
-                    side_effects=_turn_data.get('_staged_side_effects'),
-                )
-                # Candidate durable ≠ active assistant durable.
-                if not _rewrite_id:
-                    consume_wake_ids(get_db, _wake_claim_ids)
-                    _write_session_memo(_uc, _pc, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
-                _persisted[0] = True
-                if assistant_id is not None:
-                    try:
-                        from moments_persistence import after_assistant_persisted
-                        after_assistant_persisted(
-                            memories_db_path=DB_PATH,
-                            turn_data=_turn_data,
-                            assistant_message_id=assistant_id,
-                            conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        from chat.scoring_identity import trigger_turn_scoring
-                        trigger_turn_scoring(
-                            assistant_text=_pc,
-                            message_id=_turn_data.get('user_message_id'),
-                            get_db_fn=get_db,
-                        )
-                    except Exception:
-                        pass
-            try:
-                # Staged Relay rewrite: never drain feedback / consume dream in prompt build.
-                _relay_one_shot_claims = {}
-                (system, dynamic_context), _wake_claim_ids = build_system_with_wake_claim(
-                    build_system,
-                    get_db,
-                    user_turn=_is_user_turn,
-                    split_dynamic=True,
-                    allow_side_effects=not bool(_rewrite_id),
-                )
-                if _rewrite_id:
-                    _relay_one_shot_claims, _relay_os_text = _peek_relay_staged_one_shots()
-                    _turn_data['_relay_one_shot_claims'] = _relay_one_shot_claims
-                    if _relay_os_text:
-                        dynamic_context = '\n\n'.join(
-                            p for p in (dynamic_context, _relay_os_text) if p and str(p).strip()
-                        )
-                messages = build_messages(rewrite_id=_rewrite_id or None)
-                _recall, _recall_items = _recall_memories(_uc) if _uc else ('', [])
-                if _recall:
-                    yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': {'count': len(_recall_items), 'items': _recall_items}}, ensure_ascii=False) + SSE_END
-                from relay.manager import relay as _chat_relay
-                cache_supported = bool((_chat_relay.caps or {}).get('cache'))
-                _thinking_ok = _model_supports_thinking()
-                _use_guagua_safe = _is_guagua_active() and os.environ.get('GUAGUA_SAFE_MODE') == '1'
-                if not _use_guagua_safe:
-                    messages = _apply_rolling_cache_control(messages)
-                volatile_context = '\n\n'.join(p for p in (dynamic_context, _recall) if p and p.strip())
-                if volatile_context:
-                    messages = _prepend_context_to_last_user(messages, volatile_context)
-                if _use_guagua_safe:
-                    system, messages = _guagua_safe_context(system, messages)
-                # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
-                _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, get_tools())
-                # Reality is request-scoped and must not affect tool selection.
-                messages = _append_reality_to_last_user(messages, request_reality_context)
-                for _round in range(5):
-                    payload = {
-                        'max_tokens': 16000,
-                        'stream': True,
-                        'system': system,
-                        'messages': messages,
-                    }
-                    if not _use_guagua_safe:
-                        payload['tools'] = _turn_tools
-                        payload['metadata'] = {'user_id': 'hayana-fyodor-stable'}
-                    if _thinking_ok and not _use_guagua_safe:
-                        payload['thinking'] = {'type': 'enabled', 'budget_tokens': 10000}
-                    # relay adapter 自动根据 relay 能力裁剪 thinking/cache/tools
-                    resp = _chat_relay.call_stream(payload, timeout=300)
-                    blocks, cur, stop_reason = [], None, None
-                    round_cache_read = 0
-                    round_cache_create = 0
-                    round_cache_create_5m = 0
-                    round_cache_create_1h = 0
-                    round_input_tokens = 0
-                    round_output_tokens = 0
-                    for raw in resp:
-                        line = raw.decode('utf-8', 'ignore').strip()
-                        if not line.startswith('data:'):
-                            continue
-                        try:
-                            ev = json.loads(line[5:].strip())
-                        except Exception:
-                            continue
-                        et = ev.get('type')
-                        if et == 'message_start':
-                            _u = (ev.get('message') or {}).get('usage') or {}
-                            round_cache_read = max(round_cache_read, _u.get('cache_read_input_tokens', 0) or 0)
-                            round_cache_create = max(round_cache_create, _u.get('cache_creation_input_tokens', 0) or 0)
-                            _cc = _u.get('cache_creation') or {}
-                            round_cache_create_5m = max(round_cache_create_5m, _cc.get('ephemeral_5m_input_tokens', 0) or 0)
-                            round_cache_create_1h = max(round_cache_create_1h, _cc.get('ephemeral_1h_input_tokens', 0) or 0)
-                            round_input_tokens = max(round_input_tokens, _u.get('input_tokens', 0) or 0)
-                            round_output_tokens = max(round_output_tokens, _u.get('output_tokens', 0) or 0)
-                        elif et == 'content_block_start':
-                            cb  = ev.get('content_block', {}) or {}
-                            cur = {'type': cb.get('type')}
-                            if cur['type'] == 'tool_use':
-                                cur['id'] = cb.get('id')
-                                cur['name'] = cb.get('name')
-                                cur['_json'] = ''
-                            elif cur['type'] == 'thinking':
-                                cur['thinking'] = ''
-                            elif cur['type'] == 'text':
-                                cur['text'] = ''
-                        elif et == 'content_block_delta':
-                            d  = ev.get('delta', {})
-                            dt = d.get('type')
-                            if dt == 'thinking_delta':
-                                s = d.get('thinking', '')
-                                if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
-                                think_acc.append(s)
-                                display_segments.append_thinking(s)
-                                yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
-                            elif dt == 'text_delta':
-                                s = d.get('text', '')
-                                if cur is not None: cur['text'] = cur.get('text', '') + s
-                                text_acc.append(s)
-                                display_segments.append_text(s)
-                                yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
-                            elif dt == 'input_json_delta':
-                                if cur is not None:
-                                    cur['_json'] = cur.get('_json', '') + d.get('partial_json', '')
-                                    # 大参数（如 create_html 的整页内容）生成期间前端原本零事件，
-                                    # 空窗超时会断连；每 2KB 推一次进度，顺便让哈娅看见在长
-                                    if len(cur['_json']) - cur.get('_prog', 0) >= 2048:
-                                        cur['_prog'] = len(cur['_json'])
-                                        yield 'data: ' + json.dumps({'t': 'tool_progress', 'd': {'name': cur.get('name', ''), 'chars': cur['_prog']}}) + SSE_END
-                            elif dt == 'signature_delta':
-                                if cur is not None: cur['signature'] = cur.get('signature', '') + d.get('signature', '')
-                        elif et == 'content_block_stop':
-                            if cur is not None:
-                                cur.pop('_prog', None)
-                                if cur.get('type') == 'tool_use':
-                                    try:
-                                        cur['input'] = json.loads(cur.pop('_json') or '{}')
-                                    except Exception:
-                                        cur['input'] = {}
-                                blocks.append(cur)
-                                cur = None
-                        elif et == 'message_delta':
-                            _du = ev.get('usage') or {}
-                            if _du:
-                                round_cache_read = max(round_cache_read, _du.get('cache_read_input_tokens', 0) or 0)
-                                round_cache_create = max(round_cache_create, _du.get('cache_creation_input_tokens', 0) or 0)
-                                _dcc = _du.get('cache_creation') or {}
-                                round_cache_create_5m = max(round_cache_create_5m, _dcc.get('ephemeral_5m_input_tokens', 0) or 0)
-                                round_cache_create_1h = max(round_cache_create_1h, _dcc.get('ephemeral_1h_input_tokens', 0) or 0)
-                                round_input_tokens = max(round_input_tokens, _du.get('input_tokens', 0) or 0)
-                                round_output_tokens = max(round_output_tokens, _du.get('output_tokens', 0) or 0)
-                            stop_reason = (ev.get('delta', {}) or {}).get('stop_reason') or stop_reason
-                        elif et == 'message_stop':
-                            break
-                    cache_read_total += round_cache_read
-                    cache_create_total += round_cache_create
-                    cache_create_5m_total += round_cache_create_5m
-                    cache_create_1h_total += round_cache_create_1h
-                    input_tokens_total += round_input_tokens
-                    output_tokens_total += round_output_tokens
-                    api_rounds.append({
-                        'index': len(api_rounds) + 1,
-                        'complete': True,
-                        'input_tokens': round_input_tokens,
-                        'output_tokens': round_output_tokens,
-                        'cache_read': round_cache_read,
-                        'cache_creation': round_cache_create,
-                        'context_tokens': round_input_tokens + round_cache_read + round_cache_create,
-                    })
-                    tool_uses = [b for b in blocks if b.get('type') == 'tool_use']
-                    if stop_reason == 'tool_use' and not tool_uses:
-                        continue
-                    if not tool_uses:
-                        break
-                    messages.append({'role': 'assistant', 'content': blocks})
-                    results = []
-                    for tu in tool_uses:
-                        tname = tu.get('name', '')
-                        targs = tu.get('input') or {}
-                        dispatched = _dispatch_api_chat_tool(
-                            tname,
-                            targs,
-                            _api_turn_lease,
-                            tool_use_id=tu.get('id'),
-                        )
-                        if isinstance(dispatched, dict) and dispatched.get('deferred_tool_use'):
-                            deferred_event = {
-                                'id': dispatched.get('id') or tu.get('id'),
-                                'name': dispatched.get('name') or tname,
-                                'args': _slim_args(dispatched.get('args') or targs),
-                                'tool_input': _slim_args(dispatched.get('tool_input') or targs),
-                                'approval_id': dispatched.get('approval_id'),
-                                'pending_action_id': dispatched.get('pending_action_id'),
-                                'deferred_tool_use': True,
-                                'status': dispatched.get('status'),
-                                'approval_prompt': dispatched.get('approval_prompt'),
-                            }
-                            display_segments.append_tool(len(tool_calls_acc))
-                            yield 'data: ' + json.dumps({
-                                't': 'tool_use',
-                                'd': deferred_event,
-                                'idx': len(tool_calls_acc),
-                            }, ensure_ascii=False) + SSE_END
-                            yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
-                            return
-                        result_str = str(dispatched)
-                        display_segments.append_tool(len(tool_calls_acc))
-                        yield 'data: ' + json.dumps({
-                            't': 'tool_use',
-                            'd': {
-                                'id': tu.get('id'),
-                                'name': tname,
-                                'args': _slim_args(targs),
-                            },
-                            'idx': len(tool_calls_acc),
-                        }, ensure_ascii=False) + SSE_END
-                        file_path = _write_tool_file_path(tname, targs)
-                        old_content = _read_file_safe(file_path) if file_path else None
-                        tc_item = {
-                            'name': tname,
-                            'args': targs,
-                            'result': result_str,
-                            'success': not result_str.startswith('工具执行失败'),
-                        }
-                        if file_path and old_content is not None and tc_item['success']:
-                            new_content = _read_file_safe(file_path)
-                            added, removed = _diff_line_counts(old_content, new_content)
-                            if added or removed:
-                                tc_item['diff'] = {'file': file_path, 'added': added, 'removed': removed}
-                        if tname in ('create_html', 'create_markdown', 'create_document') and tc_item['success']:
-                            try:
-                                parsed = json.loads(result_str)
-                                if isinstance(parsed, dict) and 'artifact' in parsed:
-                                    tc_item['artifact'] = parsed['artifact']
-                            except Exception:
-                                pass
-                        tool_calls_acc.append(tc_item)
-                        _slim_item = {**tc_item, 'args': _slim_args(tc_item.get('args')),
-                                      'result': str(tc_item.get('result') or '')[:2000]}
-                        yield 'data: ' + json.dumps({'t': 'tool_result', 'd': _slim_item, 'idx': len(tool_calls_acc) - 1}) + SSE_END
-                        # 旧版缓存前端只认 tool_call；dup=1 让新前端跳过防止重复渲染
-                        yield 'data: ' + json.dumps({'t': 'tool_call', 'd': _slim_item, 'dup': 1}) + SSE_END
-                        results.append({'type': 'tool_result', 'tool_use_id': tu.get('id'),
-                                        'content': result_str})
-                    messages.append({'role': 'user', 'content': results})
-                    text_acc.append(NL)
-                text     = _clean_text(''.join(text_acc))
-                thinking = ''.join(think_acc)
-                _persist(text, thinking)
-            finally:
-                # 断流救援：客户端断开(GeneratorExit)或中途异常时，已生成的内容不能凭空消失
-                if not _persisted[0]:
-                    try:
-                        _rt = _clean_text(''.join(text_acc)) if text_acc else ''
-                        if _rt:
-                            _persist(_rt, ''.join(think_acc))
-                            text, thinking = _rt, ''.join(think_acc)
-                    except Exception:
-                        pass
-                if _rewrite_id:
-                    _discard_staged_resident('staged_rewrite_end')
-                _released[0] = True
-                _gen_release(
-                    (text, thinking) if text and not _rewrite_id else None,
-                    expected_owner_token=_gen_owner.get('token'),
-                )
-            if tool_calls_acc and not thinking:
-                _ts = _summarize_traces_sync(tool_calls_acc)
-                if _ts:
-                    yield 'data: ' + json.dumps({'t': 'trace_summary', 'd': _ts}) + SSE_END
-            if cache_supported is not None or cache_read_total or cache_create_total or input_tokens_total or output_tokens_total:
-                _elapsed_sec = round(max(0.0, time.monotonic() - stream_started_at), 3)
-                _usage_payload = _build_cache_info_payload(
-                    cache_read=cache_read_total,
-                    cache_creation=cache_create_total,
-                    cache_creation_5m=cache_create_5m_total,
-                    cache_creation_1h=cache_create_1h_total,
-                    input_tokens=input_tokens_total,
-                    output_tokens=output_tokens_total,
-                    elapsed_sec=_elapsed_sec,
-                    cache_supported=cache_supported,
-                )
-                yield 'data: ' + json.dumps({'t': 'usage', **_usage_payload}, default=str) + SSE_END
-            _done = {'t': 'done', 'ok': bool(text)}
-            if _rewrite_id:
-                _done['rewrite_id'] = _rewrite_id
-            if not text and _rewrite_id:
-                _fail_staged_rewrite(_turn_data, 'empty generation')
-            yield 'data: ' + json.dumps(_done) + SSE_END
-        except urllib.error.HTTPError as e:
-            _ecode = e.code
-            _emsg  = e.read().decode()[:300]
-            try:
-                from chat.provider_router import fallback_for_http_status
-                _fallback_provider = fallback_for_http_status(_ecode)
-            except Exception:
-                # Invalid fallback configuration fails closed: preserve the
-                # upstream error instead of silently choosing another model.
-                _fallback_provider = 'none'
-            if _fallback_provider == 'deepseek':
-                yield 'data: ' + json.dumps({'t': 'notice', 'd': '已切换至备用模型'}) + SSE_END
-                try:
-                    _ds_key = os.environ.get('DEEPSEEK_API_KEY', '')
-                    # 将 system/messages 转成 DeepSeek 兼容格式
-                    _ds_sys_text = ''
-                    if isinstance(system, str):
-                        _ds_sys_text = system
-                    elif isinstance(system, list):
-                        _ds_sys_text = '\n'.join(b.get('text', '') for b in system if isinstance(b, dict) and b.get('type') == 'text')
-                    _ds_msgs = []
-                    if _ds_sys_text:
-                        _ds_msgs.append({'role': 'system', 'content': _ds_sys_text})
-                    for _m in messages:
-                        _role = _m.get('role')
-                        if _role not in ('user', 'assistant'):
-                            continue
-                        _mc = _m.get('content', '')
-                        if isinstance(_mc, str):
-                            _ds_msgs.append({'role': _role, 'content': _mc})
-                        elif isinstance(_mc, list):
-                            _text_parts = [c.get('text', '') for c in _mc if isinstance(c, dict) and c.get('type') == 'text']
-                            if _text_parts:
-                                _ds_msgs.append({'role': _role, 'content': ''.join(_text_parts)})
-                    _ds_model = config_store.get_deepseek_chat_model()
-                    _ds_pay = {
-                        'model': _ds_model,
-                        'thinking': {'type': 'disabled'},
-                        'max_tokens': 8000,
-                        'messages': _ds_msgs,
-                    }
-                    _ds_req = urllib.request.Request(
-                        'https://api.deepseek.com/chat/completions',
-                        data=json.dumps(_ds_pay).encode(),
-                        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ds_key}
-                    )
-                    with urllib.request.urlopen(_ds_req, timeout=120) as _dr:
-                        _dres = json.loads(_dr.read())
-                    _dt = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
-                    if _dt:
-                        display_segments.append_text(_dt)
-                        yield 'data: ' + json.dumps({'t': 'text', 'd': _dt}) + SSE_END
-                        _dt_clean, _dt_choices = _extract_choices(_dt)
-                        if _dt_choices and not _dt_clean:
-                            _dt_clean = '[选项: ' + ' / '.join(_dt_choices) + ']'
-                        if _rewrite_id:
-                            # Same freeze contract as the primary Relay persist path.
-                            if not _turn_data.get('_relay_one_shot_claims'):
-                                _peek_claims, _ = _peek_relay_staged_one_shots()
-                                _turn_data['_relay_one_shot_claims'] = _peek_claims
-                            _turn_data['_staged_side_effects'] = _staged_side_effects_payload(
-                                _turn_data,
-                                assistant_text=_dt_clean,
-                                wake_ids=_wake_claim_ids,
-                                one_shot_claims=_turn_data.get('_relay_one_shot_claims') or {},
-                                conversation_id=_conv,
-                            )
-                        assistant_id = _persist_turn_assistant(
-                            _turn_data,
-                            content=_dt_clean,
-                            choices_json=json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else '',
-
-                            display_segments_json=display_segments.to_json(),
-
-                            side_effects=_turn_data.get('_staged_side_effects'),
-                        )
-                        if assistant_id is not None:
-                            try:
-                                from moments_persistence import after_assistant_persisted
-                                after_assistant_persisted(
-                                    memories_db_path=DB_PATH,
-                                    turn_data=_turn_data,
-                                    assistant_message_id=assistant_id,
-                                    conversation_id=getattr(_tool_ctx, 'conversation_id', _conv) or _conv,
-                                )
-                            except Exception:
-                                pass
-                        _persisted[0] = True
-                    _done = {'t': 'done', 'ok': bool(_dt)}
-                    if assistant_id is not None and not _rewrite_id:
-                        _done['assistant_message_id'] = assistant_id
-                    if _rewrite_id:
-                        _done['rewrite_id'] = _rewrite_id
-                    yield 'data: ' + json.dumps(_done) + SSE_END
-                except Exception as _de:
-                    _fail_staged_rewrite(_turn_data, 'DeepSeek fallback失败: ' + str(_de))
-                    yield 'data: ' + json.dumps({'t': 'err', 'd': 'DeepSeek fallback失败: ' + str(_de)}) + SSE_END
-            else:
-                _fail_staged_rewrite(_turn_data, 'API %s: %s' % (_ecode, _emsg))
-                yield 'data: ' + json.dumps({'t': 'err', 'd': 'API %s: %s' % (_ecode, _emsg)}) + SSE_END
-        except urllib.error.URLError:
-            _fail_staged_rewrite(_turn_data, '上游API超时，请重试')
-            yield 'data: ' + json.dumps({'t': 'err', 'd': '上游API超时，请重试'}) + SSE_END
-        except Exception as e:
-            _fail_staged_rewrite(_turn_data, str(e))
-            yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
-        finally:
-            try:
-                release_turn(
-                    conversation_id=_conv,
-                    memories_db_path=DB_PATH,
-                    turn_key=_turn_data.get('turn_key'),
-                    persisted=_persisted[0],
-                )
-            finally:
-                try:
-                    del _tool_ctx.user_message_id
-                except AttributeError:
-                    pass
-    return Response(stream_with_context(generate()), mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route('/workspace/job-events', methods=['GET'])
@@ -10379,6 +10595,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         main_turn = None
         main_turn_entered = False
         observation_committed = False
+        cold_turn = False
         try:
             observation = collect_wake_read_observation(
                 wake_run_id=wake_run_id,
@@ -10438,6 +10655,22 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 main_cache_info['observation_transcript_skip'] = dict(
                     observation_skip
                 )
+            delivery_window_identity = (
+                main_turn.get('_delivery_window_identity') or _wake_window_identity
+            )
+            cold_turn = bool(main_turn.get('proactive_cold_start'))
+            if cold_turn:
+                from chat import daily_runtime as _rt
+                cold_round = _rt.prepare_proactive_cold_wake_round(
+                    main_turn['_proactive_cold_plan'], resident=_CC_RESIDENT,
+                    silent=bool(main_turn.get('silent')),
+                    jsonl_finality=main_turn['_proactive_cold_stream']['jsonl_finality'],
+                )
+                if main_turn.get('silent'):
+                    if cold_round is not None:
+                        main_cache_info['transcript_skip'] = cold_round
+                else:
+                    main_turn['native_transcript_binding'] = cold_round
             exec_out = _wake_exec(
                 wake_action,
                 str(main_turn.get('thinking') or ''),
@@ -10447,6 +10680,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 surfaced_desire_ids=[],
                 desire_ledger_enabled=False,
                 cache_info=main_cache_info,
+                native_transcript_binding=main_turn.get(
+                    'native_transcript_binding'
+                ),
                 tool_calls_json=json.dumps(
                     [
                         {k: v for k, v in call.items() if k != 'id'}
@@ -10456,7 +10692,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 ),
                 display_segments_json=str(main_turn.get('display_segments') or ''),
                 wake_run_id=wake_run_id,
-                window_identity=_wake_window_identity,
+                window_identity=delivery_window_identity,
+                activity=main_turn.get('activity', ('', '')),
                 settlement_required=False,
             )
         except UnifiedNormalWakeSharedUnavailable as exc:
@@ -10513,12 +10750,16 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     'wake_run_id': wake_run_id,
                 })
             if isinstance(main_turn, dict):
+                if cold_turn:
+                    _proactive_cold_abort(main_turn, 'proactive_cold_failed_after_stream')
                 failed_fence = main_turn.get('_shared_delivery_fence')
                 if failed_fence is not None:
                     failed_fence.finish(
                         False,
                         cache_info=main_turn.get('cache_info'),
-                        window_identity=_wake_window_identity,
+                        window_identity=(
+                            main_turn.get('_delivery_window_identity') or _wake_window_identity
+                        ),
                         reason='normal_wake_main_chat_failed',
                     )
             _wake_live_trace(
@@ -10545,11 +10786,21 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         delivery_succeeded = bool(
             isinstance(exec_out, dict) and exec_out.get('delivered')
         )
+        cold_receipt = True
+        if cold_turn:
+            # Still inside the delivery fence: no Chat can slip in before the cursor moves.
+            cold_receipt = delivery_succeeded and _proactive_cold_finalize(main_turn, exec_out)
+            if not delivery_succeeded:
+                _proactive_cold_abort(main_turn, 'proactive_cold_delivery_rejected')
+            if not cold_receipt:
+                main_turn['one_shot_claims'] = {}   # kept: the session that saw it is gone
+                main_turn['postman_edition_date'] = None  # same: paper kept for the next wake
+            _wake_live_trace(wake_run_id, 'PROACTIVE_COLD_FINALIZED', receipt_committed=cold_receipt)
         if delivery_fence is not None:
             delivery_fence.finish(
                 delivery_succeeded,
                 cache_info=main_cache_info,
-                window_identity=_wake_window_identity,
+                window_identity=delivery_window_identity,
                 reason=(
                     'normal_wake_main_chat_delivery_failed'
                     if not delivery_succeeded else 'delivery_succeeded'
@@ -10575,6 +10826,16 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'reason': 'NORMAL_WAKE_MAIN_CHAT_DELIVERY_FAILED',
                 'wake_run_id': wake_run_id,
             })
+        from chat.system_builder import consume_cc_one_shot_claims
+        consume_cc_one_shot_claims(
+            get_db,
+            {
+                'pending_mail_ids': (
+                    main_turn.get('one_shot_claims') or {}
+                ).get('pending_mail_ids') or [],
+            },
+        )
+        _postman_mark_delivered(main_turn.get('postman_edition_date'), wake_run_id)
         _wake_run_id_mark(wake_run_id)
         _wake_live_trace(
             wake_run_id,
@@ -11082,6 +11343,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 cache_info=wake_cache_info,
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
+                native_transcript_binding=render_out.get(
+                    'native_transcript_binding'
+                ),
                 settle_fired_drive=(
                     None
                     if basic_normal
@@ -11810,9 +12074,14 @@ def _gw_build_switch_hooks():
         # Shared production system/persona/memory/state chain for resume + cold.
         static_parts = build_cc_daily_static_parts()
         system_text = static_parts['full_system']
-        env = dict(os.environ)
-        env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
-        env.pop('ANTHROPIC_API_KEY', None)
+        from chat.provider_router import capture_generation_authority
+        from chat.cc_auth import build_cc_provider_env
+        authority = capture_generation_authority()
+        env = build_cc_provider_env(
+            authority.provider,
+            authority.model_identity,
+            token_getter=lambda: CC_TOKEN,
+        )
         return system_text, env
 
     def _map_staged_resident_error(exc: Exception) -> Exception:
@@ -11831,6 +12100,7 @@ def _gw_build_switch_hooks():
         system_text, env = _system_text_and_env()
         staged = cc_resident.ResidentSession(
             CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+            formal_chat_continuity=True,
         )
         try:
             staged.spawn_resumable(
@@ -11861,6 +12131,7 @@ def _gw_build_switch_hooks():
         system_text, env = _system_text_and_env()
         staged = cc_resident.ResidentSession(
             CC_CWD, CC_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
+            formal_chat_continuity=True,
         )
         try:
             staged.spawn_fresh_named(
@@ -12050,6 +12321,16 @@ app.register_blueprint(
         switch_runner=_gw_run_seamless_switch,
     ),
 )
+
+
+# Warm the process-local Continuity / memory caches shortly after a gunicorn worker
+# starts, so the first hot turn after a deploy does not pay for them. Read-only, one
+# daemon thread, one run per process; a no-op for tests, scripts and `python gateway.py`.
+try:
+    from continuity import prewarm as _continuity_prewarm
+    _continuity_prewarm.start(db_path=DB_PATH)
+except Exception:
+    logging.getLogger('gateway').warning('[PREWARM] could not be started', exc_info=True)
 
 
 if __name__ == '__main__':

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 from collections.abc import Iterable, Mapping
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chat.attachment_contract import persisted_chat_attachments
@@ -33,6 +37,71 @@ POLICY_VERSION = 'continuity_source_v1'
 
 _USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
 _ASSISTANT_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
+_SOURCE_DERIVATION_CACHE_LIMIT = 8192
+_SOURCE_DERIVATION_CACHE: OrderedDict[
+    tuple[Any, ...], '_CachedSourceRow'
+] = OrderedDict()
+_SOURCE_DERIVATION_CACHE_LOCK = threading.RLock()
+
+# Every raw column read, directly or transitively, while deriving a source row:
+#   _row_payload / _row_payload_json: id, author, content, source_kind,
+#     tool_calls, branches, branch_idx, cache_info, created_at, and
+#     _attachments -> attachments, file_url, file_name, image_url
+#   is_formal_chat_message / _is_legacy_workspace_job (chat.daily_context):
+#     author, source_kind, tool_calls, id, content, image_url, attachments,
+#     file_url, file_name
+#   _canonical_normal_wake / _explicitly_incomplete: source_kind, author,
+#     cache_info, content
+#   _tool_outcome_refs / _active_branch_identity: tool_calls, id, branches,
+#     branch_idx
+# The lookup key is these raw values compared exactly, so a hit never needs
+# JSON parsing, canonical serialization or hashing. A column added to any of
+# those readers must be added here, otherwise a change to it would hit a stale
+# derivation (tests/test_continuity_source_derivation_key.py covers every column).
+_SOURCE_ROW_KEY_COLUMNS = (
+    'id',
+    'author',
+    'content',
+    'source_kind',
+    'tool_calls',
+    'branches',
+    'branch_idx',
+    'cache_info',
+    'attachments',
+    'file_url',
+    'file_name',
+    'image_url',
+    'created_at',
+)
+_MISSING_COLUMN = object()
+
+
+@dataclass(frozen=True)
+class _CachedSourceRow:
+    message_id: int
+    content_hash: str
+    formal_user: bool
+    formal_assistant: bool
+    incomplete: bool
+    canonical_wake: bool
+    created_at: str
+    evidence: EvidenceRef | None = None
+    tool_refs: tuple[EvidenceRef, ...] | None = None
+    branch_id: str | None = None
+    payload_json: str = ''
+    # The exact-value lookup key this entry is stored under (None when the row
+    # is not cacheable). Not part of equality or repr: it holds raw row text.
+    cache_key: tuple[Any, ...] | None = field(default=None, repr=False, compare=False)
+
+
+def clear_source_derivation_cache() -> None:
+    """Clear process-local source-row derivations, primarily for test isolation."""
+    with _SOURCE_DERIVATION_CACHE_LOCK:
+        _SOURCE_DERIVATION_CACHE.clear()
+
+
+def _strict_source_revalidate_enabled() -> bool:
+    return os.environ.get('CONTINUITY_STRICT_REVALIDATE') == '1'
 
 
 def _value(row: Any, key: str, default: Any = '') -> Any:
@@ -159,15 +228,24 @@ def row_revision(row: Any) -> str:
     return row_content_hash(row)
 
 
-def evidence_ref(row: Any, *, prefix: str = 'message') -> EvidenceRef:
-    mid = int(_value(row, 'id', 0) or 0)
-    payload = _row_payload_json(row)
-    digest = _sha256_text(payload)
+def evidence_ref(
+    row: Any,
+    *,
+    prefix: str = 'message',
+    _derived: _CachedSourceRow | None = None,
+) -> EvidenceRef:
+    derived = _derived if _derived is not None else _source_row_derivation(row)
+    derived = _ensure_source_row_evidence(row, derived)
+    ref = derived.evidence
+    if ref is None:
+        raise ValueError('source evidence derivation is unavailable')
+    if prefix == 'message':
+        return ref
     return EvidenceRef(
-        source_ref=f'{prefix}:{mid}',
-        source_revision=digest,
-        content_hash=digest,
-        logical_size=int(estimate_tokens_heuristic_cjk1_ascii4_v1(payload)),
+        source_ref=f'{prefix}:{derived.message_id}',
+        source_revision=ref.source_revision,
+        content_hash=ref.content_hash,
+        logical_size=ref.logical_size,
     )
 
 
@@ -232,13 +310,44 @@ def canonical_tool_outcome(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _turn_revision(user_row: Any, assistant_row: Any) -> str:
+def _turn_revision(
+    user_row: Any,
+    assistant_row: Any,
+    *,
+    user_ref: EvidenceRef | None = None,
+    assistant_ref: EvidenceRef | None = None,
+    branch_id: str | None = None,
+    tool_refs: tuple[EvidenceRef, ...] | None = None,
+) -> str:
+    user_revision = (
+        user_ref.source_revision if user_ref is not None else row_revision(user_row)
+    )
+    assistant_revision = (
+        assistant_ref.source_revision
+        if assistant_ref is not None
+        else row_revision(assistant_row)
+    )
+    resolved_branch_id = (
+        branch_id if branch_id is not None else _active_branch_identity(assistant_row)
+    )
+    resolved_tool_refs = (
+        tool_refs if tool_refs is not None else _tool_outcome_refs(assistant_row)
+    )
     return _sha256_text(_canonical_json({
-        'user': row_revision(user_row),
-        'assistant': row_revision(assistant_row),
-        'branch': _active_branch_identity(assistant_row),
-        'tools': [ref.source_revision for ref in _tool_outcome_refs(assistant_row)],
+        'user': user_revision,
+        'assistant': assistant_revision,
+        'branch': resolved_branch_id,
+        'tools': [ref.source_revision for ref in resolved_tool_refs],
     }))
+
+
+_DerivedRows = tuple[tuple[Any, '_CachedSourceRow'], ...]
+
+
+def _derive_source_rows(rows: Iterable[Any]) -> _DerivedRows:
+    """Derive every row once, ordered by id; shared by turns and events."""
+    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    return tuple((row, _source_row_derivation(row)) for row in ordered)
 
 
 def derive_completed_turns(
@@ -252,39 +361,90 @@ def derive_completed_turns(
     V1 fails closed: exactly one formal assistant before the next formal user is
     required, and explicit partial-rescue rows are never completed turns.
     """
-    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    return _completed_turns_from_derived(
+        _derive_source_rows(rows), identity_id=identity_id, chat_id=chat_id,
+    )
+
+
+def derive_turns_and_events(
+    rows: Iterable[Any],
+    *,
+    identity_id: str = IDENTITY_ID,
+    chat_id: str = CHAT_ID,
+) -> tuple[tuple[CanonicalTurn, ...], tuple[AutonomousEvent, ...]]:
+    """derive_completed_turns + derive_autonomous_events over one row derivation."""
+    derived_rows = _derive_source_rows(rows)
+    return (
+        _completed_turns_from_derived(
+            derived_rows, identity_id=identity_id, chat_id=chat_id,
+        ),
+        _autonomous_events_from_derived(
+            derived_rows, identity_id=identity_id, chat_id=chat_id,
+        ),
+    )
+
+
+def _completed_turns_from_derived(
+    derived_rows: _DerivedRows,
+    *,
+    identity_id: str,
+    chat_id: str,
+) -> tuple[CanonicalTurn, ...]:
     completed: list[CanonicalTurn] = []
-    current_user: Any | None = None
-    assistants: list[Any] = []
+    current_user: tuple[Any, _CachedSourceRow] | None = None
+    assistants: list[tuple[Any, _CachedSourceRow]] = []
 
     def flush() -> None:
         nonlocal current_user, assistants
-        if current_user is not None and len(assistants) == 1 and not _explicitly_incomplete(assistants[0]):
-            assistant = assistants[0]
-            uid = int(_value(current_user, 'id', 0) or 0)
-            aid = int(_value(assistant, 'id', 0) or 0)
+        if (
+            current_user is not None
+            and len(assistants) == 1
+            and not assistants[0][1].incomplete
+        ):
+            user_row, user_facts = current_user
+            assistant, assistant_facts = assistants[0]
+            user_ref = evidence_ref(user_row, _derived=user_facts)
+            assistant_ref = evidence_ref(assistant, _derived=assistant_facts)
+            assistant_facts = _ensure_source_row_evidence(
+                assistant,
+                assistant_facts,
+                for_completed_turn=True,
+            )
+            tool_refs = assistant_facts.tool_refs
+            branch_id = assistant_facts.branch_id
+            if tool_refs is None or branch_id is None:
+                raise ValueError('completed turn source derivation is incomplete')
+            uid = user_facts.message_id
+            aid = assistant_facts.message_id
             completed.append(CanonicalTurn(
                 turn_id=f'turn:{uid}:{aid}',
                 identity_id=identity_id,
                 chat_id=chat_id,
-                branch_id=_active_branch_identity(assistant),
-                user_input_ref=evidence_ref(current_user),
-                assistant_committed_output_refs=(evidence_ref(assistant),),
-                tool_outcome_refs=_tool_outcome_refs(assistant),
-                started_at=str(_value(current_user, 'created_at', '') or ''),
-                committed_at=str(_value(assistant, 'created_at', '') or ''),
+                branch_id=branch_id,
+                user_input_ref=user_ref,
+                assistant_committed_output_refs=(assistant_ref,),
+                tool_outcome_refs=tool_refs,
+                started_at=user_facts.created_at,
+                committed_at=assistant_facts.created_at,
                 finality_status='completed',
-                source_revision=_turn_revision(current_user, assistant),
+                source_revision=_turn_revision(
+                    user_row,
+                    assistant,
+                    user_ref=user_ref,
+                    assistant_ref=assistant_ref,
+                    branch_id=branch_id,
+                    tool_refs=tool_refs,
+                ),
             ))
         current_user = None
         assistants = []
 
-    for row in ordered:
-        if is_formal_user_source_row(row):
+    for row, derived in derived_rows:
+        if derived.formal_user:
             flush()
-            current_user = row
-        elif _is_formal_assistant(row) and current_user is not None:
-            assistants.append(row)
+            current_user = (row, derived)
+        elif derived.formal_assistant and current_user is not None:
+            assistants.append((row, derived))
     flush()
     return tuple(completed)
 
@@ -305,26 +465,166 @@ def _canonical_normal_wake(row: Any) -> bool:
     )
 
 
+def _compute_source_row_facts(
+    row: Any,
+    *,
+    content_hash: str,
+    payload_json: str,
+) -> _CachedSourceRow:
+    return _CachedSourceRow(
+        message_id=int(_value(row, 'id', 0) or 0),
+        content_hash=content_hash,
+        formal_user=is_formal_user_source_row(row),
+        formal_assistant=_is_formal_assistant(row),
+        incomplete=_explicitly_incomplete(row),
+        canonical_wake=_canonical_normal_wake(row),
+        created_at=str(_value(row, 'created_at', '') or ''),
+        payload_json=payload_json,
+    )
+
+
+def _source_row_cache_key(row: Any) -> tuple[Any, ...] | None:
+    """Exact raw-column identity of a row, or None when it cannot be a dict key.
+
+    Strings are used as-is; any other value is tagged with its type so that
+    values that compare equal but serialize differently (True/1/1.0) never
+    share an entry. A column the row does not carry is a distinct sentinel.
+    """
+    values = []
+    for column in _SOURCE_ROW_KEY_COLUMNS:
+        value = _value(row, column, _MISSING_COLUMN)
+        values.append(
+            value if value.__class__ is str else (value.__class__, value)
+        )
+    key = (int(_value(row, 'id', 0) or 0), tuple(values))
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
+def _source_row_derivation(row: Any) -> _CachedSourceRow:
+    strict = _strict_source_revalidate_enabled()
+    key = None if strict else _source_row_cache_key(row)
+    if key is not None:
+        with _SOURCE_DERIVATION_CACHE_LOCK:
+            cached = _SOURCE_DERIVATION_CACHE.get(key)
+            if cached is not None:
+                _SOURCE_DERIVATION_CACHE.move_to_end(key)
+                return cached
+    # Miss (or strict/uncacheable): only now parse, serialize and hash.
+    payload_json = _row_payload_json(row)
+    derived = replace(
+        _compute_source_row_facts(
+            row,
+            content_hash=_sha256_text(payload_json),
+            payload_json=payload_json,
+        ),
+        cache_key=key,
+    )
+    if key is not None:
+        cached_value = replace(derived, payload_json='')
+        with _SOURCE_DERIVATION_CACHE_LOCK:
+            existing = _SOURCE_DERIVATION_CACHE.get(key)
+            if existing is not None:
+                derived = existing
+            else:
+                _SOURCE_DERIVATION_CACHE[key] = cached_value
+                _SOURCE_DERIVATION_CACHE.move_to_end(key)
+                while len(_SOURCE_DERIVATION_CACHE) > _SOURCE_DERIVATION_CACHE_LIMIT:
+                    _SOURCE_DERIVATION_CACHE.popitem(last=False)
+    return derived
+
+
+def _ensure_source_row_evidence(
+    row: Any,
+    derived: _CachedSourceRow,
+    *,
+    for_completed_turn: bool = False,
+) -> _CachedSourceRow:
+    needs_turn_data = for_completed_turn and derived.formal_assistant
+    if (
+        derived.evidence is not None
+        and (
+            not needs_turn_data
+            or (derived.tool_refs is not None and derived.branch_id is not None)
+        )
+    ):
+        return derived
+    payload_json = derived.payload_json or _row_payload_json(row)
+    ref = derived.evidence or EvidenceRef(
+        source_ref=f'message:{derived.message_id}',
+        source_revision=derived.content_hash,
+        content_hash=derived.content_hash,
+        logical_size=int(estimate_tokens_heuristic_cjk1_ascii4_v1(payload_json)),
+    )
+    updated = replace(
+        derived,
+        evidence=ref,
+        tool_refs=(
+            _tool_outcome_refs(row)
+            if needs_turn_data and derived.tool_refs is None
+            else derived.tool_refs
+        ),
+        branch_id=(
+            _active_branch_identity(row)
+            if needs_turn_data and derived.branch_id is None
+            else derived.branch_id
+        ),
+        payload_json='',
+    )
+    key = derived.cache_key
+    if key is not None and not _strict_source_revalidate_enabled():
+        with _SOURCE_DERIVATION_CACHE_LOCK:
+            current = _SOURCE_DERIVATION_CACHE.get(key)
+            if current is not None:
+                if current.evidence is not None:
+                    updated = replace(
+                        updated,
+                        evidence=current.evidence,
+                        tool_refs=(current.tool_refs if current.tool_refs is not None else updated.tool_refs),
+                        branch_id=(current.branch_id if current.branch_id is not None else updated.branch_id),
+                    )
+                _SOURCE_DERIVATION_CACHE[key] = updated
+                _SOURCE_DERIVATION_CACHE.move_to_end(key)
+    return updated
+
+
 def derive_autonomous_events(
     rows: Iterable[Any],
     *,
     identity_id: str = IDENTITY_ID,
     chat_id: str = CHAT_ID,
 ) -> tuple[AutonomousEvent, ...]:
+    return _autonomous_events_from_derived(
+        _derive_source_rows(rows), identity_id=identity_id, chat_id=chat_id,
+    )
+
+
+def _autonomous_events_from_derived(
+    derived_rows: _DerivedRows,
+    *,
+    identity_id: str,
+    chat_id: str,
+) -> tuple[AutonomousEvent, ...]:
     events: list[AutonomousEvent] = []
-    for row in sorted(rows, key=lambda item: int(_value(item, 'id', 0) or 0)):
-        if not _canonical_normal_wake(row):
+    for row, derived in derived_rows:
+        if not derived.canonical_wake:
             continue
-        mid = int(_value(row, 'id', 0) or 0)
-        revision = row_revision(row)
+        derived = _ensure_source_row_evidence(row, derived)
+        if derived.evidence is None:
+            raise ValueError('autonomous source derivation is incomplete')
+        mid = derived.message_id
+        revision = derived.content_hash
         events.append(AutonomousEvent(
             event_id=f'wake:{mid}',
             identity_id=identity_id,
             chat_id=chat_id,
             branch_id='active-transcript',
             event_kind='wake',
-            committed_content_ref=evidence_ref(row),
-            created_at=str(_value(row, 'created_at', '') or ''),
+            committed_content_ref=derived.evidence,
+            created_at=derived.created_at,
             finality_status='completed',
             source_revision=revision,
         ))
@@ -375,12 +675,14 @@ def build_source_members(
     turns: Iterable[CanonicalTurn],
     events: Iterable[AutonomousEvent],
 ) -> tuple[SourceMember, ...]:
-    units: list[tuple[str, str, str, str, str, int, str]] = []
+    units: list[tuple[int, str, str, str, str, str, int, str]] = []
     for turn in turns:
         size = turn.user_input_ref.logical_size
         size += sum(ref.logical_size for ref in turn.assistant_committed_output_refs)
         size += sum(ref.logical_size for ref in turn.tool_outcome_refs)
+        canonical_order_id = int(turn.user_input_ref.source_ref.rsplit(':', 1)[1])
         units.append((
+            canonical_order_id,
             turn.started_at,
             'completed_turn',
             turn.turn_id,
@@ -390,7 +692,11 @@ def build_source_members(
             turn.branch_id,
         ))
     for event in events:
+        canonical_order_id = int(
+            event.committed_content_ref.source_ref.rsplit(':', 1)[1]
+        )
         units.append((
+            canonical_order_id,
             event.created_at,
             'autonomous_event',
             event.event_id,
@@ -399,7 +705,7 @@ def build_source_members(
             event.committed_content_ref.logical_size,
             event.branch_id,
         ))
-    units.sort(key=lambda item: (item[0], item[2]))
+    units.sort(key=lambda item: item[0])
     return tuple(
         SourceMember(
             seq=index,
@@ -412,7 +718,7 @@ def build_source_members(
             created_at=created_at,
             branch_id=branch_id or 'active-transcript',
         )
-        for index, (created_at, kind, ref, revision, role, logical_size, branch_id)
+        for index, (_, created_at, kind, ref, revision, role, logical_size, branch_id)
         in enumerate(units)
     )
 

@@ -73,6 +73,10 @@ def adapt_request(payload: dict, headers: dict, caps: dict) -> tuple:
     payload = copy.deepcopy(payload)
     headers = dict(headers)
 
+    # Opus 5.5 rejects legacy fixed-budget thinking; use default.
+    if str(payload.get('model') or '').startswith('claude-opus-5-5'):
+        payload.pop('thinking', None)
+
     # ── thinking ──
     if not caps.get("thinking", True):
         payload.pop("thinking", None)

@@ -20,6 +20,18 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
     """``incoming_call()`` returns the id of a call he placed that is ringing now, or None."""
     bp = Blueprint('wake_push', __name__)
 
+    @bp.get('/api/wake/activity')
+    def wake_activity_list():
+        from wake.activity import list_activity
+        limit = max(1, min(request.args.get('limit', 50, type=int), 200))
+        conn = get_db()
+        try:
+            return jsonify(items=list_activity(conn, request.args.get('since', ''), limit,
+                                request.args.get('before', ''), request.args.get('before_id', ''),
+                                request.args.get('silent') == '1'))
+        finally:
+            conn.close()
+
     def device_id_from_request():
         """Health Bridge device credential; None if absent or wrong. Never echoes it."""
         device_id = (request.headers.get('X-Health-Device-ID') or '').strip()

@@ -217,10 +217,9 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         self.assertIn('now.strftime', trigger)
         self.assertIn('t2_hours', trigger)
         self.assertIn('t_hours', trigger)
-        self.assertIn('本轮最多只使用一个只读工具', trigger)
-        self.assertIn('不要再调用任何工具', trigger)
-        self.assertIn('不要继续尝试写日记、写记忆、改待办', trigger)
-        self.assertIn('也可以不调用工具，直接自然地开口', trigger)
+        self.assertIn('本轮最多调用工具 5 次', trigger)
+        self.assertIn('灯光和记账不在这段时间里做', trigger)
+        self.assertIn('静静待着', trigger)
         self.assertNotIn('想看什么、做什么、记什么', trigger)
         self.assertNotIn('_NORMAL_WAKE_MAIN_CHAT_TRIGGER', gateway)
 
@@ -300,9 +299,18 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
             section,
         )
         self.assertIn(
-            "commit_shared_transcript_watermark(",
+            "prepare_shared_transcript_native_binding(",
             section,
         )
+        binding_start = section.index("        if silent:")
+        cache_refresh_start = section.index(
+            "        if (\n            wake_cache_refresh_candidate",
+            binding_start,
+        )
+        transcript_binding = section[binding_start:cache_refresh_start]
+        silent_branch, native_branch = transcript_binding.split("        else:\n", 1)
+        self.assertIn("commit_shared_transcript_watermark(", silent_branch)
+        self.assertIn("prepare_shared_transcript_native_binding(", native_branch)
         self.assertIn(
             "jsonl_finality.get('stream_totals_match') is not True",
             section,

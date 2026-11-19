@@ -147,17 +147,24 @@ def _fetch_current_day_history(
 
         mapped_items: dict[int, dict[str, Any]] = {}
         if context_id is not None and context_epoch is not None:
-            for r in conn.execute(
+            # The id lower bound is pushed into SQL: a hot turn reads only the
+            # rows after the resident cursor (usually none) instead of every row
+            # of the window, cache_info included, and then dropping them here.
+            mapped_sql = (
                 'SELECT %s FROM chat_messages m '
                 'INNER JOIN daily_message_contexts dmc ON dmc.message_id = m.id '
-                'WHERE dmc.context_id=? AND dmc.context_epoch=? '
-                'ORDER BY m.id ASC' % ', '.join('m.' + c for c in select_cols),
-                (int(context_id), int(context_epoch)),
+                'WHERE dmc.context_id=? AND dmc.context_epoch=?'
+                % ', '.join('m.' + c for c in select_cols)
+            )
+            mapped_params: list[int] = [int(context_id), int(context_epoch)]
+            if after_message_id is not None:
+                mapped_sql += ' AND m.id > ?'
+                mapped_params.append(int(after_message_id))
+            for r in conn.execute(
+                mapped_sql + ' ORDER BY m.id ASC', tuple(mapped_params),
             ).fetchall():
                 mid = int(r['id'])
                 if exclude_message_id is not None and mid == int(exclude_message_id):
-                    continue
-                if after_message_id is not None and mid <= int(after_message_id):
                     continue
                 item = _to_item(r)
                 if item is not None:
@@ -173,20 +180,28 @@ def _fetch_current_day_history(
             other_mapped = frozenset(int(r[0]) for r in other_rows)
 
         legacy_items: dict[int, dict[str, Any]] = {}
-        for r in conn.execute(
+        # Both id bounds are pushed into SQL (a primary-key range): the lower
+        # bound is the stricter of the context boundary and the resident cursor,
+        # the upper bound is the current request.
+        legacy_lower = int(boundary_message_id or 0)
+        if after_message_id is not None:
+            legacy_lower = max(legacy_lower, int(after_message_id))
+        legacy_sql = (
             'SELECT %s FROM chat_messages '
-            'WHERE created_at >= ? AND created_at < ? AND id > ? '
-            'ORDER BY id ASC' % ', '.join(select_cols),
-            (start_at, next_start, int(boundary_message_id or 0)),
+            'WHERE created_at >= ? AND created_at < ? AND id > ?'
+            % ', '.join(select_cols)
+        )
+        legacy_params: list[Any] = [start_at, next_start, legacy_lower]
+        if up_to_message_id is not None:
+            legacy_sql += ' AND id <= ?'
+            legacy_params.append(int(up_to_message_id))
+        for r in conn.execute(
+            legacy_sql + ' ORDER BY id ASC', tuple(legacy_params),
         ).fetchall():
             mid = int(r['id'])
             if mid in mapped_items or mid in other_mapped:
                 continue
             if exclude_message_id is not None and mid == int(exclude_message_id):
-                continue
-            if after_message_id is not None and mid <= int(after_message_id):
-                continue
-            if up_to_message_id is not None and mid > int(up_to_message_id):
                 continue
             item = _to_item(r)
             if item is not None:
@@ -233,6 +248,7 @@ def build_daily_window_context(
     chat_id: str = DEFAULT_CHAT_ID,
     daily_context: dict[str, Any],
     current_user_message_id: Optional[int] = None,
+    history_anchor_message_id: Optional[int] = None,
     static_system: str = '',
     is_cold: bool = True,
     is_respawn: bool = False,
@@ -263,6 +279,11 @@ def build_daily_window_context(
     to suppress Manual Forge carryover replay (C1 Exact-Once).
     """
     _ = TZ_OFFSET_HOURS
+    # Numeric history cut-off; defaults to the request id (Chat behaviour).
+    history_cut = (
+        current_user_message_id if history_anchor_message_id is None
+        else history_anchor_message_id
+    )
     ctx = dict(daily_context)
     context_id = int(ctx['id'])
     resident_generation = int(ctx.get('resident_generation') or 1)
@@ -346,8 +367,10 @@ def build_daily_window_context(
             local_day=str(ctx['local_day']),
             db_path=db_path,
             after_message_id=after_cursor,
+            # Identity excludes only the request row (None for a proactive
+            # turn); the anchor alone bounds how far history reads.
             exclude_message_id=current_user_message_id,
-            up_to_message_id=current_user_message_id,
+            up_to_message_id=history_cut,
             context_id=context_id,
             context_epoch=int(ctx.get('context_epoch') or 0),
             include_assistant_wake=cold_like,

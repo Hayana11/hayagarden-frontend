@@ -96,17 +96,13 @@ def _qualified_for_runtime_state(capability_id: str) -> bool:
     )
 
 
-def read_capability_state(capability_id: str) -> str:
-    """Read one overlay state, distinguishing missing from storage failure."""
-    capability_id = str(capability_id or "")
-    if not _qualified_for_runtime_state(capability_id):
-        return RUNTIME_STATE_DENY
-
+def _read_document() -> dict[str, Any]:
+    """Load and validate the state document over one short-lived connection."""
     conn: sqlite3.Connection | None = None
     try:
         conn = _connect()
         document, _present = _load_document(conn)
-        return document["states"].get(capability_id, RUNTIME_STATE_INHERIT)
+        return document
     except CapabilityStateError:
         raise
     except Exception as exc:
@@ -116,6 +112,41 @@ def read_capability_state(capability_id: str) -> str:
     finally:
         if conn is not None:
             conn.close()
+
+
+class CapabilityStateReader:
+    """Lazily reads the state document at most once for a multi-capability read.
+
+    ``read_capability_state(cid)`` opens a connection and parses the whole
+    document per call, so reading every capability that way costs one
+    connection per capability. Passing one reader to those calls keeps their
+    per-capability semantics (static ineligibility is DENY without touching
+    storage; the first storage/validation failure raises) over a single read
+    that is also internally consistent. Nothing is cached beyond the reader's
+    own lifetime.
+    """
+
+    def __init__(self) -> None:
+        self._document: dict[str, Any] | None = None
+
+    def states(self) -> Mapping[str, str]:
+        if self._document is None:
+            self._document = _read_document()
+        return self._document["states"]
+
+
+def read_capability_state(
+    capability_id: str,
+    *,
+    reader: CapabilityStateReader | None = None,
+) -> str:
+    """Read one overlay state, distinguishing missing from storage failure."""
+    capability_id = str(capability_id or "")
+    if not _qualified_for_runtime_state(capability_id):
+        return RUNTIME_STATE_DENY
+    if reader is not None:
+        return reader.states().get(capability_id, RUNTIME_STATE_INHERIT)
+    return _read_document()["states"].get(capability_id, RUNTIME_STATE_INHERIT)
 
 
 def effective_capability_state(capability_id: str) -> str:

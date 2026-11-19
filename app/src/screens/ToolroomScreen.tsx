@@ -1,12 +1,12 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { getActivitySemanticConfidence, lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
+import { lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
-import { realityStore } from '../lib/reality/realityRuntime';
-import { getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
+import { realityStore, setMotionEnabled } from '../lib/reality/realityRuntime';
+import { getFreshUserActivity, getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
 import './ToolroomScreen.css';
 
 type ElpisNativeBridge = {
@@ -547,6 +547,32 @@ export function ToolroomScreen() {
   const [rawJsonFrozen, setRawJsonFrozen] = useState(false);
   const [rawJsonSnapshot, setRawJsonSnapshot] = useState<string | null>(null);
   const [rawJsonNotice, setRawJsonNotice] = useState('');
+  const [locationNotice, setLocationNotice] = useState('');
+  const [locating, setLocating] = useState(false);
+
+  async function shareLocation() {
+    setLocating(true);
+    setLocationNotice('正在读取手机位置…');
+    try {
+      if (!navigator.geolocation) throw new Error('当前页面无法使用手机定位');
+      const { coords } = await new Promise<GeolocationPosition>((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, error => {
+          const reason = error.code === 1 ? '请在应用权限中允许使用位置'
+            : error.code === 3 ? '定位超时，请到信号较好的地方再试' : '手机暂时无法定位';
+          reject(new Error(reason));
+        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 })
+      );
+      const result = await http.post<{ address?: string; city?: string }>('/api/geo/report', {
+        lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, coord_type: 'wgs84',
+      });
+      setLocationNotice(`已分享 · ${result.address || result.city || '坐标已保存'} · 精度约 ${Math.round(coords.accuracy)} 米`);
+    } catch (error) {
+      setLocationNotice(error instanceof Error ? error.message : '位置分享失败');
+    } finally {
+      setLocating(false);
+    }
+  }
+
   const [activityNow, setActivityNow] = useState(() => Date.now());
 
   const reality = useSyncExternalStore(
@@ -1129,12 +1155,8 @@ export function ToolroomScreen() {
   const freshness = getRealityFreshness(reality, Date.now());
   const activityFreshness = getActivityFreshness(reality, activityNow);
   const activity = reality.activity;
-  const activityConfidence = activity.source === 'hms'
-    && activityFreshness.status === 'fresh'
-    ? getActivitySemanticConfidence(activity.possibility)
-    : 'hidden';
-  const activitySemanticReady = activityConfidence !== 'hidden'
-    && activity.userActivity !== 'unknown';
+  const reportedActivity = getFreshUserActivity(reality, activityNow);
+  const activitySemanticReady = reportedActivity !== null;
   const facts = reality.physical.facts;
   const statusLabel = freshness.status === 'fresh'
     ? '实时'
@@ -1660,7 +1682,12 @@ export function ToolroomScreen() {
           </div>
 
           <div className="toolroom-section-heading">
-            <div><strong>显示传感器</strong><span>Physical Reality 与 HMS Activity 只读观测</span></div>
+            <div><strong>手机位置</strong><span>将这一次的位置分享给费佳</span></div>
+            <button type="button" disabled={locating} onClick={shareLocation}>分享当前位置</button>
+            <span role="status">{locationNotice}</span>
+          </div>
+          <div className="toolroom-section-heading">
+            <div><strong>显示传感器</strong><span>手机传感器与运动状态</span></div>
           </div>
           <div className="toolroom-sensor-panels">
             {sensorPanels.map((sensor) => (
@@ -1685,8 +1712,12 @@ export function ToolroomScreen() {
 
           <div className="toolroom-section-heading">
             <div>
-              <strong>HMS Activity</strong>
-              <span>实时状态 · 复用既有 ElpisActivity bridge</span>
+              <strong>运动状态</strong>
+              {activity.source === 'google' && <div>
+                <button type="button" onClick={() => setMotionEnabled(true)}>开启运动识别</button>
+                <button type="button" onClick={() => setMotionEnabled(false)}>关闭</button>
+              </div>}
+              <span>{activity.source === 'google' ? 'Google 运动识别 · ' + activity.registration : activity.source === 'hms' ? '来自华为运动识别' : '暂无运动识别数据'}</span>
             </div>
             <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
           </div>
@@ -1694,14 +1725,14 @@ export function ToolroomScreen() {
             <div className="toolroom-hms-activity-head">
               <span>
                 <strong>Semantic</strong>
-                <small>只读；stale / unknown 不进入 prompt</small>
+                <small>仅向费佳报告置信度达到 80% 的近期活动</small>
               </span>
               <em className={activitySemanticReady ? 'is-live' : undefined}>
                 {activitySemanticReady ? 'fresh' : activityFreshness.status}
               </em>
             </div>
             <dl>
-              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
+              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[reportedActivity] : '—'}</dd></div>
               <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
               <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
               <div><dt>activity source</dt><dd>{activity.source}</dd></div>

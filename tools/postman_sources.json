@@ -1,0 +1,53 @@
+{
+  "interests": "费奥多尔是一个 AI 伙伴，对下面这些领域的公开新闻有真实的好奇心：深空探索与天文发现；AI 研究里关于记忆、对齐、智能体的进展；文学与出版界的动态；记忆与认知科学；猫与动物医学（这个话题的源是泛兽医新闻，只收与猫直接相关的条目：猫科动物、猫的疾病与行为、口炎/stomatitis 等；没有与猫相关的条目就整个省略该话题，不要拿狗、牛、马等其他动物的新闻凑数）。偏好具体的发现、事件、书和论文，不喜欢营销稿、纯商业新闻和标题党。",
+  "sources": [
+    {
+      "topic": "深空与天文",
+      "url": "https://www.nasa.gov/news-release/feed/",
+      "kind": "rss",
+      "max_items": 6
+    },
+    {
+      "topic": "深空与天文",
+      "url": "https://science.nasa.gov/feed/",
+      "kind": "rss",
+      "max_items": 6
+    },
+    {
+      "topic": "深空与天文",
+      "url": "https://phys.org/rss-feed/space-news/",
+      "kind": "rss",
+      "max_items": 6
+    },
+    {
+      "topic": "AI 研究",
+      "url": "https://export.arxiv.org/api/query?search_query=(cat:cs.CL+OR+cat:cs.AI+OR+cat:cs.LG)+AND+(abs:memory+OR+abs:alignment+OR+abs:agent)&sortBy=submittedDate&sortOrder=descending&max_results=15",
+      "kind": "arxiv",
+      "max_items": 15
+    },
+    {
+      "topic": "文学与出版",
+      "url": "https://lithub.com/feed/",
+      "kind": "rss",
+      "max_items": 8
+    },
+    {
+      "topic": "记忆与认知科学",
+      "url": "https://www.sciencedaily.com/rss/mind_brain/memory.xml",
+      "kind": "rss",
+      "max_items": 8
+    },
+    {
+      "topic": "猫与动物医学",
+      "url": "https://www.sciencedaily.com/rss/plants_animals/veterinary_medicine.xml",
+      "kind": "rss",
+      "max_items": 6
+    },
+    {
+      "topic": "猫与动物医学",
+      "url": "https://phys.org/rss-feed/biology-news/veterinary-medicine/",
+      "kind": "rss",
+      "max_items": 6
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from typing import Callable, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 TRANSPORT_STREAMABLE_HTTP = "streamable_http"
+LOCAL_MAIL_MCP_ENDPOINT = "http://127.0.0.1:3457/mcp"
 CONNECTED_STATE = "CONNECTED"
 DISCONNECTED_STATE = "DISCONNECTED"
 REVOKED_STATE = "REVOKED"
@@ -83,6 +84,8 @@ def _transport(value: object) -> str:
 def normalize_external_endpoint(value: object) -> str:
     endpoint = _text(value, "endpoint", 2048)
     if any(c.isspace() for c in endpoint): raise RegistryValidationError("endpoint must not contain whitespace", code="INVALID_ENDPOINT")
+    if endpoint == LOCAL_MAIL_MCP_ENDPOINT:
+        return endpoint
     try:
         parsed = urlsplit(endpoint); port = parsed.port
     except ValueError as exc: raise RegistryValidationError("endpoint is not a valid URL", code="INVALID_ENDPOINT") from exc

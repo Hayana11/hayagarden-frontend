@@ -44,8 +44,10 @@ class ProactiveTriggerTextTests(unittest.TestCase):
     SHARED = (
         '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；',
         '你有自己的眼睛和手',
-        '本轮最多只使用一个只读工具',
-        '也可以不调用工具，直接自然地开口。',
+        '本轮最多调用工具 5 次',
+        '灯光和记账不在这段时间里做',
+        '[[ACTIVITY]]',
+        '想对她说话，就直接说。',
         '这些时间只是现实背景，不是行动命令。',
     )
 
@@ -53,6 +55,7 @@ class ProactiveTriggerTextTests(unittest.TestCase):
         self.build = _trigger_builder()
 
     def _assert_shared(self, text):
+        self.assertNotIn('一个只读工具', text)
         for phrase in self.SHARED:
             self.assertIn(phrase, text)
         self.assertIn('\n\n', text)
@@ -292,8 +295,33 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
                 mock.patch.object(uh, 'prepare_shared_transcript_watermark',
                                   return_value=(watermark, 'ok')), \
                 mock.patch.object(uh, 'begin_shared_wake_delivery_fence', return_value=fence), \
-                mock.patch.object(uh, 'commit_shared_transcript_watermark',
-                                  return_value={'committed': True}), \
+                mock.patch.object(
+                    uh,
+                    'commit_shared_transcript_watermark',
+                    return_value={
+                        'context_id': 1,
+                        'context_epoch': 1,
+                        'resident_generation': 1,
+                        'start_offset': 0,
+                        'end_offset': 120,
+                        'skipped_provider_round': True,
+                    },
+                ), \
+                mock.patch.object(
+                    uh,
+                    'prepare_shared_transcript_native_binding',
+                    return_value={
+                        'context_id': 1,
+                        'context_epoch': 1,
+                        'resident_generation': 1,
+                        'process_generation': 1,
+                        'claude_session_id': 'sid-1',
+                        'transcript_path': '/tmp/sid-1.jsonl',
+                        'start_offset': 0,
+                        'end_offset': 120,
+                        'events': [],
+                    },
+                ), \
                 mock.patch.object(cc_history_rewrite, 'guard_cc_generation',
                                   side_effect=lambda events: events), \
                 mock.patch.object(display_thinking, 'get_display_thinking_snapshot',
@@ -348,12 +376,24 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         result, sent = self._run(events=self._done(' [[SILENT]] '))
         self.assertTrue(result['silent'])
         self.assertEqual(result['text'], '')
-        self.assertIn('只回复 [[SILENT]]，它不会发给她', sent[0])
+        self.assertIn('什么都没做就只回 [[SILENT]]', sent[0])
+        self.assertTrue(
+            result['cache_info']['transcript_skip']['skipped_provider_round']
+        )
+        self.assertIsNone(result['native_transcript_binding'])
 
     def test_spoken_text_is_not_silent_and_marker_never_leaks(self):
         result, _ = self._run(events=self._done('早安 [[SILENT]]'))
         self.assertFalse(result['silent'])
         self.assertEqual(result['text'], '早安')
+
+    def test_normal_wake_returns_exact_one_shot_claims(self):
+        claims = {'pending_mail_ids': ['wake-mail-1', 'wake-mail-2']}
+        result, _ = self._run(events=[(
+            'done',
+            ('wake text', '', {'jsonl_usage': {'stream_totals_match': True}}, claims),
+        )])
+        self.assertEqual(result['one_shot_claims'], claims)
 
     def test_normal_wake_returns_native_and_self_state_segments(self):
         events = [

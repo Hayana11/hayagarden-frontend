@@ -57,13 +57,15 @@ TASK_DEFAULT_ALLOWED_CAPABILITIES: tuple[str, ...] = (
 )
 
 
-def default_chat_wake_auto_capabilities() -> tuple[str, ...]:
+def default_chat_wake_auto_capabilities(turn_mode: str = "chat") -> tuple[str, ...]:
     """Shared Chat/Wake default auto set, derived from the capability manifest.
 
     CHAT_DEFAULT_AUTO = ordinary_auto_capabilities() minus
-    AUTOMATION_CONFIRM_ONLY_CAPABILITIES.  Wake uses that same result.
+    AUTOMATION_CONFIRM_ONLY_CAPABILITIES.  Wake additionally excludes ledger.write.
     """
     excluded = frozenset(AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
+    if turn_mode == "wake":
+        excluded = excluded.union({"ledger.write"})
     return tuple(
         capability_id
         for capability_id in ordinary_auto_capabilities()
@@ -71,11 +73,12 @@ def default_chat_wake_auto_capabilities() -> tuple[str, ...]:
     )
 
 
-# Chat and Wake share one derived tuple.  Task remains a separate default set.
+# Derive Wake from Chat while keeping journaling separate from accounting.
 _CHAT_WAKE_DEFAULT_AUTO = default_chat_wake_auto_capabilities()
+_WAKE_DEFAULT_AUTO = default_chat_wake_auto_capabilities("wake")
 DEFAULT_ALLOWED_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "chat": _CHAT_WAKE_DEFAULT_AUTO,
-    "wake": _CHAT_WAKE_DEFAULT_AUTO,
+    "wake": _WAKE_DEFAULT_AUTO,
     "task": TASK_DEFAULT_ALLOWED_CAPABILITIES,
 }
 
@@ -91,11 +94,11 @@ class LeaseSignError(ValueError):
 def default_allowed_capabilities(turn_mode: str) -> tuple[str, ...]:
     """Return the default capability tuple for a turn_mode.
 
-    Chat and Wake always share ``default_chat_wake_auto_capabilities()``.
+    Wake excludes accounting.
     """
     mode = str(turn_mode or "")
     if mode in {"chat", "wake"}:
-        return default_chat_wake_auto_capabilities()
+        return default_chat_wake_auto_capabilities(mode)
     if mode not in DEFAULT_ALLOWED_CAPABILITIES:
         raise LeaseSignError("DENIED_CAPABILITY", f"unknown turn_mode: {mode!r}")
     return DEFAULT_ALLOWED_CAPABILITIES[mode]
@@ -177,6 +180,9 @@ def issue_turn_lease(
     approvals = _normalize_ids(approval_ids)
     contract_id = _normalize_optional_id(task_contract_id)
     extras = _normalize_ids(requested_capabilities)
+
+    if mode == "wake" and "ledger.write" in extras:
+        raise LeaseSignError("DENIED_CAPABILITY", "ledger.write is unavailable during wake")
 
     if source == "user_confirmation" and not approvals:
         raise LeaseSignError(

@@ -4,8 +4,8 @@ The Memory Kernel projection never touches Ombre's files. It starts this
 worker with Ombre's Python, pointing at Ombre's source tree and env file, and
 the worker drives Ombre exclusively through ``BucketManager.create / update /
 get`` (plus ``get_including_archive`` / ``list_all`` to read deletions and
-buckets Ombre created on its own, and ``touch_many`` to reinforce memories a
-reader actually used). Vault location, validation, normalisation,
+buckets Ombre created on its own, ``touch_many`` to reinforce memories a
+reader actually used, and ``search`` for Review's read-only candidate lookup). Vault location, validation, normalisation,
 locking, the ledger and derived indexes are all Ombre's.
 
 ``hold`` is never called: its similarity merge is the right behaviour for
@@ -39,6 +39,19 @@ REQUIRED_CREATE_PARAMS = (
 UPDATE_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "arousal", "pinned")
 
 
+# Ops this worker implements. ``analyze`` and ``judge_same_event`` drive Ombre's own dehydrator
+# object (class / method names confirmed on the production VPS by inspection; see
+# docs/memory-review-core.md). They are isolated in ``_dehydrator`` / ``_analyze`` /
+# ``_judge_same_event`` and fail the single request, never
+# guess a result. ``digest`` is never called.
+OPS = ("capabilities", "get", "create_if_absent", "update", "touch", "list", "search",
+       "analyze", "judge_same_event")
+# Ombre names (class and method names confirmed on the production VPS by inspection),
+# all used below and nowhere else.
+DEHYDRATOR_MODULE, DEHYDRATOR_CLASS = "dehydrator", "Dehydrator"
+ANALYZE_METHOD, JUDGE_METHOD = "analyze", "judge_same_event"
+
+
 class Incompatible(RuntimeError):
     pass
 
@@ -56,6 +69,8 @@ def _load_env_file(path: str) -> None:
 # Ombre's own read-side surfacing policy (SurfacePolicyVM), loaded with the runtime and
 # required: Kernel readers depend on its per-mode verdicts.
 _SURFACE_POLICY = None
+_CONFIG = None
+_DEHYDRATOR = None
 SURFACE_MODES = ("automatic", "search", "dream", "importance", "spontaneous")
 
 
@@ -106,7 +121,60 @@ def load_runtime(src_dir: str):
     except Exception as exc:  # a reader would show what Ombre retired: refuse to run
         raise Incompatible(f"SurfacePolicyVM unavailable: {type(exc).__name__}: {exc}"[:200]) from exc
     _SURFACE_POLICY = policy
-    return version, BucketManager(load_config())
+    global _CONFIG
+    _CONFIG = load_config()
+    return version, BucketManager(_CONFIG)
+
+
+def _dehydrator():
+    """Ombre's own dehydrator, built from the same load_config() result as the BucketManager."""
+    global _DEHYDRATOR
+    if _DEHYDRATOR is None:
+        if _CONFIG is None:
+            raise Incompatible("ombre config not loaded")
+        try:
+            import importlib
+            cls = getattr(importlib.import_module(DEHYDRATOR_MODULE), DEHYDRATOR_CLASS)
+            _DEHYDRATOR = cls(_CONFIG)
+        except Exception as exc:
+            raise Incompatible(f"dehydrator unavailable: {type(exc).__name__}: {exc}"[:200]) from exc
+    return _DEHYDRATOR
+
+
+def _dehydrator_report() -> dict:
+    """Whether the dehydrator class and its methods resolve. Never raises."""
+    try:
+        target = _dehydrator()
+        methods = [name for name in (ANALYZE_METHOD, JUDGE_METHOD) if callable(getattr(target, name, None))]
+        return {"ok": True, "methods": methods, "error": ""}
+    except BaseException as exc:
+        return {"ok": False, "methods": [], "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+async def _call_dehydrator(method: str, *args):
+    fn = getattr(_dehydrator(), method, None)
+    if not callable(fn):
+        raise Incompatible(f"dehydrator lacks: {method}")
+    result = fn(*args)
+    return await result if inspect.isawaitable(result) else result
+
+
+async def _analyze(text: str) -> dict:
+    result = await _call_dehydrator(ANALYZE_METHOD, text)
+    if not isinstance(result, dict) or not result:
+        raise ValueError("analyze_unexpected_shape")
+    return json.loads(json.dumps(result, ensure_ascii=False, default=str))
+
+
+async def _judge_same_event(old: str, new: str) -> dict:
+    result = await _call_dehydrator(JUDGE_METHOD, old, new)
+    confidence = result.get("confidence") if isinstance(result, dict) else None
+    if (not isinstance(result, dict) or not isinstance(result.get("same_event"), bool)
+            or isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1):
+        raise ValueError("judge_same_event_unexpected_shape")
+    return {"same_event": result["same_event"], "confidence": float(confidence),
+            "reason": str(result.get("reason") or "")[:300]}
 
 
 async def _get(manager, bucket_id: str) -> dict | None:
@@ -161,6 +229,17 @@ async def handle(manager, request: dict) -> object:
             raise Incompatible("BucketManager lacks: touch_many")
         await touch_many([str(b) for b in request.get("bucket_ids") or []], ripple=False)
         return {"touched": len(request.get("bucket_ids") or [])}
+    if op == "search":
+        # Read-only ranking. BucketManager.search(query, limit=) as ombre_adapter calls it.
+        search = getattr(manager, "search", None)
+        if not callable(search):
+            raise Incompatible("BucketManager lacks: search")
+        found = await search(str(request["query"]), limit=max(1, int(request.get("limit") or 5)))
+        return [_bucket_view(bucket) for bucket in found or []]
+    if op == "analyze":
+        return await _analyze(str(request["text"]))
+    if op == "judge_same_event":
+        return await _judge_same_event(str(request["old"]), str(request["new"]))
     if op == "list":
         buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
         return [_bucket_view(bucket) for bucket in buckets]
@@ -174,7 +253,8 @@ async def run(src_dir: str, requests: list[dict]) -> dict:
         # One failing request (e.g. Ombre's validation) must not hide the others' outcomes.
         try:
             if request.get("op") == "capabilities":
-                value = {"version": version, "update_fields": list(UPDATE_FIELDS)}
+                value = {"version": version, "update_fields": list(UPDATE_FIELDS), "ops": list(OPS),
+                         "dehydrator": _dehydrator_report()}
             else:
                 value = await handle(manager, request)
             results.append({"ok": True, "value": value})

@@ -1416,6 +1416,8 @@ class LegacyPerceptionClassificationTests(unittest.TestCase):
             return c
 
         self.get_db = get_db
+        from chat.mail_notice_store import ensure_schema
+        ensure_schema(self.get_db)
 
     def tearDown(self):
         self.tmp.cleanup()

@@ -29,7 +29,7 @@ _LOG = logging.getLogger('memory_tool')
 
 @dataclass(frozen=True)
 class KernelWrite:
-    """记忆写进了 Memory Kernel（并投影到 Ombre）；它没有 posts.id。"""
+    """记忆写进了 Memory Kernel；Ombre 投影状态可保持 pending。"""
     status: str          # CREATED / DEDUPLICATED
     state_id: str
     lineage_id: str

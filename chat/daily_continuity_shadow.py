@@ -23,13 +23,13 @@ from continuity.context_plan import (
 )
 from continuity.sources import (
     build_source_members,
-    derive_autonomous_events,
-    derive_completed_turns,
+    derive_turns_and_events,
     evidence_ref,
     is_formal_user_source_row,
 )
 from continuity.store import (
     ContinuityStoreError,
+    _cached_ready_chunk_proof,
     load_candidate,
     load_ready_chunks,
     load_snapshot,
@@ -39,10 +39,18 @@ from continuity.store import (
 ShadowStatus = Literal['ready', 'blocked', 'failed']
 ChunkSurface = Literal['ready', 'empty', 'unavailable']
 
+# Columns the continuity source derivation reads. ``thinking`` is deliberately
+# absent: provider-visible evidence never includes it (see continuity.sources),
+# and it is the largest column of an assistant row.
 _SOURCE_COLUMNS = (
-    'id, author, content, thinking, created_at, tool_calls, branches, branch_idx, '
+    'id, author, content, created_at, tool_calls, branches, branch_idx, '
     'cache_info, source_kind, attachments, image_url, file_url, file_name'
 )
+# The schema contract is unchanged: chat_messages must still carry ``thinking``
+# even though no continuity reader selects it.
+_REQUIRED_SOURCE_SCHEMA_COLUMNS = frozenset(
+    item.strip() for item in _SOURCE_COLUMNS.split(',')
+) | {'thinking'}
 
 _SOURCE_TABLE = 'chat_messages'
 _MESSAGE_CONTEXT_TABLE = 'daily_message_contexts'
@@ -228,7 +236,7 @@ def _check_source_schema(conn: sqlite3.Connection) -> None:
         str(row[1])
         for row in conn.execute(f'PRAGMA table_info({_SOURCE_TABLE})').fetchall()
     }
-    required = frozenset(item.strip() for item in _SOURCE_COLUMNS.split(','))
+    required = _REQUIRED_SOURCE_SCHEMA_COLUMNS
     missing = required - columns
     if missing:
         raise sqlite3.OperationalError(
@@ -436,14 +444,21 @@ def _bindings(
 
     bindings: list[ContextChunkBinding] = []
     for chunk in chunks:
-        candidate = load_candidate(conn, chunk.candidate_id)
-        snapshot = load_snapshot(conn, chunk.snapshot_id)
+        cached_proof = _cached_ready_chunk_proof(conn, chunk)
+        if cached_proof is not None:
+            snapshot, candidate = cached_proof
+            ready_surface_validated = True
+        else:
+            candidate = load_candidate(conn, chunk.candidate_id)
+            snapshot = load_snapshot(conn, chunk.snapshot_id)
+            ready_surface_validated = False
         if candidate is None or snapshot is None:
             raise _ChunkSurfaceUnavailable('ready chunk provenance is unavailable')
         bindings.append(ContextChunkBinding(
             chunk=chunk,
             candidate=candidate,
             snapshot=snapshot,
+            ready_surface_validated=ready_surface_validated,
         ))
     return tuple(bindings)
 
@@ -466,6 +481,12 @@ def build_daily_continuity_shadow_plan(
         [Sequence[SourceMember], tuple[ContextChunkBinding, ...]],
         tuple[ContextChunkBinding, ...],
     ] | None = None,
+    prepared_source_rows: tuple[
+        Sequence[Mapping[str, object]], Mapping[str, object]
+    ] | None = None,
+    prepared_source_projection: tuple[object, object, Sequence[SourceMember]] | None = None,
+    prepared_inputs_out: dict[str, object] | None = None,
+    current_request: Mapping[str, object] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -478,6 +499,10 @@ def build_daily_continuity_shadow_plan(
     member identity, but restricts only the window-anchor candidate.  It never
     removes members from the expected source universe.  The pure R4 planner
     remains the only selection authority.
+
+    A proactive turn has no request row: ``current_request`` (source_ref,
+    source_revision, content_hash, estimated_tokens, history_cut, context_id,
+    context_epoch) stands in for it and history is read up to history_cut.
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
@@ -488,7 +513,10 @@ def build_daily_continuity_shadow_plan(
             or window_anchor_token_budget <= 0
         ):
             return _blocked('window_anchor_budget_unmapped')
-    if isinstance(current_user_message_id, bool) or not isinstance(current_user_message_id, int):
+    if current_request is None and (
+        isinstance(current_user_message_id, bool)
+        or not isinstance(current_user_message_id, int)
+    ):
         return _blocked('invalid_current_request')
 
     try:
@@ -501,28 +529,50 @@ def build_daily_continuity_shadow_plan(
         if any(getattr(section, 'kind', None) == 'current_request' for section in accepted):
             return _blocked('invalid_current_request')
 
-        try:
-            source_conn = _read_only_connection(source_db_path)
-        except (FileNotFoundError, OSError, sqlite3.Error):
-            return _blocked('source_rows_unavailable')
-        try:
-            _check_source_schema(source_conn)
-            history_rows, current_row = _source_rows(source_conn, current_user_message_id)
-        except LookupError:
-            return _blocked('invalid_current_request')
-        except _SourceScopeUnavailable:
-            return _blocked('source_scope_unavailable')
-        except (OSError, sqlite3.Error, TypeError, ValueError):
-            return _blocked('source_rows_unavailable')
-        finally:
-            source_conn.close()
+        if prepared_source_rows is not None:
+            history_rows, current_row = prepared_source_rows
+        else:
+            try:
+                source_conn = _read_only_connection(source_db_path)
+            except (FileNotFoundError, OSError, sqlite3.Error):
+                return _blocked('source_rows_unavailable')
+            try:
+                _check_source_schema(source_conn)
+                if current_request is not None:
+                    history_rows = read_canonical_scope_rows(
+                        source_conn,
+                        context_id=int(current_request['context_id']),
+                        context_epoch=int(current_request['context_epoch']),
+                        before_message_id=int(current_request['history_cut']) + 1,
+                    )
+                    current_row = None
+                else:
+                    history_rows, current_row = _source_rows(
+                        source_conn, current_user_message_id,
+                    )
+            except LookupError:
+                return _blocked('invalid_current_request')
+            except _SourceScopeUnavailable:
+                return _blocked('source_scope_unavailable')
+            except (OSError, sqlite3.Error, TypeError, ValueError):
+                return _blocked('source_rows_unavailable')
+            finally:
+                source_conn.close()
+        if isinstance(prepared_inputs_out, dict):
+            prepared_inputs_out['source_rows'] = (history_rows, current_row)
 
-        try:
-            turns = derive_completed_turns(history_rows)
-            events = derive_autonomous_events(history_rows)
-            expected_members = build_source_members(turns, events)
-        except (TypeError, ValueError):
-            return _blocked('source_rows_unavailable')
+        if prepared_source_projection is not None:
+            turns, events, expected_members = prepared_source_projection
+        else:
+            try:
+                turns, events = derive_turns_and_events(history_rows)
+                expected_members = build_source_members(turns, events)
+            except (TypeError, ValueError):
+                return _blocked('source_rows_unavailable')
+            if isinstance(prepared_inputs_out, dict):
+                prepared_inputs_out['source_projection'] = (
+                    turns, events, tuple(expected_members),
+                )
         if source_member_scope is not None:
             try:
                 expected_members = _restrict_expected_members(
@@ -554,11 +604,20 @@ def build_daily_continuity_shadow_plan(
                 for turn in tuple(turns)
                 if str(turn.turn_id) in selected_turn_ids
             )
-        if not is_formal_user_source_row(current_row):
-            return _blocked('invalid_current_request')
         try:
-            current_request = _current_request_section(current_row)
-        except (TypeError, ValueError):
+            if current_request is not None:
+                current_section = ContextSection(
+                    kind='current_request',
+                    source_ref=str(current_request['source_ref']),
+                    source_revision=str(current_request['source_revision']),
+                    content_hash=str(current_request['content_hash']),
+                    estimated_tokens=int(current_request['estimated_tokens']),
+                )
+            elif not is_formal_user_source_row(current_row):
+                return _blocked('invalid_current_request')
+            else:
+                current_section = _current_request_section(current_row)
+        except (KeyError, TypeError, ValueError):
             return _blocked('invalid_current_request')
         window_anchor = None
         window_anchor_status = ''
@@ -609,7 +668,7 @@ def build_daily_continuity_shadow_plan(
                 raw_members=expected_members,
                 chunks=bindings,
                 budget_policy=budget_policy,
-                fixed_sections=accepted + (current_request,),
+                fixed_sections=accepted + (current_section,),
                 budget_policy_version=str(budget_policy_version or '').strip(),
                 window_anchor=window_anchor,
                 window_anchor_status=window_anchor_status,

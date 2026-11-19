@@ -9,6 +9,29 @@ BRANCH="${DEPLOY_BRANCH:-main}"
 EXPECTED_SHA="${1:-}"
 PYTHON="${PYTHON_BIN:-/usr/bin/python3.11}"
 SERVICES=(frontend frontend-gw)
+PROFILE_CRON_PATH="/etc/cron.d/hayagarden-daily-profile-updater"
+PROFILE_CRON_BACKUP="/var/tmp/hayagarden-profile-cron.$$.bak"
+PROFILE_CRON_EXISTED=0
+PROFILE_CRON_CHANGED=0
+DEHYDRATOR_CRON_PATH="/etc/cron.d/hayagarden-daily-memory-dehydrator"
+DEHYDRATOR_CRON_BACKUP="/var/tmp/hayagarden-dehydrator-cron.$$.bak"
+DEHYDRATOR_CRON_EXISTED=0
+DEHYDRATOR_CRON_CHANGED=0
+MAIL_CRON_PATH="/etc/cron.d/hayagarden-mail-memory-dehydrator"
+MAIL_CRON_BACKUP="/var/tmp/hayagarden-mail-dehydrator-cron.$$.bak"
+MAIL_CRON_EXISTED=0
+MAIL_CRON_CHANGED=0
+REVIEW_CRON_PATH="/etc/cron.d/hayagarden-memory-review"
+REVIEW_CRON_BACKUP="/var/tmp/hayagarden-memory-review-cron.$$.bak"
+REVIEW_CRON_EXISTED=0
+REVIEW_CRON_CHANGED=0
+POSTMAN_CRON_PATH="/etc/cron.d/hayagarden-postman"
+POSTMAN_CRON_BACKUP="/var/tmp/hayagarden-postman-cron.$$.bak"
+POSTMAN_CRON_EXISTED=0
+POSTMAN_CRON_CHANGED=0
+ROOT_CRONTAB_BACKUP="/var/tmp/hayagarden-fact-extractor-crontab.$$.bak"
+ROOT_CRONTAB_EXISTED=0
+ROOT_CRONTAB_CHANGED=0
 LOCK_FILE="/var/lock/hayagarden-frontend-deploy.lock"
 STATE_DIR="/var/lib/hayagarden"
 VAULT_KEY_FILE="${HAYAGARDEN_RELAY_VAULT_KEY_FILE:-/etc/hayagarden/relay-credentials.key}"
@@ -28,6 +51,7 @@ source "$OVERLAY_HELPER"
 [[ -d "$ROOT/.git" ]] || fail "$ROOT is not a git checkout"
 command -v git >/dev/null || fail "git is missing"
 command -v flock >/dev/null || fail "flock is missing"
+command -v crontab >/dev/null || fail "crontab is missing"
 command -v curl >/dev/null || fail "curl is missing"
 [[ -x "$PYTHON" ]] || fail "python runtime not found: $PYTHON"
 "$PYTHON" -c 'from cryptography.fernet import Fernet' \
@@ -213,6 +237,7 @@ bash "$ROOT/tools/backup.sh"
 # The editor schema is an explicit deployment migration. It runs only after the
 # consistent database backup succeeds and before the target services restart.
 "$PYTHON" "$staging/migrations/flow_studio_editor.py" --db-path "$ROOT/memories.db"
+"$PYTHON" "$staging/migrations/profile_documents.py" --db-path "$ROOT/memories.db"
 protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 
@@ -220,6 +245,24 @@ restart_attempted=0
 rollback() {
   trap - ERR
   echo "Deployment failed; rolling back to $current_sha" >&2
+  if [[ "$PROFILE_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$PROFILE_CRON_EXISTED" -eq 1 ]]; then cp -a "$PROFILE_CRON_BACKUP" "$PROFILE_CRON_PATH"; else rm -f "$PROFILE_CRON_PATH"; fi
+  fi
+  if [[ "$DEHYDRATOR_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$DEHYDRATOR_CRON_EXISTED" -eq 1 ]]; then cp -a "$DEHYDRATOR_CRON_BACKUP" "$DEHYDRATOR_CRON_PATH"; else rm -f "$DEHYDRATOR_CRON_PATH"; fi
+  fi
+  if [[ "$MAIL_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$MAIL_CRON_EXISTED" -eq 1 ]]; then cp -a "$MAIL_CRON_BACKUP" "$MAIL_CRON_PATH"; else rm -f "$MAIL_CRON_PATH"; fi
+  fi
+  if [[ "$REVIEW_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$REVIEW_CRON_EXISTED" -eq 1 ]]; then cp -a "$REVIEW_CRON_BACKUP" "$REVIEW_CRON_PATH"; else rm -f "$REVIEW_CRON_PATH"; fi
+  fi
+  if [[ "$POSTMAN_CRON_CHANGED" -eq 1 ]]; then
+    if [[ "$POSTMAN_CRON_EXISTED" -eq 1 ]]; then cp -a "$POSTMAN_CRON_BACKUP" "$POSTMAN_CRON_PATH"; else rm -f "$POSTMAN_CRON_PATH"; fi
+  fi
+  if [[ "$ROOT_CRONTAB_CHANGED" -eq 1 ]]; then
+    if [[ "$ROOT_CRONTAB_EXISTED" -eq 1 ]]; then crontab "$ROOT_CRONTAB_BACKUP"; else crontab -r 2>/dev/null || true; fi
+  fi
   clear_runtime_for_checkout
   git checkout --detach -f "$current_sha"
   restore_runtime
@@ -234,6 +277,8 @@ rollback() {
       echo "Rollback restart withheld: managed Claude runtime is not healthy." >&2
     fi
   fi
+  rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$MAIL_CRON_BACKUP" "$REVIEW_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
+  rm -f "$POSTMAN_CRON_BACKUP"
 }
 trap rollback ERR
 
@@ -276,7 +321,31 @@ actual = require_managed_claude_runtime()
 print('deploy claude runtime ok:', actual, '(minimum', MINIMUM_CLAUDE_CODE_VERSION + ')')
 PY
 
+if [[ -f "$PROFILE_CRON_PATH" ]]; then cp -a "$PROFILE_CRON_PATH" "$PROFILE_CRON_BACKUP"; PROFILE_CRON_EXISTED=1; fi
+if [[ -f "$DEHYDRATOR_CRON_PATH" ]]; then cp -a "$DEHYDRATOR_CRON_PATH" "$DEHYDRATOR_CRON_BACKUP"; DEHYDRATOR_CRON_EXISTED=1; fi
+if [[ -f "$MAIL_CRON_PATH" ]]; then cp -a "$MAIL_CRON_PATH" "$MAIL_CRON_BACKUP"; MAIL_CRON_EXISTED=1; fi
+if [[ -f "$REVIEW_CRON_PATH" ]]; then cp -a "$REVIEW_CRON_PATH" "$REVIEW_CRON_BACKUP"; REVIEW_CRON_EXISTED=1; fi
+if [[ -f "$POSTMAN_CRON_PATH" ]]; then cp -a "$POSTMAN_CRON_PATH" "$POSTMAN_CRON_BACKUP"; POSTMAN_CRON_EXISTED=1; fi
+umask 077
+if crontab -l > "$ROOT_CRONTAB_BACKUP" 2>/dev/null; then ROOT_CRONTAB_EXISTED=1; else : > "$ROOT_CRONTAB_BACKUP"; fi
+PROFILE_CRON_CHANGED=1
+rm -f "$PROFILE_CRON_PATH"
+DEHYDRATOR_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-daily-memory-dehydrator" "$DEHYDRATOR_CRON_PATH"
+MAIL_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-mail-memory-dehydrator" "$MAIL_CRON_PATH"
+REVIEW_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-memory-review" "$REVIEW_CRON_PATH"
+POSTMAN_CRON_CHANGED=1
+install -o root -g root -m 0644 "$staging/deploy/cron.d/hayagarden-postman" "$POSTMAN_CRON_PATH"
+# Retire only the root-cron entry that runs the legacy FACT extractor.
+if [[ "$ROOT_CRONTAB_EXISTED" -eq 1 ]] && grep -Fq "/opt/frontend/tools/fact_extractor.py" "$ROOT_CRONTAB_BACKUP"; then
+  ROOT_CRONTAB_CHANGED=1
+  awk 'index($0, "/opt/frontend/tools/fact_extractor.py") == 0' "$ROOT_CRONTAB_BACKUP" | crontab -
+fi
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
 trap - ERR
+rm -f "$PROFILE_CRON_BACKUP" "$DEHYDRATOR_CRON_BACKUP" "$MAIL_CRON_BACKUP" "$REVIEW_CRON_BACKUP" "$ROOT_CRONTAB_BACKUP"
+rm -f "$POSTMAN_CRON_BACKUP"
 echo "Deployed $target_sha from $REMOTE/$BRANCH"

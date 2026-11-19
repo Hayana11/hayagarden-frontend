@@ -415,7 +415,10 @@ class RouterTests(StoreFixture):
         result = memory_write_adapter.write_memory(str(self.posts), content="她最喜欢番茄味鱼粉。")
         self.assertEqual((result["status"], result["store"]), ("CREATED", "kernel"))
         self.assertNotIn("id", result)
+        self.assertEqual(self.ombre.calls, [])
         self.assertEqual(self.posts_rows("content='她最喜欢番茄味鱼粉。'"), [])
+        self.sync()
+        self.assertIn(result["ombre_bucket_id"], self.ombre.buckets)
 
     def test_cc_hides_ombre_creation_tools_only_when_on(self):
         from tools.memory_kernel_switch import kernel_owned_brain_writes

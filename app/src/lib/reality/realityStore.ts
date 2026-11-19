@@ -15,7 +15,7 @@ export type UserActivity =
   | "cycling"
   | "in_vehicle"
   | "unknown";
-export type RealityActivitySource = "hms" | "none";
+export type RealityActivitySource = "hms" | "google" | "none";
 
 export interface RealityFreshnessResult {
   status: RealityFreshness;
@@ -114,7 +114,9 @@ export function getFreshUserActivity(
   const activity = snapshot.activity;
   if (
     !activity ||
-    activity.source !== "hms" ||
+    (activity.source !== "hms" && activity.source !== "google") ||
+    typeof activity.possibility !== "number" ||
+    !(activity.possibility >= 80 && activity.possibility <= 100) ||
     activity.userActivity === "unknown" ||
     getActivityFreshness(snapshot, nowMs, maxAgeMs).status !== "fresh"
   ) {
@@ -219,7 +221,7 @@ function normalizeActivity(raw: unknown): RealityActivityState {
       : "unknown",
     possibility,
     activitySampledAt: sampledAt,
-    source: value.source === "hms" ? "hms" : "none",
+    source: value.source === "google" || value.source === "hms" ? value.source : "none",
     registration:
       typeof value.registration === "string" ? value.registration : "unknown",
     lastErrorCode:

@@ -154,6 +154,19 @@ class ExternalServerRegistryTests(unittest.TestCase):
             with self.assertRaises(RegistryValidationError):
                 self.register(endpoint=endpoint)
 
+    def test_only_exact_local_mail_mcp_endpoint_may_use_http(self):
+        record = self.register(endpoint="http://127.0.0.1:3457/mcp")
+        self.assertEqual(record.endpoint, "http://127.0.0.1:3457/mcp")
+        for endpoint in (
+            "http://localhost:3457/mcp",
+            "http://127.0.0.1:3458/mcp",
+            "http://127.0.0.1:3457/other",
+            "http://127.0.0.1:3457/mcp?x=1",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(RegistryValidationError):
+                    self.register(name="Rejected", endpoint=endpoint)
+
     def test_register_record_is_strict_and_transport_is_frozen_for_new_records(self):
         with self.assertRaises(RegistryValidationError) as transport_error:
             self.owner.register_record(

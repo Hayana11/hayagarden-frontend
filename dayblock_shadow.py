@@ -541,11 +541,10 @@ def derive_source_contract(
     from continuity.coverage import source_hash, validate_exact_coverage
     from continuity.sources import (
         POLICY_VERSION, build_source_members, build_source_snapshot,
-        derive_autonomous_events, derive_completed_turns, enumerate_candidate_source_refs,
+        derive_turns_and_events, enumerate_candidate_source_refs,
     )
 
-    turns = derive_completed_turns(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
-    events = derive_autonomous_events(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
+    turns, events = derive_turns_and_events(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
     base_members = build_source_members(turns, events)
     expected = enumerate_candidate_source_refs(rows)
     coverage = validate_exact_coverage(base_members, expected_source_refs=expected)
@@ -605,12 +604,11 @@ def materialize_raw_evidence(
     from continuity.materialization import (
         _render_turn, _render_wake, _rows_by_id, materialize_source_members,
     )
-    from continuity.sources import derive_autonomous_events, derive_completed_turns
+    from continuity.sources import derive_turns_and_events
 
     base_members = tuple(m for m in members if m.source_kind in {"completed_turn", "autonomous_event"})
     base_materialized = materialize_source_members(base_members, rows)
-    turns = derive_completed_turns(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
-    events = derive_autonomous_events(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
+    turns, events = derive_turns_and_events(rows, identity_id=IDENTITY_ID, chat_id=CHAT_ID)
     auxiliary, attachment_records, blockers = _dayblock_auxiliary_members(
         rows, turns, events, base_members, static_dir=static_dir,
     )

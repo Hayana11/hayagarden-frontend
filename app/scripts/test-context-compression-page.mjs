@@ -46,7 +46,7 @@ assert.match(screen, /当前引擎/);
 assert.match(screen, /function engineLabel/);
 assert.match(client, /__continuity\//);
 assert.match(settingsClient, /__continuity\//);
-assert.match(settings, /PRODUCT_PROVIDER_NAMES = \['claude', 'gpt', 'deepseek'\]/);
+assert.match(settings, /PRODUCT_PROVIDER_NAMES = \['claude', 'api_relay', 'gpt', 'deepseek'\]/);
 assert.match(settings, /暂未接入压缩任务/);
 assert.match(settings, /恢复默认设置/);
 assert.match(settings, /cc-settings-star-rule/);

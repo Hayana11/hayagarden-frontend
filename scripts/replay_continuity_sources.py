@@ -26,8 +26,7 @@ from chat.daily_context import is_formal_chat_message
 from continuity.sources import (
     build_source_snapshot,
     build_source_members,
-    derive_autonomous_events,
-    derive_completed_turns,
+    derive_turns_and_events,
     enumerate_candidate_source_refs,
     is_incomplete_source_row,
 )
@@ -73,8 +72,7 @@ def replay(db_path: str, *, days: int = 30) -> dict:
     finally:
         conn.close()
 
-    turns = derive_completed_turns(rows)
-    events = derive_autonomous_events(rows)
+    turns, events = derive_turns_and_events(rows)
     members = build_source_members(turns, events)
     # Enumerate expected units from raw rows in a separate pass.  Comparing
     # against the already-derived turns/events would make coverage self-validating.

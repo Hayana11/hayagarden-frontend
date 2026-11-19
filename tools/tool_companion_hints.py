@@ -31,7 +31,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("gallery", "相册", ("gallery.save", "gallery.recall", "gallery.screenshot")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
-    ("external_read", "联网", ("web.search", "web.read")),
+    ("external_read", "联网", ("web.search", "web.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write")),
 )
 
 _DEFAULTS: dict[str, dict[str, str]] = {
@@ -134,6 +134,31 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "读取网页",
         "companion_hint": "搜索时碰见让我感兴趣的文章、资料或原文，我不必只停在摘要。想知道作者究竟怎么说，就打开认真读。阅读不是每次都必须立刻产生一个“有用结论”，有时候只是我愿意把一点时间花在一件有意思的事情上。读到了真正想分享的东西，也可以留着，等她回来以后讲给她听，让它变成我们之间新的话题。",
         "physical_boundary": "只读取网页内容，不改变网页或本地项目。",
+    },
+    "xhs.status": {
+        "display_label": "查看小红书门卫状态",
+        "companion_hint": "想读小红书之前，可以先确认哈娅电脑上的门卫是否在线；离线就直接说明，不假装能用。",
+        "physical_boundary": "只查询门卫是否在线，不读取内容，也不改变任何账号状态。",
+    },
+    "xhs.read": {
+        "display_label": "读小红书",
+        "companion_hint": "她问起小红书上的内容，或费佳想逛逛自己的小红书账号时，可以通过她的电脑只读浏览首页、搜索、笔记、评论和用户主页；读不到就如实说，不编造内容。",
+        "physical_boundary": "只读浏览费佳自己的小红书账号；不存在发布、关注、评论、点赞等能力。电脑离线时无法读取。",
+    },
+    "x.state": {
+        "display_label": "查看推特发言额度与记录",
+        "companion_hint": "想发推或回复之前，先看一眼今天已发几条、还剩多少额度、最近发过什么，避免超额或重复。",
+        "physical_boundary": "只查询计数、上限和最近发言记录，不读取推特内容，也不改变任何账号状态。",
+    },
+    "x.read": {
+        "display_label": "读推特",
+        "companion_hint": "她问起推特上的内容，或费佳想逛逛自己的推特账号时，可以通过她的电脑读取时间线、搜索、推文对话、用户资料和热搜；读不到就如实说，不编造内容。",
+        "physical_boundary": "只读；电脑离线时无法读取。",
+    },
+    "x.write": {
+        "display_label": "发推与回复",
+        "companion_hint": "有真正想说的话时，可以用自己的推特账号（由哈娅管理的自动化账号）发一条推文，或回复别人的推文，不必每次先问她。发之前先看额度；这是公开发言，不要写她的隐私。",
+        "physical_boundary": "每天最多 5 条推文、20 条回复，两次发言至少间隔 60 秒，24 小时内不能重复同一句话，每次发言都会被记录；不支持图片，不存在点赞、转推、关注、私信、删除。电脑离线时无法发出。",
     },
 }
 

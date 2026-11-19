@@ -884,6 +884,8 @@ class WakeConcernResolutionIntegrationTests(unittest.TestCase):
         cr.ensure_concern_closure_schema(conn)
         conn.commit()
         conn.close()
+        from chat.mail_notice_store import ensure_schema
+        ensure_schema(self.get_db)
 
     def tearDown(self):
         self.tmp.cleanup()

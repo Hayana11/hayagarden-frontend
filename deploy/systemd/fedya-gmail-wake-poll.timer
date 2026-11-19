@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Gmail for new messages every two minutes
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=10s
+Persistent=true
+Unit=fedya-gmail-wake-poll.service
+
+[Install]
+WantedBy=timers.target

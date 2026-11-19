@@ -69,6 +69,7 @@ import {
   isTextCaretActive,
   replaceWithCanonicalProjection,
   setLiveMemoryRecall,
+  setLiveBirth,
   upsertToolUse,
   type LiveSegment,
   type LiveState,
@@ -160,11 +161,14 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
 import './ChatMessage.css';
+import { useWakeActivity } from '../lib/wakeActivity';
+import { WakeActivityCard } from '../components/WakeActivityCard';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
 import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
+import { ChatBirthPanel } from '../components/ChatBirthPanel';
 import { CallTranscriptSheet } from '../components/CallTranscriptSheet';
 import { createTypingPulse } from '../lib/typingPulse';
 import {
@@ -898,11 +902,34 @@ export function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
+  const birthStartedAtRef = useRef<number | null>(null);
+  const [birthNow, setBirthNow] = useState<number | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatToolCall | null>(null);
   const [pendingFiles, setPendingFiles] = useState<Array<{ fileUrl: string; fileName: string }>>([]);
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [uploadingFileCount, setUploadingFileCount] = useState(0);
   const [compressingImageCount, setCompressingImageCount] = useState(0);
+
+  const hasLive = live !== null;
+  const hasLiveSegments = Boolean(live?.segments.length);
+  const birthTickActive = birthNow !== null;
+  useEffect(() => {
+    if (hasLiveSegments) {
+      if (birthStartedAtRef.current !== null) {
+        birthStartedAtRef.current = null;
+        setBirthNow(null);
+      }
+      return;
+    }
+    const startedAt = birthStartedAtRef.current;
+    if (!hasLive || startedAt === null || !birthTickActive) return;
+    const intervalId = window.setInterval(() => {
+      if (birthStartedAtRef.current !== null) {
+        setBirthNow((current) => current === null ? null : performance.now());
+      }
+    }, 100);
+    return () => window.clearInterval(intervalId);
+  }, [birthTickActive, hasLive, hasLiveSegments]);
 
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
@@ -1715,6 +1742,8 @@ export function ChatScreen() {
   }, []);
 
   const clearLivePresentation = useCallback((preserveHandoff = false) => {
+    birthStartedAtRef.current = null;
+    setBirthNow(null);
     liveRef.current = null;
     setLive(null);
     if (!preserveHandoff) chatHandoffRef.current = null;
@@ -1739,6 +1768,7 @@ export function ChatScreen() {
         operationIdentity?: string | null;
         sourceAssistantId?: number | null;
         handoffUserMessageId?: number | null;
+        birthStartedAt?: number;
       } = {},
     ): Promise<ChatStreamRunResult> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
@@ -1753,6 +1783,8 @@ export function ChatScreen() {
         sourceAssistantId: opts.sourceAssistantId,
       });
       chatHandoffRef.current = handoff;
+      birthStartedAtRef.current = opts.birthStartedAt ?? null;
+      setBirthNow(opts.birthStartedAt == null ? null : performance.now());
       liveRef.current = createLiveState();
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -1787,6 +1819,9 @@ export function ChatScreen() {
           onMemoryRecall: (recall) => {
             updateLive((l) => setLiveMemoryRecall(l, recall));
           },
+          onBirth: (birth) => {
+            updateLive((l) => setLiveBirth(l, birth));
+          },
           onNotice: (s) => showToast(s),
         },
         ctrl,
@@ -1796,6 +1831,12 @@ export function ChatScreen() {
           pendingActionId: opts.confirmation?.pendingActionId,
           confirmationDecision: opts.confirmation?.decision,
           realityContext: opts.realityContext,
+          reconnectOnUnexpectedEof: (
+            userMessageId != null
+            && !opts.rewriteId
+            && !opts.confirmation
+            && opts.operationKind !== 'choice'
+          ),
         },
       );
       const reconnectWithoutAssistant = (
@@ -1855,7 +1896,7 @@ export function ChatScreen() {
     setSending(true);
     setChatError(null);
     const realityContext = decision === 'approve'
-      ? realityPromptProjection.getSnapshot().text
+      ? realityPromptProjection.forCurrentTurn().text
       : undefined;
     const streamResult = await runStream(null, {
       confirmation: { approvalId, pendingActionId, decision },
@@ -1889,7 +1930,8 @@ export function ChatScreen() {
       || sending
       || uploadingFileCount > 0
       || compressingImageCount > 0) return;
-    const realityContext = realityPromptProjection.getSnapshot().text;
+    const sendStartedAt = performance.now();
+    const realityContext = realityPromptProjection.forCurrentTurn().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
     setSending(true);
@@ -1928,7 +1970,7 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    const streamResult = await runStream(messageId, { realityContext });
+    const streamResult = await runStream(messageId, { realityContext, birthStartedAt: sendStartedAt });
     const latest = await refetchLatest();
     if (streamResult === 'success') bindFinalMessage(latest);
     clearLivePresentation(Boolean(streamResult === 'success' && chatHandoffRef.current?.finalMessageId !== null));
@@ -1939,7 +1981,7 @@ export function ChatScreen() {
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
     if (!choice || sending) return false;
-    const realityContext = realityPromptProjection.getSnapshot().text;
+    const realityContext = realityPromptProjection.forCurrentTurn().text;
     setSending(true);
     setChatError(null);
     uploadCoordinatorRef.current.beginChoicePost();
@@ -2698,6 +2740,7 @@ export function ChatScreen() {
     const mediaItems = messageMediaItems(m);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+        <ChatBirthPanel key={presentationKey + '-birth'} birth={usage?.birth} />
         {renderMemoryRecall(usage?.memoryRecall, presentationKey + '-recall')}
         <div className="chat-message-content chat-message-content-assistant">
           {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
@@ -2790,6 +2833,7 @@ export function ChatScreen() {
     const presentationKey = handoff?.presentationKey || 'chat-live-fallback';
     return (
       <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+          <ChatBirthPanel key={presentationKey + '-birth'} birth={l.birth} />
           {renderMemoryRecall(l.memoryRecall, presentationKey + '-recall')}
           <div className="chat-message-content chat-message-content-assistant">
             <div key={presentationKey + '-segments'} className="vstack vstack-12">
@@ -2839,10 +2883,18 @@ export function ChatScreen() {
                 return <Fragment key={segmentKey}>{renderToolItems(segmentKey, [segment.tool])}</Fragment>;
               })}
               {!l.segments.length ? (
-                <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
-                  <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
-                  正在连接回复…
-                </div>
+                birthStartedAtRef.current !== null ? (
+                  birthNow !== null ? (
+                    <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 12.5, letterSpacing: 1 }}>
+                      出生 {Math.max(0, (birthNow - birthStartedAtRef.current) / 1000).toFixed(1)}s
+                    </div>
+                  ) : null
+                ) : (
+                  <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
+                    <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
+                    正在连接回复…
+                  </div>
+                )
               ) : null}
             </div>
           </div>
@@ -2852,6 +2904,11 @@ export function ChatScreen() {
 
   // Modern: all loaded msgs. Legacy: bounded DOM window only (msgs state stays full).
   const visibleMsgs = legacyCompat ? msgs.slice(txWin.start, txWin.end) : msgs;
+  const firstVisible = visibleMsgs[0];
+  const earlierHidden = hasMoreBefore || (legacyCompat && txWin.start > 0);
+  const activitySince = earlierHidden && firstVisible ? firstVisible.createdAt : '';
+  const activityBefore = legacyCompat && txWin.end < msgs.length ? msgs[txWin.end].createdAt : '';
+  const activities = useWakeActivity(initialHistoryReady, activitySince, activityBefore);
   const atLatestWindow = !legacyCompat || isTranscriptWindowAtLatest(txWin, msgs.length);
   const canShowEarlierLoaded = legacyCompat && txWin.start > 0;
   const canFetchEarlier = (!legacyCompat && hasMoreBefore) || (legacyCompat && txWin.start === 0 && hasMoreBefore);
@@ -2887,12 +2944,16 @@ export function ChatScreen() {
   );
   const presentationEntries = buildChatPresentationEntries({
     messages: visibleMsgs,
+    activities,
     handoff: activeHandoff,
     finalMessageId: mountedFinalMessageId,
     liveVisible: liveSlotVisible,
     presentationKeys: presentationByMessageRef.current,
   });
   const rendered = presentationEntries.map((entry) => {
+    if (entry.kind === 'activity') {
+      return <WakeActivityCard key={entry.key} activity={entry.activity} />;
+    }
     if (entry.kind === 'date') {
       const label = entry.dateKey === new Date().toISOString().slice(0, 10)
         ? dateLabel

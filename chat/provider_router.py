@@ -62,9 +62,15 @@ def resolve_generation_provider() -> str:
     return _validated(value, key='CHAT_PROVIDER')
 
 
-def capture_generation_authority() -> GenerationAuthoritySnapshot:
+def capture_generation_authority(
+    *, provider: str | None = None,
+) -> GenerationAuthoritySnapshot:
     """Capture provider and formal model authority once, without model calls."""
-    provider = resolve_generation_provider()
+    provider = (
+        _validated(provider, key='CHAT_PROVIDER')
+        if provider is not None
+        else resolve_generation_provider()
+    )
     if provider == 'claude_code':
         # `default` is the CC resolver's explicit default identity; it never
         # guesses a CLI default model name.

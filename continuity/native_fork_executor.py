@@ -227,6 +227,7 @@ def execute_continuity_native_fork(
         parent_cwd,
         '',
         str(Path(parent_cwd) / 'cc-tools.json'),
+        formal_chat_continuity=True,
     )
     surface._tool_profile = TOOL_PROFILE_UH_A0
     env = surface._prepare_spawn_env(env)

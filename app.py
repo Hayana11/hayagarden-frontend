@@ -105,6 +105,17 @@ def _migrate_chat_columns():
     conn.commit()
     conn.close()
     ensure_chat_messages_source_kind_logged(DB_PATH, connect_fn=lambda p: __import__('sqlite3').connect(p))
+    # Needs source_kind, so it runs after the column exists. Failure only costs speed.
+    try:
+        from chat.daily_schema import ensure_chat_messages_scan_indexes
+        _idx_conn = __import__('sqlite3').connect(DB_PATH, timeout=30)
+        try:
+            ensure_chat_messages_scan_indexes(_idx_conn)
+        finally:
+            _idx_conn.close()
+    except Exception as exc:
+        __import__('logging').getLogger(__name__).warning(
+            'chat_messages scan indexes not created: %s', exc)
 
 
 def _register_continuity_schema():
@@ -346,6 +357,10 @@ def pocket_settings_page():
 @app.route('/letters')
 def letters():
     return send_from_directory('/opt/frontend/static', 'letters.html')
+
+@app.route('/privacy')
+def privacy():
+    return send_from_directory('/opt/frontend/static', 'privacy.html')
 
 @app.route('/manifest.json')
 def manifest():
@@ -4540,7 +4555,9 @@ def log_dream_event():
 
 # ── Wake Log (Phase 2) ─────────────────────────────────────
 def _init_wake_tables():
+    from wake.activity import ensure_schema
     conn = get_db()
+    ensure_schema(conn)
     conn.execute("""CREATE TABLE IF NOT EXISTS wake_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         woke_at TIMESTAMP DEFAULT (datetime('now','+8 hours')),
@@ -5034,6 +5051,25 @@ def _init_self_triggers_table():
     conn.close()
 
 _init_self_triggers_table()
+
+from chat.mail_notice_store import (
+    ensure_schema as _ensure_mail_notice_schema,
+    record_pending_mail_notice as _record_pending_mail_notice,
+)
+_ensure_mail_notice_schema(get_db)
+
+
+@app.route('/api/mail_notices', methods=['POST'])
+def record_mail_notice():
+    data = request.get_json(silent=True) or {}
+    message_id = data.get('message_id')
+    if not isinstance(message_id, str) or re.fullmatch(
+        r'[A-Za-z0-9_-]{1,128}', message_id,
+    ) is None:
+        return jsonify({'error': 'message_id invalid'}), 400
+    inserted = _record_pending_mail_notice(get_db, message_id)
+    return jsonify({'ok': True, 'inserted': inserted})
+
 
 @app.route('/api/self_triggers', methods=['POST'])
 def create_self_trigger():

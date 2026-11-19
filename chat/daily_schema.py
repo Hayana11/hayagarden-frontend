@@ -94,6 +94,32 @@ def ensure_chat_messages_source_kind(
         raise
 
 
+# Two read paths scan the whole of chat_messages, and chat_messages is wide
+# (cache_info alone is tens of MB; source_kind is stored after it), so a full scan
+# reads every overflow page:
+#   * read_canonical_scope_rows finds wake rows with WHERE source_kind='wake';
+#   * memory_surface._turn_number counts WHERE lower(author) IN (...) AND id<=?.
+# Both indexes are additive and only ever make those reads cheaper; the queries
+# and their results are unchanged.
+CHAT_MESSAGES_SCAN_INDEXES = (
+    'CREATE INDEX IF NOT EXISTS idx_chat_messages_wake '
+    "ON chat_messages(id) WHERE source_kind='wake'",
+    'CREATE INDEX IF NOT EXISTS idx_chat_messages_author_lower '
+    'ON chat_messages(lower(author))',
+)
+
+
+def ensure_chat_messages_scan_indexes(conn: sqlite3.Connection) -> bool:
+    """Create the two scan-avoiding indexes. False if the table/columns are not there yet."""
+    cols = _table_columns(conn, 'chat_messages')
+    if not {'author', 'source_kind'} <= cols:
+        return False
+    for statement in CHAT_MESSAGES_SCAN_INDEXES:
+        conn.execute(statement)
+    conn.commit()
+    return True
+
+
 def ensure_chat_messages_source_kind_logged(
     db_path: str,
     *,

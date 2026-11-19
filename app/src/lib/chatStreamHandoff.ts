@@ -1,3 +1,4 @@
+import type { WakeActivity } from './wakeActivity';
 import type { ChatMsg } from './chat';
 import type { LiveSegment } from './chatLiveTimeline';
 
@@ -92,7 +93,8 @@ export function canHandoffToFinal(handoff: ChatStreamHandoff): boolean {
 }
 
 export type ChatPresentationEntry =
-  | { kind: 'date'; key: string; dateKey: string; messageId: number }
+  | { kind: 'date'; key: string; dateKey: string; messageId?: number }
+  | { kind: 'activity'; key: string; activity: WakeActivity }
   | { kind: 'message'; key: string; message: ChatMsg; presentationKey: string }
   | { kind: 'live'; key: string; presentationKey: string };
 
@@ -120,6 +122,7 @@ export function pruneChatPresentationBindings(
 
 export function buildChatPresentationEntries(args: {
   messages: ChatMsg[];
+  activities?: WakeActivity[];
   handoff: Pick<ChatStreamHandoff, 'presentationKey' | 'sourceAssistantId'> | null;
   finalMessageId: number | null;
   liveVisible: boolean;
@@ -130,7 +133,21 @@ export function buildChatPresentationEntries(args: {
   let lastDate = '';
   let sourceReplaced = false;
 
+  const activities = args.activities || [];
+  let activityIndex = 0;
+  function appendActivity(activity: WakeActivity) {
+    const dateKey = activity.woke_at.slice(0, 10);
+    if (dateKey !== lastDate) {
+      lastDate = dateKey;
+      entries.push({ kind: 'date', key: 'wake-date-' + activity.wake_run_id, dateKey });
+    }
+    entries.push({ kind: 'activity', key: 'wake-' + activity.wake_run_id, activity });
+  }
+
   args.messages.forEach((message) => {
+    while (activityIndex < activities.length && activities[activityIndex].woke_at <= message.createdAt) {
+      appendActivity(activities[activityIndex++]);
+    }
     if (message.dateKey && message.dateKey !== lastDate) {
       lastDate = message.dateKey;
       entries.push({
@@ -167,6 +184,8 @@ export function buildChatPresentationEntries(args: {
       presentationKey,
     });
   });
+
+  while (activityIndex < activities.length) appendActivity(activities[activityIndex++]);
 
   if (args.liveVisible && args.handoff && !sourceReplaced) {
     entries.push({

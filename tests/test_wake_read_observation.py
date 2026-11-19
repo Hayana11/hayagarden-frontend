@@ -53,7 +53,6 @@ WRITE_CAPS = (
     'diary.write',
     'gallery.save',
     'memory.write',
-    'ledger.write',
     'gallery.screenshot',
     'task.timer.start',
 )
@@ -153,7 +152,7 @@ class WakeObservationCapabilityTests(unittest.TestCase):
             if (get_capability(cid) or {}).get('autonomy_mode') == 'read_auto'
             and (get_capability(cid) or {}).get('side_effect') == 'none'
         ))
-        self.assertEqual(defaults, default_allowed_capabilities('chat'))
+        self.assertEqual(defaults, tuple(c for c in default_allowed_capabilities('chat') if c != 'ledger.write'))
         for cid in CURRENT_OBSERVATION_READS:
             self.assertIn(cid, derived)
         for cid in WRITE_CAPS:

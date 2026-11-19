@@ -289,6 +289,7 @@ def _bootstrap_legacy_context_conn(
     chat_id: str,
     now_dt: datetime.datetime,
 ) -> dict[str, Any]:
+    conn.row_factory = sqlite3.Row
     row = conn.execute(
         'SELECT COUNT(*) AS c FROM daily_contexts WHERE chat_id=?',
         (chat_id,),

@@ -91,6 +91,36 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["capability_id"], "memory.search")
         self.assertEqual(result["lease_decision"], "ALLOW")
 
+    def test_xhs_read_capabilities_are_allowed_and_unknown_home_tool_is_denied(self):
+        for mode in ("chat", "wake"):
+            lease = self.lease(mode=mode)
+            for tool, capability_id, tool_input in (
+                ("mcp__home__xhs_status", "xhs.status", {}),
+                ("mcp__home__xhs_read", "xhs.read", {"command": "feed"}),
+            ):
+                result = evaluate_tool_call(tool, tool_input, lease)
+                self.assertEqual(result["capability_id"], capability_id, (mode, tool))
+                self.assertEqual(result["lease_decision"], "ALLOW", (mode, tool))
+        denied = evaluate_tool_call("mcp__home__xhs_publish", {}, self.lease())
+        self.assertEqual(denied["lease_decision"], "DENIED_CAPABILITY")
+        self.assertIsNone(denied["capability_id"])
+
+    def test_x_capabilities_are_allowed_in_chat_and_wake_and_unknown_x_tool_is_denied(self):
+        for mode in ("chat", "wake"):
+            lease = self.lease(mode=mode)
+            for tool, capability_id, tool_input in (
+                ("mcp__home__x_state", "x.state", {}),
+                ("mcp__home__x_read", "x.read", {"command": "timeline"}),
+                ("mcp__home__x_post", "x.write", {"command": "post", "text": "hi"}),
+            ):
+                result = evaluate_tool_call(tool, tool_input, lease)
+                self.assertEqual(result["capability_id"], capability_id, (mode, tool))
+                self.assertEqual(result["lease_decision"], "ALLOW", (mode, tool))
+        for tool in ("mcp__home__x_like", "mcp__home__x_delete", "mcp__home__x_follow"):
+            denied = evaluate_tool_call(tool, {}, self.lease())
+            self.assertEqual(denied["lease_decision"], "DENIED_CAPABILITY", tool)
+            self.assertIsNone(denied["capability_id"])
+
     def test_a_health_internal_read_is_allowed_by_default_chat_lease(self):
         lease = self.lease()
         self.assertIn("health.read", lease["allowed_capabilities"])
@@ -112,7 +142,7 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertIn("health.read", wake["allowed_capabilities"])
         self.assertEqual(
             wake["allowed_capabilities"],
-            lease["allowed_capabilities"],
+            tuple(c for c in lease["allowed_capabilities"] if c != "ledger.write"),
         )
         self.assertEqual(
             evaluate_tool_call(
@@ -506,6 +536,11 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__diary_write",
                 "mcp__capability__task_timer_start",
                 "mcp__home__get_countdowns",
+                "mcp__home__xhs_status",
+                "mcp__home__xhs_read",
+                "mcp__home__x_state",
+                "mcp__home__x_read",
+                "mcp__home__x_post",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",

@@ -1353,6 +1353,14 @@ def consume_cc_one_shot_claims(get_db_fn, claims, *, strict: bool = False):
         except Exception:
             if strict:
                 raise
+    pending_mail_ids = claims.get('pending_mail_ids') or []
+    if pending_mail_ids:
+        try:
+            from chat.mail_notice_store import consume_pending_mail_notices
+            consume_pending_mail_notices(get_db_fn, pending_mail_ids)
+        except Exception:
+            if strict:
+                raise
 
 
 # Wake → Chat 连续对话桥：message 正文上限；不注入 THOUGHTS。
@@ -1550,6 +1558,8 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
         'dream_flash': '',
         'feedback_ids': [],
         'dream_id': None,
+        'pending_mail_notice': '',
+        'pending_mail_ids': [],
     }
     if include_wake:
         _cr_state = None
@@ -1596,6 +1606,22 @@ def _cc_collect_one_shot(get_db_fn, *, include_wake=True):
     if dream_text:
         one_shot['dream_flash'] = dream_text
         one_shot['dream_id'] = dream_id
+    from chat.mail_notice_store import peek_pending_mail_notice_ids
+    pending_mail_ids = peek_pending_mail_notice_ids(get_db_fn)
+    if pending_mail_ids:
+        one_shot['pending_mail_ids'] = pending_mail_ids
+        if len(pending_mail_ids) == 1:
+            mail_list = f'message id: {pending_mail_ids[0]}'
+            opening = '有新的邮件。'
+        else:
+            mail_list = '\n'.join(
+                f'- message id: {message_id}' for message_id in pending_mail_ids
+            )
+            opening = f'有 {len(pending_mail_ids)} 封新的邮件：'
+        one_shot['pending_mail_notice'] = (
+            '【邮箱提示】\n' + opening + '\n' + mail_list
+            + '\n需要时可以使用邮箱工具读取。'
+        )
     return finalize_cc_wake_one_shot(one_shot, is_cold=False)
 
 
@@ -1693,7 +1719,7 @@ def format_cold_once(cold):
 
 
 # wake_reply_bridge 不进 format_one_shot：由 gateway 紧贴当前用户轮单独注入。
-_ONE_SHOT_TEXT_KEYS = ('task_feedback', 'dream_flash')
+_ONE_SHOT_TEXT_KEYS = ('task_feedback', 'dream_flash', 'pending_mail_notice')
 
 
 def format_one_shot(one_shot):

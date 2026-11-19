@@ -187,25 +187,14 @@ def save_gallery_image(
     summary = ""
     if meaning and meaning.get("summary"):
         try:
-            from tools import memory_tool
-            tags = ("gallery:%s " % pid) + " ".join(meaning.get("keywords") or ())
-            if meaning.get("emotion"):
-                tags += " " + str(meaning["emotion"])
-            mem_id = memory_tool.save_memory(
-                content=meaning["summary"],
-                type="PHOTO",
-                author="fyodor",
-                layer="long-term",
-                tags=tags.strip(),
-                importance=meaning.get("importance", 50),
-            )
+            # Gallery keeps its own description and meaning. New artwork no
+            # longer creates a parallel PHOTO memory in the Kernel.
             gallery_store.set_meaning(
                 pid,
                 summary=meaning["summary"],
                 emotion=meaning.get("emotion", ""),
                 keywords=meaning.get("keywords", []),
                 importance=meaning.get("importance", 50),
-                mem_id=mem_id,
             )
             summary = str(meaning["summary"])
         except Exception:

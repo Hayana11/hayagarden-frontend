@@ -53,6 +53,11 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "code.search",
                 "web.search",
                 "web.read",
+                "xhs.status",
+                "xhs.read",
+                "x.state",
+                "x.read",
+                "x.write",
                 "gallery.save",
                 "gallery.recall",
                 "gallery.screenshot",
@@ -67,6 +72,17 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "workspace.execute",
             },
         )
+
+    def test_x_write_is_an_auto_external_write_with_x_post_binding(self):
+        item = get_capability("x.write")
+        self.assertEqual(item["kind"], "write")
+        self.assertEqual(item["side_effect"], "external_state")
+        self.assertEqual(item["autonomy_mode"], "self_write_auto")
+        self.assertEqual(item["provider_bindings"], {"claude_code": "mcp__home__x_post"})
+        self.assertIn("x.write", P1_ENABLED_CAPABILITY_IDS)
+        self.assertIn("x.write", ordinary_auto_capabilities())
+        for like in ("x.like", "x.retweet", "x.follow", "x.delete", "x.dm"):
+            self.assertIsNone(get_capability(like))
 
     def test_frozen_enums_and_provider_neutral_ids(self):
         for item in CAPABILITY_MANIFEST:
@@ -114,6 +130,11 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "ledger.write",
+            "xhs.status",
+            "xhs.read",
+            "x.state",
+            "x.read",
+            "x.write",
         ):
             self.assertEqual(get_capability(capability_id)["loading_policy"], "deferred")
         memory_write = get_capability("memory.write")
@@ -134,6 +155,10 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "health.read",
+            "xhs.status",
+            "xhs.read",
+            "x.state",
+            "x.read",
         ):
             item = get_capability(capability_id)
             self.assertEqual(item["kind"], "read")
@@ -162,6 +187,11 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "todo.write": "mcp__capability__todo_write",
             "task.timer.start": "mcp__capability__task_timer_start",
             "countdown.read": "mcp__home__get_countdowns",
+            "xhs.status": "mcp__home__xhs_status",
+            "xhs.read": "mcp__home__xhs_read",
+            "x.state": "mcp__home__x_state",
+            "x.read": "mcp__home__x_read",
+            "x.write": "mcp__home__x_post",
             "ledger.read": "mcp__capability__ledger_read",
             "ledger.budget.read": "mcp__capability__ledger_budget_read",
             "ledger.write": "mcp__capability__ledger_write",
@@ -249,6 +279,11 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "ledger.write",
                 "web.search",
                 "web.read",
+                "xhs.status",
+                "xhs.read",
+                "x.state",
+                "x.read",
+                "x.write",
                 "health.read",
                 "gallery.save",
                 "gallery.recall",

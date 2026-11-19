@@ -730,5 +730,84 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                 )
 
 
+class HiddenFlowFormalChatEligibilityTests(unittest.TestCase):
+    def test_enabled_gate_allows_claude_code(self):
+        from chat import daily_runtime
+
+        fake_plan = types.SimpleNamespace(enabled=True, eligible=True)
+        with mock.patch(
+            "chat.daily_runtime.config_store.get_bool",
+            side_effect=lambda key, default=False: key == "HIDDEN_FLOW_ENGINE_ENABLED",
+        ), mock.patch(
+            "chat.hidden_flow.runtime.prepare_hidden_flow_turn",
+            return_value=fake_plan,
+        ) as prepare:
+            result = daily_runtime._prepare_hidden_flow_plan(
+                provider="claude_code",
+                turn_kind="hot",
+                chat_id="eligibility-test",
+                user_message_id=1,
+                db_path=None,
+            )
+
+        self.assertIs(result, fake_plan)
+        prepare.assert_called_once_with(
+            enabled=True,
+            eligible=True,
+            chat_id="eligibility-test",
+            user_message_id=1,
+            db_path=None,
+        )
+
+    def test_enabled_gate_allows_api_relay_chat_on_claude_code_runtime(self):
+        from chat import daily_runtime
+
+        fake_plan = types.SimpleNamespace(enabled=True, eligible=True)
+        with mock.patch(
+            "chat.daily_runtime.config_store.get_bool",
+            side_effect=lambda key, default=False: key == "HIDDEN_FLOW_ENGINE_ENABLED",
+        ), mock.patch(
+            "chat.hidden_flow.runtime.prepare_hidden_flow_turn",
+            return_value=fake_plan,
+        ) as prepare:
+            result = daily_runtime._prepare_hidden_flow_plan(
+                provider="api_relay",
+                turn_kind="hot",
+                chat_id="eligibility-test",
+                user_message_id=2,
+                db_path=None,
+            )
+
+        self.assertIs(result, fake_plan)
+        prepare.assert_called_once_with(
+            enabled=True,
+            eligible=True,
+            chat_id="eligibility-test",
+            user_message_id=2,
+            db_path=None,
+        )
+
+    def test_disabled_gate_keeps_formal_chat_ineligible(self):
+        from chat import daily_runtime
+
+        with mock.patch(
+            "chat.daily_runtime.config_store.get_bool",
+            return_value=False,
+        ), mock.patch(
+            "chat.hidden_flow.runtime.prepare_hidden_flow_turn",
+        ) as prepare:
+            result = daily_runtime._prepare_hidden_flow_plan(
+                provider="api_relay",
+                turn_kind="hot",
+                chat_id="eligibility-test",
+                user_message_id=3,
+                db_path=None,
+            )
+
+        self.assertFalse(result.enabled)
+        self.assertFalse(result.eligible)
+        prepare.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

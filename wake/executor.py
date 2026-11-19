@@ -5,7 +5,7 @@ wake/executor.py
 import datetime
 import json
 import logging
-from typing import Optional
+from typing import Mapping, Optional
 
 from wake.unified_modes import is_unified_wake_provenance_mode
 
@@ -53,7 +53,8 @@ def execute(action: str, thoughts: str, content: str,
             settle_outcome_at: Optional[str] = None,
             settlement_required: bool = True,
             tool_calls_json: str = '',
-            display_segments_json: str = ''):
+            display_segments_json: str = '',
+            native_transcript_binding=None, activity=None):
     """
     action: 'none' | 'message' | 'diary' | 'explore' | 'call'
       ('call' only records the call he placed: an audit row, never pushed or
@@ -263,12 +264,17 @@ def execute(action: str, thoughts: str, content: str,
             # Do not backfill current; leave identity columns NULL on audit row.
             pass
 
-        conn.execute(
+        wake_log_id = conn.execute(
             "INSERT INTO wake_log (%s) VALUES (%s)" % (
                 ','.join(columns), ','.join(placeholders)
             ),
             tuple(values),
-        )
+        ).lastrowid
+        if activity is not None and deliver_chat and rid:
+            from wake.activity import save
+            save(conn, rid, mode, action == "message", *activity,
+                 (wake_cache_info or {}).get("tool_calls", []))
+        assistant_message_id = None
 
         # 执行 action：仅在归属仍然有效时写聊天表面
         if (
@@ -297,13 +303,13 @@ def execute(action: str, thoughts: str, content: str,
                 if 'display_segments' in msg_cols:
                     insert_columns.append('display_segments')
                     insert_values.append(display_segments_json or '')
-                conn.execute(
+                assistant_message_id = conn.execute(
                     "INSERT INTO chat_messages (%s) VALUES (%s)" % (
                         ', '.join(insert_columns),
                         ', '.join('?' for _ in insert_columns),
                     ),
                     tuple(insert_values),
-                )
+                ).lastrowid
             elif 'cache_info' in msg_cols and 'source_kind' in msg_cols:
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, cache_info, source_kind) "
@@ -327,6 +333,56 @@ def execute(action: str, thoughts: str, content: str,
                     "INSERT INTO chat_messages (author, content, thinking) VALUES (?,?,?)",
                     (author, content, thoughts),
                 )
+            if native_transcript_binding is not None:
+                if (
+                    not isinstance(native_transcript_binding, Mapping)
+                    or not isinstance(wake_cache_info, dict)
+                    or action != 'message'
+                    or wake_cache_info.get('canonical_chat_history') is not True
+                    or wake_cache_info.get('unified_chat_resident') is not True
+                    or wake_cache_info.get('provider') != 'claude_code'
+                    or wake_cache_info.get('source') != 'wake'
+                ):
+                    raise RuntimeError(
+                        'wake native binding requires canonical shared Claude message'
+                    )
+                message_row = conn.execute(
+                    'SELECT last_insert_rowid()',
+                ).fetchone()
+                if message_row is None or int(message_row[0] or 0) <= 0:
+                    raise RuntimeError('wake native binding message_id missing')
+                from chat.claude_event_mapping import (
+                    commit_shared_wake_native_binding,
+                )
+                commit_shared_wake_native_binding(
+                    conn,
+                    message_id=int(message_row[0]),
+                    binding=native_transcript_binding,
+                    window_identity=window_identity,
+                )
+                if wake_cache_info.get('proactive_cold_start') is True:
+                    # Same transaction as A: a crash can never leave A outside its window.
+                    from chat import daily_context as _dc
+                    conn.execute(
+                        'INSERT INTO daily_message_contexts (message_id, context_id, '
+                        'context_epoch, resident_generation, role, created_at) '
+                        "VALUES (?,?,?,?,'assistant',?)",
+                        (int(message_row[0]), int(native_transcript_binding['context_id']),
+                         int(native_transcript_binding['context_epoch']),
+                         int(native_transcript_binding['resident_generation']),
+                         _dc._now_local_str()),
+                    )
+                if 'cache_info' in wake_columns:
+                    # The skip chain must also see a spoken Wake's native range.
+                    span = {k: int(native_transcript_binding[k]) for k in (
+                        'context_id', 'context_epoch', 'resident_generation',
+                        'start_offset', 'end_offset')}
+                    span['message_id'] = int(message_row[0])
+                    conn.execute(
+                        'UPDATE wake_log SET cache_info=? WHERE id=?',
+                        (json.dumps({**wake_cache_info, 'native_transcript_range': span},
+                                    ensure_ascii=False), wake_log_id),
+                    )
         elif (
             deliver_chat
             and action == 'diary'
@@ -391,6 +447,7 @@ def execute(action: str, thoughts: str, content: str,
         'settlement_required': bool(settlement_required),
         'settle_status': settle_status,
         'gate_reason': gate_reason,
+        'assistant_message_id': assistant_message_id,
     }
 
     if not deliver_chat:

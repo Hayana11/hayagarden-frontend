@@ -310,7 +310,7 @@ export async function invokeExternalMcp({
     const toolInputSnapshot = validateToolInput(toolInput, limits.maxInputBytes);
     const authBinding = validateAuth(auth);
     const result = skeleton(diagnostics);
-    const dispatcher = createSafeDispatcher({ resolver });
+    const dispatcher = url.protocol === 'http:' ? undefined : createSafeDispatcher({ resolver });
     let requestIndex = 0;
     const fetcher = async (input, init = {}) => {
       requestIndex += 1;

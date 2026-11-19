@@ -2,6 +2,7 @@ import ast
 import contextlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -428,15 +429,17 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
                  mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
-                 mock.patch.object(uh, 'commit_shared_transcript_watermark', return_value={
-                     'start_offset': 100, 'end_offset': 180, 'skipped_provider_round': True,
-                 }), \
+                 mock.patch.object(
+                     uh,
+                     'prepare_shared_transcript_native_binding',
+                     return_value={'start_offset': 100, 'end_offset': 180, 'events': []},
+                 ), \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \
                  mock.patch.object(b3, 'invoke_renderer_relay') as relay:
                 out = b3.invoke_renderer(renderer_input=self.renderer_input())
         self.assertIsNotNone(out)
         self.assertTrue(out['shared_resident'])
-        self.assertTrue(out['transcript_skip']['skipped_provider_round'])
+        self.assertEqual(out['native_transcript_binding']['start_offset'], 100)
         self.assertEqual(len(resident.sent), 1)
         self.assertEqual(marker_seen_during_send, [True])
         self.assertEqual(released, [])
@@ -897,12 +900,16 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
                  mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
-                 mock.patch.object(uh, 'commit_shared_transcript_watermark', side_effect=RuntimeError('cas')), \
+                 mock.patch.object(
+                     uh,
+                     'prepare_shared_transcript_native_binding',
+                     side_effect=RuntimeError('prepare'),
+                 ), \
                  mock.patch('config_store.get_bool', return_value=True), \
                  mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
                  mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
-                with self.assertRaisesRegex(RuntimeError, 'uh_a1_transcript_watermark_commit_failed'):
+                with self.assertRaisesRegex(RuntimeError, 'prepare'):
                     b3._try_invoke_shared_renderer(
                         renderer_input=self.renderer_input(),
                     )
@@ -992,7 +999,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             ],
         }
 
-        commit_calls = []
+        binding_calls = []
         release_calls = []
         def main_stream(*args, **kwargs):
             self.assertEqual(
@@ -1065,10 +1072,14 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 return_value=(self.watermark(), 'ok'),
             ),
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark',
+                uh, 'prepare_shared_transcript_native_binding',
                 side_effect=lambda *args, **kwargs: (
-                    commit_calls.append(kwargs.get('jsonl_finality'))
-                    or {'committed': True}
+                    binding_calls.append(kwargs.get('jsonl_finality'))
+                    or {
+                        'start_offset': 100,
+                        'end_offset': 180,
+                        'events': [],
+                    }
                 ),
             ),
             mock.patch.object(
@@ -1096,7 +1107,9 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
 
         self.assertEqual(resident._replay_calls, 3)
         self.assertTrue(result['cache_info']['jsonl_usage']['stream_totals_match'])
-        self.assertEqual(len(commit_calls), 1)
+        self.assertEqual(len(binding_calls), 1)
+        self.assertEqual(result['native_transcript_binding']['end_offset'], 180)
+        self.assertNotIn('transcript_skip', result['cache_info'])
         self.assertEqual(resident.followup_calls, 0)
         list(resident.send_turn('follow-up'))
         self.assertEqual(resident.followup_calls, 1)
@@ -1151,7 +1164,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 uh, 'retire_shared_resident_after_failed_delivery',
             ) as retire,
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark', commit,
+                uh, 'prepare_shared_transcript_native_binding', commit,
             ),
             mock.patch.object(
                 cc_history_rewrite, 'guard_cc_generation',
@@ -1255,12 +1268,10 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 {},
             ))
 
-        commit_result = {
-            'context_id': 12,
-            'resident_generation': 2,
+        native_binding = {
             'start_offset': 100,
             'end_offset': 250,
-            'skipped_provider_round': True,
+            'events': [],
         }
         patches = (
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
@@ -1283,8 +1294,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 return_value=(self.watermark(), 'ok'),
             ),
             mock.patch.object(
-                uh, 'commit_shared_transcript_watermark',
-                return_value=commit_result,
+                uh, 'prepare_shared_transcript_native_binding',
+                return_value=native_binding,
             ),
             mock.patch.object(
                 uh, 'retire_shared_resident_after_failed_delivery',
@@ -1383,7 +1394,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 'RESIDENT_CHECK_2', 'WATERMARK_PREPARED',
                 'DELIVERY_FENCE_STARTED', 'STDIN_BEGIN', 'STDIN_FLUSHED',
                 'TOOL_USE', 'TOOL_RESULT', 'PROVIDER_DONE',
-                'JSONL_FINALITY', 'WATERMARK_COMMIT',
+                'JSONL_FINALITY', 'NATIVE_BINDING_PREPARED',
             ],
         )
         tool_use = next(event for event in events if event['stage'] == 'TOOL_USE')
@@ -1461,6 +1472,20 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             'wake_log_id': 701,
             'assistant_message_id': 9001,
         }
+        mail_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(mail_tmp.cleanup)
+        mail_db_path = os.path.join(mail_tmp.name, 'mail.db')
+        mail_get_db = lambda: sqlite3.connect(mail_db_path)
+        from chat.mail_notice_store import (
+            ensure_schema as ensure_mail_schema,
+            peek_pending_mail_notice_ids,
+            record_pending_mail_notice,
+        )
+        ensure_mail_schema(mail_get_db)
+        record_pending_mail_notice(mail_get_db, 'wake-route-success')
+        main_turn['one_shot_claims'] = {
+            'pending_mail_ids': ['wake-route-success'],
+        }
         runner = types.SimpleNamespace(
             select_wake_provider=lambda _mode: 'claude_code',
         )
@@ -1511,6 +1536,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                     gateway, '_wake_live_persisted_ids',
                     return_value=persisted_ids,
                 ),
+                mock.patch.object(gateway, 'get_db', side_effect=mail_get_db),
                 mock.patch.object(gateway, '_wake_run_id_mark'),
                 mock.patch('config_store.get_float', return_value=30),
                 mock.patch(
@@ -1525,6 +1551,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertEqual(payload['action'], 'message')
+        self.assertEqual(peek_pending_mail_notice_ids(mail_get_db), [])
         events = [
             json.loads(line.split('[WAKE-LIVE] ', 1)[1])
             for line in captured.output
@@ -1537,6 +1564,135 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(events[0]['assistant_message_id'], 9001)
         self.assertEqual(events[0]['wake_log_id'], 701)
         self.assertTrue(events[1]['frontend_visible'])
+
+
+    def test_wake_live_route_delivery_failure_keeps_mail_pending(self):
+        gateway = self._import_worktree_gateway()
+        from chat import interaction_state
+        from wake import executor
+
+        class Fence:
+            def __init__(self):
+                self.finished = []
+
+            def finish(self, delivered, **kwargs):
+                self.finished.append(bool(delivered))
+
+        clock = types.SimpleNamespace(
+            reliable=True,
+            user_idle_hours=1.0,
+            effective_idle_hours=1.0,
+        )
+        main_turn = {
+            'text': 'wake text',
+            'thinking': '',
+            'tool_calls': [],
+            'model_identity': 'claude-code:test',
+            'cache_info': {
+                'provider': 'claude_code',
+                'source': 'wake',
+                'b3_authority': True,
+                'unified_chat_resident': True,
+                'unified_main_chat_proactive': True,
+            },
+            '_shared_delivery_fence': Fence(),
+        }
+        persisted_ids = {
+            'wake_log_id': 701,
+            'assistant_message_id': 9001,
+        }
+        mail_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(mail_tmp.cleanup)
+        mail_db_path = os.path.join(mail_tmp.name, 'mail.db')
+        mail_get_db = lambda: sqlite3.connect(mail_db_path)
+        from chat.mail_notice_store import (
+            ensure_schema as ensure_mail_schema,
+            peek_pending_mail_notice_ids,
+            record_pending_mail_notice,
+        )
+        ensure_mail_schema(mail_get_db)
+        record_pending_mail_notice(mail_get_db, 'wake-route-failure')
+        main_turn['one_shot_claims'] = {
+            'pending_mail_ids': ['wake-route-failure'],
+        }
+        runner = types.SimpleNamespace(
+            select_wake_provider=lambda _mode: 'claude_code',
+        )
+        data = {'mode': 'normal', 'wake_run_id': 'wake-route-failure'}
+
+        with gateway.app.test_request_context(
+            '/wake', method='POST', json=data,
+        ):
+            with (
+                mock.patch.object(
+                    interaction_state, 'read_interaction_clock',
+                    return_value=clock,
+                ),
+                mock.patch.object(
+                    interaction_state, 'wake_guard_reason',
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    gateway, '_chat_is_generating', return_value=False,
+                ),
+                mock.patch.object(
+                    gateway, '_ensure_wake_runners', return_value=runner,
+                ),
+                mock.patch.object(
+                    gateway, '_wake_run_id_seen', return_value=False,
+                ),
+                mock.patch.object(
+                    gateway, '_run_unified_normal_main_chat_turn',
+                    return_value=main_turn,
+                ),
+                mock.patch(
+                    'chat.behavior_authority_b3.unified_normal_wake_enabled',
+                    return_value=True,
+                ),
+                mock.patch(
+                    'chat.wake_read_observation.collect_wake_read_observation',
+                    return_value={
+                        'status': 'unavailable',
+                        'started': False,
+                        'reason': 'test_skip',
+                        'bundle': {'observations': (), 'status': 'unavailable'},
+                    },
+                ),
+                mock.patch.object(
+                    executor, 'execute', return_value={'delivered': False},
+                ),
+                mock.patch.object(
+                    gateway, '_wake_live_persisted_ids',
+                    return_value=persisted_ids,
+                ),
+                mock.patch.object(gateway, 'get_db', side_effect=mail_get_db),
+                mock.patch.object(gateway, '_wake_run_id_mark'),
+                mock.patch('config_store.get_float', return_value=30),
+                mock.patch(
+                    'chat.window_identity.soft_window_enabled',
+                    return_value=False,
+                ),
+            ):
+                with self.assertLogs(gateway.app.logger.name, level='INFO') as captured:
+                    response = gateway._wake_decide_locked(
+                        data, 'normal', '', '',
+                    )
+
+        payload = response.get_json()
+        self.assertEqual(payload['reason'], 'NORMAL_WAKE_MAIN_CHAT_DELIVERY_FAILED')
+        self.assertEqual(peek_pending_mail_notice_ids(mail_get_db), ['wake-route-failure'])
+        events = [
+            json.loads(line.split('[WAKE-LIVE] ', 1)[1])
+            for line in captured.output
+            if '[WAKE-LIVE] ' in line
+        ]
+        self.assertEqual(
+            [event['stage'] for event in events],
+            ['DELIVERY_COMMIT', 'FAILED'],
+        )
+        self.assertEqual(events[0]['assistant_message_id'], 9001)
+        self.assertEqual(events[0]['wake_log_id'], 701)
+        self.assertEqual(main_turn['_shared_delivery_fence'].finished, [False])
 
 
 if __name__ == '__main__':

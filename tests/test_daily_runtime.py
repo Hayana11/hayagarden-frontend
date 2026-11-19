@@ -66,6 +66,7 @@ def _init_chat_messages(db_path: str):
             image_url TEXT DEFAULT '',
             cache_info TEXT DEFAULT '',
             choices TEXT DEFAULT '',
+            display_segments TEXT DEFAULT '',
             source_kind TEXT NOT NULL DEFAULT 'chat',
             created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         )'''
@@ -73,6 +74,8 @@ def _init_chat_messages(db_path: str):
     conn.commit()
     conn.close()
     dc.ensure_schema(db_path)
+    from chat.mail_notice_store import ensure_schema as ensure_mail_notice_schema
+    ensure_mail_notice_schema(lambda: sqlite3.connect(db_path))
 
 
 def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
@@ -220,6 +223,7 @@ class _FakeResident:
         self.killed = 0
         self._spawn_args: list[tuple] = []
         self.turn_leases: list[dict[str, Any]] = []
+        self.commit_metas: list[dict[str, Any]] = []
 
     def ensure_alive(self, system_text, env, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
         self._spawn_args.append((system_text, tool_profile))
@@ -239,6 +243,7 @@ class _FakeResident:
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         self.turn_leases.append(turn_lease)
+        self.commit_metas.append(dict(commit_meta or {}))
         yield ('text', 'daily reply')
         yield ('done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
 
@@ -959,7 +964,7 @@ class GatewayFlagOffGoldenTests(unittest.TestCase):
         conn = sqlite3.connect(':memory:')
         conn.execute(
             'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
-            'thinking TEXT, tool_calls TEXT, cache_info TEXT, choices TEXT)'
+            'thinking TEXT, tool_calls TEXT, cache_info TEXT, choices TEXT, display_segments TEXT)'
         )
         patches = [
             mock.patch.object(config_store, 'get_bool', return_value=False),
@@ -969,6 +974,9 @@ class GatewayFlagOffGoldenTests(unittest.TestCase):
             mock.patch.object(gateway, '_stream_cc_daily_soft_window', side_effect=_daily_stream),
             mock.patch.object(gateway, '_CC_RESIDENT', _LegacyResident()),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch('gateway._gen_release'),
             mock.patch('gateway.build_messages', return_value=[]),
@@ -1774,6 +1782,9 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             mock.patch('chat.daily_context.enabled', return_value=True),
             mock.patch.object(gateway, 'DB_PATH', db),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch.object(gateway, '_gen_release', side_effect=_track_gen_release),
             mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
@@ -1796,69 +1807,53 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway.get_db', return_value=sqlite3.connect(db)),
         ]
         if stream_impl is not None:
             patches.append(mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=stream_impl))
         return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
 
-    def test_chat_stream_disconnect_after_text_aborts_daily_turn(self):
-        import gateway
-
+    def test_chat_stream_disconnect_after_text_detaches_and_drains_daily_turn(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
             uid = _insert(db, 'hayana', 'disconnect', '2026-07-27 10:00:00')
-            resident = _BlockingAfterTextResident()
-            gen_release_calls: list = []
-            release_turn_calls: list = []
-            memo_mock = mock.Mock()
-            moments_mock = mock.Mock()
-            scoring_mock = mock.Mock()
+            resident = _FakeResident()
+            resident.done_yielded = False
+            stream_calls = []
 
-            def _prepare_real(**kwargs):
-                with mock.patch.object(config_store, 'get_bool', return_value=True), \
-                     mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
-                    return _REAL_PREPARE_DAILY_TURN(
-                        user_message_id=uid,
-                        db_path=db,
-                        resident=resident,
-                        static_system='S',
-                        wall_now=_FIXED_NOW,
-                    )
+            def _stream(plan, **_kwargs):
+                stream_calls.append(plan)
+                plan._resident_stream_entered = True
+                plan._resident_turn_sequence = 1
+                yield 'text', 'daily reply'
+                resident.done_yielded = True
+                yield 'done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {})
 
-            patches = [
-                mock.patch.object(config_store, 'get_bool', return_value=True),
-                mock.patch('chat.daily_context.enabled', return_value=True),
-                mock.patch.object(gateway, 'DB_PATH', db),
-                mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
-                mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
-                mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
-                mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
-                mock.patch(
-                    'moments_turn.insert_user_message',
-                    return_value={'content': 'hi', 'user_message_id': uid},
-                ),
-                mock.patch('moments_turn.activate_turn', side_effect=lambda td, **_k: td),
-                mock.patch('moments_turn.release_turn', side_effect=lambda *a, **k: release_turn_calls.append(k)),
-                mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
-                    'persona': 'P', 'full_system': 'STATIC',
-                }),
-                mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
-                mock.patch.object(gateway, '_write_session_memo', memo_mock),
-                mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
-                mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
-                mock.patch.object(gateway, '_CC_RESIDENT', resident),
-            ]
+            gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock = (
+                self._disconnect_stream_patches(db, uid, resident, stream_impl=_stream)
+            )
+            handle_success = mock.Mock(return_value={})
+            abort = mock.Mock(side_effect=AssertionError('detached Daily turn was aborted'))
             with contextlib.ExitStack() as stack:
-                for p in patches:
-                    stack.enter_context(p)
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                stack.enter_context(mock.patch.object(dr, 'handle_provider_success', side_effect=handle_success))
+                stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', side_effect=abort))
                 client = gateway.app.test_client()
-                resp = client.post('/chat/stream', json={'content': 'hi'})
-                self.assertEqual(resp.status_code, 200)
-                body_iter = resp.response
-                _ = next(body_iter)
+                response = client.post('/chat/stream', json={'content': 'hi'})
+                self.assertEqual(response.status_code, 200)
+                body_iter = response.response
+                text_event = None
+                for event in body_iter:
+                    if b'\"t\": \"text\"' in event:
+                        text_event = event
+                        break
+                self.assertIsNotNone(text_event)
+                self.assertIn(b'daily reply', text_event)
                 body_iter.close()
+                response.close()
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
             conn = sqlite3.connect(db)
@@ -1876,24 +1871,21 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             conn.close()
             self.assertIsNotNone(ctx)
             self.assertEqual(int(assistant_count), 1)
-            self.assertEqual(assistant_row[1], 'partial')
-            self.assertIn('stream_interrupted', str(assistant_row[2] or ''))
+            self.assertEqual(assistant_row[1], 'daily reply')
+            self.assertTrue(resident.done_yielded)
+            self.assertEqual(len(stream_calls), 1)
+            handle_success.assert_called_once()
+            abort.assert_not_called()
+            self.assertNotIn('stream_interrupted', str(assistant_row[2] or ''))
             self.assertEqual(int(mapping_count), 1)
-            self.assertFalse(dc.is_resident_turn_active(
-                int(ctx['id']), 1, db_path=db, now=_FIXED_NOW,
-            ))
-            self.assertGreaterEqual(resident.killed, 1)
-            self.assertGreater(int(ctx['resident_generation']), 1)
-            self.assertEqual(gen_release_calls, [None])
+            self.assertEqual(resident.killed, 0)
+            self.assertEqual(int(ctx['resident_generation']), 1)
+            self.assertEqual(len(gen_release_calls), 1)
             self.assertTrue(release_turn_calls)
             self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
-            memo_mock.assert_not_called()
-            moments_mock.assert_not_called()
-            scoring_mock.assert_not_called()
-            cursor_after = dc.get_resident_history_cursor(
-                int(ctx['id']), int(ctx['resident_generation']), db_path=db,
-            )
-            self.assertIsNone(cursor_after)
+            memo_mock.assert_called_once()
+            moments_mock.assert_called_once()
+            scoring_mock.assert_called_once()
         finally:
             os.unlink(db)
 
@@ -1924,7 +1916,9 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                      'persona': 'P', 'full_system': 'STATIC',
                  }), \
                  mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real), \
-                 mock.patch.object(gateway, '_CC_RESIDENT', resident):
+                 mock.patch.object(gateway, '_CC_RESIDENT', resident), \
+                 mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False), \
+                 mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False):
                 gen = gateway._stream_cc_daily_soft_window({'user_message_id': uid}, 'gen-close')
                 _ = next(gen)
                 gen.close()
@@ -2062,6 +2056,9 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
             mock.patch('chat.daily_context.enabled', return_value=True),
             mock.patch.object(gateway, 'DB_PATH', db),
             mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+            mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+            mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
             mock.patch.object(gateway, '_gen_release', side_effect=lambda v, **_kwargs: gen_release_calls.append(v)),
             mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
@@ -2089,6 +2086,7 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
             mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
             mock.patch('gateway.get_db', return_value=sqlite3.connect(db)),
         ]
         return gateway, patches, gen_release_calls, release_turn_calls, memo_mock, moments_mock, scoring_mock
@@ -2297,6 +2295,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(config_store, 'get_bool', return_value=True),
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
                 mock.patch(
                     'chat.system_builder.build_cc_daily_static_parts',
                     return_value={'persona': 'P', 'full_system': 'STATIC'},
@@ -2398,6 +2398,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(config_store, 'get_bool', return_value=True),
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
                 mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
@@ -2483,6 +2485,9 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                 mock.patch('chat.daily_context.enabled', return_value=True),
                 mock.patch.object(gateway, 'DB_PATH', db),
                 mock.patch.object(gateway, '_get_provider', return_value='claude_code'),
+                mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'),
+                mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False),
+                mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False),
                 mock.patch('gateway._gen_acquire_or_wait', return_value=('new', None)),
                 mock.patch.object(gateway, '_gen_release', side_effect=_track_gen_release),
                 mock.patch('moments_turn.prepare_turn', return_value={'content': 'hi'}),
@@ -2892,6 +2897,7 @@ class _MappingBlockedResident(_TranscriptColdResident):
 
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
+        self.last_commit_meta = dict(commit_meta or {})
         yield ('text', 'blocked-map reply')
         self.session_id = self._new_session_id
         # Assistant-only event: mapping rejects (candidate_user_missing).
@@ -3456,9 +3462,26 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
         )
         plan = self._prepare(uid, resident=resident)
+        from chat.mail_notice_store import (
+            ensure_schema as ensure_mail_schema,
+            peek_pending_mail_notice_ids,
+            record_pending_mail_notice,
+        )
+        mail_db = lambda: sqlite3.connect(self.db)
+        ensure_mail_schema(mail_db)
+        record_pending_mail_notice(mail_db, 'daily-map-failure')
+        plan.assembly['pending_mail_notice'] = (
+            '【邮箱提示】\n有新的邮件。\nmessage id: daily-map-failure'
+        )
+        plan.assembly['pending_mail_ids'] = ['daily-map-failure']
         list(dr.stream_daily_resident_turn(
             plan, resident=resident, env={}, static_system='STATIC',
         ))
+        self.assertIn('message id: daily-map-failure', resident.sent[-1])
+        self.assertEqual(
+            resident.last_commit_meta['pending_mail_ids'],
+            ['daily-map-failure'],
+        )
         self.assertIsNone(plan.transcript_observation_error_code)
         canonical, aid = _persist_canonical_for_plan(plan)
         with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
@@ -3470,6 +3493,10 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
         self.assertIn('candidate_user_missing', str(ctx.exception))
         self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
+        self.assertEqual(
+            peek_pending_mail_notice_ids(mail_db),
+            ['daily-map-failure'],
+        )
         self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
         self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
         self.assertIsNone(plan.manifest.get('cursor_cas_success'))
@@ -3968,6 +3995,75 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             store.consume_feedback.assert_called_once_with([31])
             self.assertEqual(out['feedback_consume_status'], 'CONSUMED')
             self.assertEqual(out['feedback_consumed_count'], 1)
+        finally:
+            os.unlink(db)
+
+    def test_daily_success_consumes_mail_only_after_mapping_and_cursor_finalize(self):
+        db = _tmp_db()
+        try:
+            plan, _store = self._prepare(db)
+            from chat.mail_notice_store import (
+                ensure_schema as ensure_mail_schema,
+                peek_pending_mail_notice_ids,
+                record_pending_mail_notice,
+            )
+            mail_db = lambda: sqlite3.connect(db)
+            ensure_mail_schema(mail_db)
+            record_pending_mail_notice(mail_db, 'daily-success')
+            plan.assembly['pending_mail_notice'] = (
+                '【邮箱提示】\n有新的邮件。\nmessage id: daily-success'
+            )
+            plan.assembly['pending_mail_ids'] = ['daily-success']
+
+            with mock.patch.object(dr, 'complete_daily_turn') as complete:
+                complete.side_effect = lambda *a, **kw: self.assertEqual(
+                    peek_pending_mail_notice_ids(mail_db), ['daily-success'],
+                )
+                with mock.patch.object(
+                    dr, 'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=199, raw_text='成功回复',
+                    )
+
+            complete.assert_called_once()
+            self.assertEqual(peek_pending_mail_notice_ids(mail_db), [])
+        finally:
+            os.unlink(db)
+
+    def test_daily_cursor_finalize_failure_keeps_mail_pending(self):
+        db = _tmp_db()
+        try:
+            plan, _store = self._prepare(db)
+            from chat.mail_notice_store import (
+                ensure_schema as ensure_mail_schema,
+                peek_pending_mail_notice_ids,
+                record_pending_mail_notice,
+            )
+            mail_db = lambda: sqlite3.connect(db)
+            ensure_mail_schema(mail_db)
+            record_pending_mail_notice(mail_db, 'daily-cursor-failure')
+            plan.assembly['pending_mail_ids'] = ['daily-cursor-failure']
+            error = dr.CursorCASConflictAfterPersist(
+                'cursor conflict', assistant_message_id=200, manifest={},
+            )
+            with mock.patch.object(
+                dr, 'complete_daily_turn', side_effect=error,
+            ), mock.patch.object(
+                dr, 'finalize_transcript_mapping_after_success',
+                side_effect=_mark_transcript_mapped,
+            ), mock.patch.object(
+                dr, '_rollback_failed_terminalization', return_value={},
+            ):
+                with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=200, raw_text='回复',
+                    )
+            self.assertEqual(
+                peek_pending_mail_notice_ids(mail_db),
+                ['daily-cursor-failure'],
+            )
         finally:
             os.unlink(db)
 
@@ -4650,7 +4746,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
 
         plan = types.SimpleNamespace(
             assembly={
-                'state': '【此刻有一点变化】\\n旧 transport delta',
+                'state': '【此刻有一点变化】\n旧 transport delta',
                 'state_snapshot': {
                     'emotion': 'mood=平静',
                     'drive': 'fatigue=0.10 stress=0.10',
@@ -5629,6 +5725,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             captured['scope'] = canonical_hot_source_scope
             return context_plan, {}
@@ -6258,6 +6355,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             order.append('build')
             self.assertIsNotNone(getattr(plan_arg, 'hot_receipt_frozen', None))
@@ -6314,6 +6412,432 @@ class ContextPlanConsumerTests(unittest.TestCase):
         build.assert_not_called()
         self.assertEqual(plan.hot_decision, 'BLOCKED')
         self.assertEqual(plan.hot_decision_reason, 'hot_source_scope_unproven')
+
+    def test_prepare_hot_respawns_for_explicit_native_tail_missing_only(self):
+        missing_reasons = (
+            'same_context_last_good_missing',
+            'same_context_last_good_identity_mismatch',
+            'native_tail_mapping_missing',
+            'native_tail_offset_missing',
+            'native_tail_offset_mismatch',
+        )
+        for reason in missing_reasons:
+            with self.subTest(reason=reason):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_live_identity_decision',
+                    return_value=(
+                        'PASS',
+                        '',
+                        {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+                    ),
+                ), mock.patch.object(
+                    dr,
+                    '_hot_native_tail_proof',
+                    return_value={'status': 'missing', 'reason': reason},
+                ), mock.patch.object(
+                    dr,
+                    '_build_production_context_plan',
+                ) as build:
+                    decision = dr._prepare_hot_context_plan(
+                        plan, resident=object(), static_system='STATIC',
+                    )
+                self.assertEqual(decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision_reason, reason)
+                self.assertEqual(plan.hot_scope_diagnostic['status'], 'missing')
+                build.assert_not_called()
+
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=(
+                'PASS',
+                '',
+                {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+            ),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': None},
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build:
+            decision = dr._prepare_hot_context_plan(
+                plan, resident=object(), static_system='STATIC',
+            )
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(
+            plan.hot_scope_diagnostic['reason'],
+            'native_tail_source_member_missing',
+        )
+        build.assert_not_called()
+
+    def test_prepare_hot_respawns_when_live_identity_requests_respawn(self):
+        for reason in (
+            'live_system_identity_mismatch',
+            'live_persona_identity_mismatch',
+            'resident_not_alive',
+        ):
+            with self.subTest(reason=reason):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_live_identity_decision',
+                    return_value=('RESPAWN', reason, None),
+                ), mock.patch.object(
+                    dr,
+                    '_build_production_context_plan',
+                ) as build:
+                    decision = dr._prepare_hot_context_plan(
+                        plan, resident=object(), static_system='STATIC',
+                    )
+                self.assertEqual(decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision, 'RESPAWN')
+                self.assertEqual(plan.hot_decision_reason, reason)
+                self.assertEqual(plan.hot_scope_diagnostic['stage'], 'live_identity')
+                build.assert_not_called()
+
+    def test_prepare_hot_keeps_live_identity_blocked_as_error(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('BLOCKED', 'epoch_invalid', None),
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_hot_source_scope_unavailable',
+        )
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+
+    def test_prepare_hot_keeps_ambiguous_and_untrusted_receipts_blocked(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        plan.user_message_id = 3
+        with mock.patch.object(
+            dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=(
+                'PASS',
+                '',
+                {'scan_status': 'READY', 'claude_session_id': 'session-1'},
+            ),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'ambiguous',
+                'reason': 'multiple_canonical_tail_turns',
+            },
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_hot_source_scope_unavailable',
+        )
+        self.assertEqual(plan.hot_scope_diagnostic['status'], 'ambiguous')
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+
+        for receipt_overrides in (
+            {'receipt': None},
+            {'membership_valid': False},
+        ):
+            with self.subTest(receipt_overrides=receipt_overrides):
+                plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+                plan.user_message_id = 3
+                plan.hot_receipt_frozen.update(receipt_overrides)
+                with mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=plan.hot_receipt_frozen,
+                ), mock.patch.object(
+                    dr,
+                    '_hot_native_tail_proof',
+                ) as native_tail:
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._prepare_hot_context_plan(
+                            plan, resident=object(), static_system='STATIC',
+                        )
+                self.assertEqual(
+                    raised.exception.error_code,
+                    'context_plan_hot_source_scope_unavailable',
+                )
+                self.assertEqual(
+                    plan.hot_scope_diagnostic['stage'], 'receipt_gate',
+                )
+                self.assertEqual(plan.hot_scope_diagnostic['status'], 'blocked')
+                native_tail.assert_not_called()
+
+    def test_prepare_hot_native_tail_pass_keeps_no_op(self):
+        db, proof_plan, frozen, registry = self._native_tail_fixture()
+        try:
+            frozen.update({
+                'receipt_members_complete': True,
+                'membership_valid': True,
+                'receipt_read_error': None,
+                'installed_source_watermark': frozen['receipt'].installed_source_watermark,
+            })
+            plan = dr.DailyTurnPlan(
+                request_id='hot-native-tail-pass',
+                chat_id='default',
+                local_day='2026-07-27',
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                user_message_id=proof_plan.user_message_id,
+                epoch_token={},
+                lease_owner='worker',
+                is_cold=False,
+                is_respawn=False,
+                cursor_before=2,
+                assembly={},
+                manifest={'provider': 'claude_code', 'model': 'model-1'},
+                db_path=db,
+            )
+            context_plan = self._fake_hot_context_plan()
+            with mock.patch.object(
+                dr, '_freeze_hot_receipt', return_value=frozen,
+            ), mock.patch.object(
+                dr, '_hot_live_identity_decision',
+                return_value=('PASS', '', registry),
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 400,
+                },
+            ), mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+                return_value=(context_plan, {}),
+            ), mock.patch.object(
+                dr, '_reconcile_hot_context_plan', return_value='NO_OP',
+            ) as reconcile:
+                decision = dr._prepare_hot_context_plan(
+                    plan, resident=object(), static_system='STATIC',
+                )
+            self.assertEqual(decision, 'NO_OP')
+            self.assertIsNone(plan.hot_scope_diagnostic)
+            reconcile.assert_called_once()
+        finally:
+            os.unlink(db)
+
+    def test_native_tail_offset_gap_respawns_before_one_current_user_send(self):
+        db, proof_plan, frozen, registry = self._native_tail_fixture(
+            registry_offset=650,
+        )
+        events = []
+        try:
+            conn = sqlite3.connect(db)
+            current_user_id = int(conn.execute(
+                'INSERT INTO chat_messages '
+                '(author, content, source_kind, created_at) VALUES (?,?,?,?)',
+                ('hayana', 'current user once', 'chat', '2026-07-27 10:01:00'),
+            ).lastrowid)
+            conn.commit()
+            conn.close()
+            self.assertEqual(current_user_id, proof_plan.user_message_id)
+            frozen.update({
+                'receipt_members_complete': True,
+                'membership_valid': True,
+                'receipt_read_error': None,
+                'installed_source_watermark': frozen['receipt'].installed_source_watermark,
+                'expected_receipt_revision': 0,
+            })
+
+            def make_plan(*, generation, cold, pending):
+                return dr.DailyTurnPlan(
+                    request_id='hot-native-tail-gap',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    context_id=7,
+                    context_epoch=3,
+                    resident_generation=generation,
+                    resident_key='default:e3:g%d' % generation,
+                    user_message_id=current_user_id,
+                    epoch_token={
+                        'context_id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': generation,
+                        'chat_id': 'default',
+                    },
+                    lease_owner='worker',
+                    is_cold=cold,
+                    is_respawn=cold,
+                    cursor_before=2,
+                    assembly={'manifest': {}, 'state_snapshot': {}},
+                    manifest={
+                        'provider': 'claude_code',
+                        'model': 'model-1',
+                        'context_plan_hot_pending': pending,
+                        'static_system_sha256': 'static-hash',
+                        'persona_sha256': 'persona-hash',
+                    },
+                    user_content='current user once',
+                    db_path=db,
+                    tool_profile=cc_resident.TOOL_PROFILE_LEGACY,
+                )
+
+            plan = make_plan(generation=1, cold=False, pending=True)
+
+            reprepare_capture = {}
+
+            def prepare_cold_plan(**kwargs):
+                self.assertFalse(getattr(plan, '_current_user_stdin_flushed', False))
+                self.assertEqual(kwargs['user_message_id'], current_user_id)
+                reprepare_capture['diagnostic'] = dict(plan.hot_scope_diagnostic)
+                events.append('cold_reprepare')
+                return make_plan(generation=2, cold=True, pending=False)
+
+            class Heartbeat:
+                failed = False
+
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def start(self):
+                    pass
+
+                def stop(self):
+                    return False
+
+            class Resident(_FakeResident):
+                def send_turn(
+                    self,
+                    content,
+                    commit_meta=None,
+                    turn_lease=None,
+                    on_stdin_flushed=None,
+                ):
+                    self.sent.append(str(content))
+                    events.append('provider_send')
+                    if on_stdin_flushed is not None:
+                        on_stdin_flushed()
+                    events.append('stdin_flushed')
+                    yield ('text', 'daily reply')
+                    yield ('done', ('daily reply', '', {}, {}))
+
+            resident = Resident()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(dr, 'LeaseHeartbeat', Heartbeat))
+                stack.enter_context(mock.patch.object(dr, 'verify_epoch_token'))
+                stack.enter_context(mock.patch.object(dr, 'get_local_binding', return_value=None))
+                stack.enter_context(mock.patch.object(dr, '_binding_matches_plan', return_value=True))
+                stack.enter_context(mock.patch.object(dr, '_resident_is_alive', return_value=True))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'peek_registered_respawn_decision',
+                    return_value={'effective_system': 'STATIC'},
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr, '_freeze_hot_receipt', return_value=frozen,
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr, '_hot_live_identity_decision',
+                    return_value=('PASS', '', registry),
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'get_same_context_last_good',
+                    return_value={
+                        'context_id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                        'claude_session_id': 'session-1',
+                        'transcript_end_offset': 400,
+                    },
+                ))
+                stack.enter_context(mock.patch.object(dr, 'is_epoch_token_current', return_value=False))
+                stack.enter_context(mock.patch.object(dr, '_release_lease'))
+                stack.enter_context(mock.patch.object(dr, 'close_local_resident_if_bound'))
+                stack.enter_context(mock.patch.object(
+                    dr, 'prepare_daily_turn', side_effect=prepare_cold_plan,
+                ))
+                respawn = stack.enter_context(mock.patch.object(
+                    dr,
+                    'reprepare_after_registered_session_change',
+                    wraps=dr.reprepare_after_registered_session_change,
+                ))
+                stack.enter_context(mock.patch.object(dr, '_build_production_context_plan'))
+                stack.enter_context(mock.patch(
+                    'chat.reality_context.build_reality_context',
+                    return_value={'time_anchor': '', 'weather_anchor': ''},
+                ))
+                stack.enter_context(mock.patch(
+                    'chat.reality_context.prepend_reality_to_provider_content',
+                    side_effect=lambda content, _reality: content,
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    'format_resident_turn_content',
+                    side_effect=lambda **kwargs: kwargs['user_content'],
+                ))
+                stack.enter_context(mock.patch.object(
+                    dr,
+                    '_apply_daily_cold_prompt_fence',
+                    side_effect=lambda _plan, **kwargs: kwargs['content'],
+                ))
+                stack.enter_context(mock.patch.object(dr, '_bind_context_install_render_receipt'))
+                stack.enter_context(mock.patch.object(dr.dc, 'get_resident_history_cursor', return_value=2))
+                stack.enter_context(mock.patch.object(dr, 'set_local_binding'))
+                stack.enter_context(mock.patch.object(dr.dc, 'upsert_resident_owner'))
+                stack.enter_context(mock.patch.object(dr, '_capture_transcript_start'))
+                stack.enter_context(mock.patch.object(dr, '_capture_transcript_end'))
+                stack.enter_context(mock.patch.object(dr, '_validate_hot_no_op_payload'))
+                stack.enter_context(mock.patch.object(dr, '_observe_continuity_shadow'))
+                events_out = list(dr.ensure_resident_and_stream(
+                    plan, resident=resident, env={}, static_system='STATIC',
+                ))
+
+            self.assertEqual(plan.hot_decision, 'RESPAWN')
+            self.assertEqual(plan.hot_decision_reason, 'native_tail_offset_mismatch')
+            self.assertEqual(reprepare_capture['diagnostic']['status'], 'missing')
+            self.assertEqual(
+                reprepare_capture['diagnostic']['reason'],
+                'native_tail_offset_mismatch',
+            )
+            self.assertEqual(respawn.call_count, 1)
+            self.assertEqual(resident.sent, ['current user once'])
+            self.assertEqual(events.count('provider_send'), 1)
+            self.assertLess(events.index('cold_reprepare'), events.index('stdin_flushed'))
+            self.assertTrue(any(evt == 'done' for evt, _payload in events_out))
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE id=? AND content=?",
+                    (current_user_id, 'current user once'),
+                ).fetchone()[0],
+                1,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
 
     def test_hot_receipt_commit_uses_this_turn_plan_identity(self):
         from chat import context_receipt as receipt_store
@@ -6532,12 +7056,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
         def _build(
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
+            allow_invalid_for_cold_bridge=False,
+            **_kwargs,
         ):
             captured.update({
                 'plan': plan,
                 'resident': resident,
                 'static_system': static_system,
                 'mode': mode,
+                'allow_invalid_for_cold_bridge': allow_invalid_for_cold_bridge,
             })
             return chunk_plan, {'chunk:one': 'compressed'}
 
@@ -6843,8 +7370,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
         def _build(
             plan, *, resident, static_system, mode='hot',
             canonical_hot_source_scope=None,
+            allow_invalid_for_cold_bridge=False,
+            **_kwargs,
         ):
             captured['mode'] = mode
+            captured['allow_invalid_for_cold_bridge'] = allow_invalid_for_cold_bridge
             return chunk_plan, {'chunk:one': 'compressed'}
 
         with mock.patch.object(
@@ -6964,6 +7494,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             mode='hot',
             capacity_budget_static_system=None,
             canonical_hot_source_scope=None,
+            **_kwargs,
         ):
             captured['mode'] = mode
             captured['resident'] = resident
@@ -7153,6 +7684,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             raise AssertionError('assistant session fixture length mismatch')
         db = self._context_plan_runtime_db()
         conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO daily_contexts "
+            "(id, chat_id, local_day, timezone, boundary_hour, context_epoch, "
+            "boundary_message_id, status, carryover_count, resident_generation, "
+            "version, created_at, updated_at, window_mode, opened_at) "
+            "VALUES (7, 'default', '2026-07-27', 'Asia/Shanghai', 4, 3, "
+            "0, 'PROVISIONAL', 0, 1, 1, '2026-07-27 10:00:00', "
+            "'2026-07-27 10:00:00', 'legacy_daily', '2026-07-27 10:00:00')"
+        )
         conn.execute(
             'DROP INDEX IF EXISTS uq_chat_message_claude_events_user_msg'
         )
@@ -8008,7 +8548,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         }
         executor_result = execute(
             'none', '', '', 'normal',
-            get_db_fn=lambda: sqlite3.connect(db),
+            get_db_fn=lambda: dc._connect(db),
             cache_info=main_turn['cache_info'],
             wake_run_id='integration-wake',
             window_identity=identity,
@@ -8549,8 +9089,13 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     return '1'
                 return original_get(key, default)
 
-            def _build(plan, *, resident, static_system, mode='hot'):
+            def _build(
+                plan, *, resident, static_system, mode='hot',
+                allow_invalid_for_cold_bridge=False,
+                **_kwargs,
+            ):
                 captured['mode'] = mode
+                captured['allow_invalid'] = allow_invalid_for_cold_bridge
                 return context_plan, {'chunk:one': 'compact canonical history'}
 
             resident = _FakeResident()
@@ -8572,6 +9117,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 ))
 
             self.assertEqual(captured['mode'], 'cold')
+            self.assertTrue(captured['allow_invalid'])
             self.assertTrue(any(evt == 'done' for evt, _payload in events))
             self.assertEqual(len(resident.sent), 1)
             self.assertEqual(resident.sent[0].count('current request'), 1)
@@ -8600,8 +9146,13 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     return '1'
                 return original_get(key, default)
 
-            def _reject_fixed_overflow(plan, *, resident, static_system, mode='hot'):
+            def _reject_fixed_overflow(
+                plan, *, resident, static_system, mode='hot',
+                allow_invalid_for_cold_bridge=False,
+                **_kwargs,
+            ):
                 self.assertEqual(mode, 'cold')
+                self.assertTrue(allow_invalid_for_cold_bridge)
                 self.assertGreater(len(static_system), 70000)
                 raise oversized
 
@@ -10673,6 +11224,88 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             db_path='test-continuity.db',
         )
 
+    def test_rebuilt_plan_aggregates_chunk_member_coverage_in_canonical_order(self):
+        first = self._member()
+        second = self._member()
+        second.seq = first.seq + 1
+        second.source_ref = 'turn:122:123'
+        second.source_revision = 'revision-next'
+        second.content_hash = 'content-next'
+
+        def chunk(members):
+            return types.SimpleNamespace(kind='chunk', source_members=tuple(members))
+
+        self.assertTrue(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first,)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(valid=True, representations=(chunk((first,)),)),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first, second)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((first,)), chunk((first,)), chunk((second,))),
+            ),
+            bridge_members=(first, second),
+        ))
+        self.assertFalse(dr._selected_exact_cold_bridge(
+            types.SimpleNamespace(
+                valid=True,
+                representations=(chunk((second,)), chunk((first,))),
+            ),
+            bridge_members=(first, second),
+        ))
+
+    def test_current_user_in_bridge_fails_before_targeted_producer(self):
+        runtime_plan = self._runtime_plan()
+        current = self._member()
+        current.source_ref = 'turn:999:1000'
+        first = types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:first',
+            plan_hash='hash:first',
+            representations=(),
+            source_members=(current,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(current,),
+            estimated_tokens=current.logical_size,
+            remaining_budget=0,
+            error_code=None,
+        )
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr, '_run_targeted_cold_bridge',
+        ) as producer:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={},
+                    resident=None,
+                    static_system='STATIC',
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_cold_bridge_current_forbidden',
+        )
+        producer.assert_not_called()
+
     def test_required_bridge_runs_one_targeted_generation_and_rebuilds(self):
         runtime_plan = self._runtime_plan()
         first = types.SimpleNamespace(
@@ -10699,9 +11332,7 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             active_settings_revision_id='settings-active',
             target_logical_size=16000,
             max_completed_turns=30,
-            materialization_close_reason='end_of_snapshot',
             model_call_count=1,
-            generated_chunk_id='new',
         )
         calls = []
 
@@ -10745,6 +11376,130 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
             runtime_plan.manifest['context_plan_cold_bridge_rebuilt_plan_id'],
             'plan:new',
         )
+
+    def test_invalid_first_plan_required_bridge_rebuilds_and_selects_exact_chunk(self):
+        runtime_plan = self._runtime_plan()
+        source_member = self._member()
+        first = types.SimpleNamespace(
+            valid=False,
+            plan_id='plan:first-invalid',
+            plan_hash='hash:first-invalid',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='overflow',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(source_member,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(source_member,),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        rebuilt = self._plan('rebuilt')
+        result = types.SimpleNamespace(
+            status='ready',
+            model_call_count=1,
+        )
+
+        def build(_plan, *, resident, static_system, mode='hot'):
+            self.assertEqual(mode, 'cold')
+            return rebuilt, {'rebuilt': 'body'}
+
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ) as rebuild:
+            selected, bodies = dr._conditionally_seal_cold_bridge(
+                runtime_plan,
+                first_plan=first,
+                first_chunk_bodies={},
+                resident=None,
+                static_system='STATIC',
+            )
+
+        self.assertIs(selected, rebuilt)
+        self.assertTrue(selected.valid)
+        self.assertEqual(bodies, {'rebuilt': 'body'})
+        self.assertEqual(selected.representations[0].chunk_id, 'rebuilt')
+        self.assertEqual(
+            selected.representations[0].source_members[0].source_ref,
+            source_member.source_ref,
+        )
+        seal.assert_called_once()
+        rebuild.assert_called_once()
+
+    def test_ready_bridge_with_nonmatching_rebuilt_membership_fails_closed(self):
+        runtime_plan = self._runtime_plan()
+        source_member = self._member()
+        first = types.SimpleNamespace(
+            valid=False,
+            plan_id='plan:first-invalid',
+            plan_hash='hash:first-invalid',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='overflow',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(source_member,),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(source_member,),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        rebuilt = self._plan('targeted')
+        wrong_member = self._member()
+        wrong_member.source_revision = 'revision-not-targeted'
+        rebuilt.representations[0].source_members = (wrong_member,)
+        result = types.SimpleNamespace(
+            status='ready',
+            model_call_count=1,
+        )
+
+        def build(_plan, *, resident, static_system, mode='hot'):
+            self.assertEqual(mode, 'cold')
+            return rebuilt, {'targeted': 'body'}
+
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ) as rebuild:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={},
+                    resident=None,
+                    static_system='STATIC',
+                )
+
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_cold_bridge_not_selected',
+        )
+        seal.assert_called_once()
+        rebuild.assert_called_once()
 
     def test_generation_failure_blocks_rebuild_and_fallback(self):
         runtime_plan = self._runtime_plan()
@@ -10832,5 +11587,100 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
         seal.assert_not_called()
 
 
+    def test_invalid_first_plan_without_required_bridge_stays_fail_closed(self):
+        runtime_plan = self._runtime_plan()
+        first = types.SimpleNamespace(
+            valid=False,
+            plan_id='plan:first-invalid',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='overflow',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(self._member(),),
+        )
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=types.SimpleNamespace(
+                status='none',
+                source_members=(),
+                estimated_tokens=0,
+                remaining_budget=None,
+                error_code=None,
+            ),
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as rebuild:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={'raw': 'recent'},
+                    resident=None,
+                    static_system='STATIC',
+                )
+
+        self.assertEqual(raised.exception.error_code, 'context_plan_invalid')
+        self.assertFalse(
+            runtime_plan.manifest['context_plan_cold_bridge_first_plan_valid']
+        )
+
 if __name__ == '__main__':
     unittest.main()
+
+
+class HotLiveSystemIdentityCapacitySuffixTests(unittest.TestCase):
+    """After a capacity swap the live resident runs base + SYSTEM_SUFFIX_V1."""
+
+    def _decide(self, manifest):
+        from chat.capacity_swap_runtime import with_capacity_boundary_suffix
+
+        base = 'STATIC SYSTEM'
+        resident = types.SimpleNamespace(
+            generation=7,
+            session_id='session-7',
+            system_text=with_capacity_boundary_suffix(base),
+        )
+        plan = types.SimpleNamespace(
+            manifest=dict(manifest),
+            context_id=1,
+            resident_generation=7,
+            db_path=None,
+            tool_profile='other',
+        )
+        binding = types.SimpleNamespace(
+            context_id=1, process_generation=7, claude_session_id='session-7',
+        )
+        with mock.patch.object(dr, 'is_epoch_token_current', return_value=True), \
+                mock.patch.object(dr, 'get_local_binding', return_value=binding), \
+                mock.patch.object(dr, '_binding_matches_plan', return_value=True), \
+                mock.patch.object(dr, '_resident_is_alive', return_value=True), \
+                mock.patch.object(dr, 'get_context_claude_session', return_value=None):
+            decision, reason, _registry = dr._hot_live_identity_decision(
+                plan, resident=resident, frozen={},
+            )
+        return base, decision, reason
+
+    def test_pre_suffix_hash_alone_reports_system_mismatch(self):
+        base = 'STATIC SYSTEM'
+        _base, decision, reason = self._decide(
+            {'static_system_sha256': dr._sha256_text(base)},
+        )
+        self.assertEqual((decision, reason), ('RESPAWN', 'live_system_identity_mismatch'))
+
+    def test_effective_hash_accepts_capacity_suffixed_resident(self):
+        from chat.capacity_swap_runtime import with_capacity_boundary_suffix
+
+        base = 'STATIC SYSTEM'
+        _base, _decision, reason = self._decide({
+            'static_system_sha256': dr._sha256_text(base),
+            'effective_static_system_sha256': dr._sha256_text(
+                with_capacity_boundary_suffix(base),
+            ),
+        })
+        self.assertNotEqual(reason, 'live_system_identity_mismatch')
+        self.assertEqual(reason, 'session_registry_missing')

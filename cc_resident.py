@@ -199,7 +199,7 @@ def _bounded_diagnostic_text(value, limit=_TIMEOUT_DIAGNOSTIC_MAX_CHARS):
 
 
 
-_COLD_START_DIAGNOSTIC_EVENT = 'UH_A0_COLD_START_TIMING'
+_COLD_START_DIAGNOSTIC_EVENT = 'TURN_TIMING'
 _COLD_START_DIAGNOSTIC_MAX_GENERATIONS = 32
 
 
@@ -257,6 +257,22 @@ def _cold_start_mark(diagnostic, field, *, record=None):
     if not diagnostic.get(field):
         diagnostic[field] = when
     return when
+
+
+def _mark_turn_stdin_flushed(diagnostic, record):
+    """The user message reached Claude: everything before this is ours."""
+    if not isinstance(diagnostic, dict):
+        return
+    if record is not None and not any(
+        record is own for own in diagnostic.get('generation_records') or []
+    ):
+        record = None  # a spawn record from an earlier turn; leave it alone
+    if record is not None:
+        record['reached_stdin'] = True
+    try:
+        _cold_start_mark(diagnostic, 'stdin_flush_at', record=record)
+    except Exception:
+        pass
 
 
 def _cold_start_stderr_category(proc):
@@ -384,13 +400,79 @@ def _cold_start_sync_summary(diagnostic):
     return diagnostic
 
 
+_TURN_TIMING_LOGGER_NAME = 'hayagarden.turn_timing'
+# (duration name, start field, end field). birth_ms matches the chat page's
+# "出生" counter: request in -> first thinking/text out, minus network.
+# birth_origin is birth_started_at, or request_received_at when absent.
+_TURN_TIMING_SPANS = (
+    ('plan_ms', 'request_received_at', 'plan_ready_at'),
+    ('hot_context_plan_ms', 'hot_context_plan_start_at', 'hot_context_plan_end_at'),
+    ('capacity_swap_ms', 'capacity_swap_start_at', 'capacity_swap_end_at'),
+    ('ensure_alive_ms', 'ensure_alive_start_at', 'ensure_alive_end_at'),
+    ('spawn_to_init_ms', 'process_spawn_at', 'claude_init_event_at'),
+    ('pre_provider_ms', 'request_received_at', 'stdin_flush_at'),
+    ('provider_first_content_ms', 'stdin_flush_at', 'first_thinking_or_text_at'),
+    ('birth_ms', 'birth_origin', 'first_thinking_or_text_at'),
+    ('total_ms', 'birth_origin', 'terminal_at'),
+)
+
+
+def _turn_timing_logger():
+    """A logger that reaches the journal whatever the root level is.
+
+    Production only lets WARNING through the root logger, which silently
+    dropped every cold-start timing line written at INFO since #609.
+    """
+    logger = logging.getLogger(_TURN_TIMING_LOGGER_NAME)
+    if not getattr(logger, '_hayagarden_timing_handler', False):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger._hayagarden_timing_handler = True
+    return logger
+
+
+def _turn_timing_durations(diagnostic):
+    durations = {}
+    # The 出生 clock starts when the gateway takes the stream request
+    # (birth_started_at); turns without it fall back to the Daily prepare.
+    fields = dict(diagnostic)
+    fields['birth_origin'] = diagnostic.get('birth_started_at') or diagnostic.get('request_received_at')
+    for name, start_field, end_field in _TURN_TIMING_SPANS:
+        start, end = fields.get(start_field), fields.get(end_field)
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+            durations[name] = int(round((end - start) * 1000))
+    return durations
+
+
+def _birth_summary(diagnostic):
+    """The same step list the chat page shows (chat.turn_birth), or None."""
+    try:
+        from chat import turn_birth
+        return turn_birth.summarize(diagnostic)
+    except Exception:
+        return None
+
+
 def _log_cold_start_timing(diagnostic):
-    if not isinstance(diagnostic, dict) or not diagnostic.get('generation_records'):
+    """One timing line per turn, hot turns included (TURN_TIMING)."""
+    if not isinstance(diagnostic, dict) or not diagnostic.get('request_received_at'):
         return
     try:
         _cold_start_sync_summary(diagnostic)
         payload = {
             'stage': _COLD_START_DIAGNOSTIC_EVENT,
+            'turn_kind': str(
+                diagnostic.get('turn_kind')
+                or ('cold' if diagnostic.get('generation_records') else 'hot')
+            )[:20],
+            'durations_ms': _turn_timing_durations(diagnostic),
+            'birth': _birth_summary(diagnostic),
+            'hot_context_plan_decision': (
+                str(diagnostic.get('hot_context_plan_decision') or '')[:40] or None
+            ),
             'correlation_id': str(diagnostic.get('correlation_id') or '')[:200],
             'request_received_at': diagnostic.get('request_received_at'),
             'plan_ready_at': diagnostic.get('plan_ready_at'),
@@ -414,6 +496,10 @@ def _log_cold_start_timing(diagnostic):
                 'first_thinking_or_text_at',
             ),
             'terminal_at': diagnostic.get('terminal_at'),
+            'hot_context_plan_start_at': diagnostic.get('hot_context_plan_start_at'),
+            'hot_context_plan_end_at': diagnostic.get('hot_context_plan_end_at'),
+            'capacity_swap_start_at': diagnostic.get('capacity_swap_start_at'),
+            'capacity_swap_end_at': diagnostic.get('capacity_swap_end_at'),
             'generations': [
                 {
                     'gen': _diagnostic_int(record.get('gen')),
@@ -441,13 +527,15 @@ def _log_cold_start_timing(diagnostic):
                 for record in diagnostic.get('generation_records') or []
             ],
         }
-        logging.getLogger(__name__).info(
-            '[UH-A0-COLD-START] %s',
+        _turn_timing_logger().info(
+            '[TURN-TIMING] %s',
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
         )
     except Exception:
         # Timing diagnostics are strictly observational and never alter lifecycle.
         return
+
+
 def _diagnostic_path_hash(path):
     if not path:
         return None
@@ -1400,6 +1488,7 @@ _TURN_FAILURE_CODES = frozenset({
     'invalid_request',
     'rate_limit',
     'provider_error',
+    'max_agentic_turns',
 })
 
 
@@ -1451,15 +1540,27 @@ def classify_provider_error_event(event, *, refusal_marker=False):
         if isinstance(block, dict) and block.get('type') == 'text':
             parts.append(str(block.get('text') or ''))
     searchable = ' '.join(parts).lower().replace('-', '_').replace(' ', '_')
+    max_turn_signals = (
+        error_type,
+        event.get('subtype'),
+        event.get('stop_reason'),
+        category,
+        event.get('result') if isinstance(event.get('result'), str) else '',
+    )
+    is_max_turns = any(
+        str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+        == 'error_max_turns'
+        for value in max_turn_signals
+    )
     safe_type = error_type.strip().lower().replace('-', '_').replace(' ', '_')
     known_types = {
         'invalid_request', 'invalid_request_error', 'rate_limit',
         'rate_limit_error', 'overloaded_error', 'authentication_error',
         'permission_error', 'connection_error', 'timeout_error',
-        'model_refusal_no_fallback',
+        'model_refusal_no_fallback', 'error_max_turns',
     }
     if safe_type not in known_types:
-        safe_type = 'provider_api_error'
+        safe_type = 'error_max_turns' if is_max_turns else 'provider_api_error'
 
     is_reasoning_refusal = 'reasoning_extraction' in searchable
     is_refusal = (
@@ -1475,7 +1576,13 @@ def classify_provider_error_event(event, *, refusal_marker=False):
         'connection_reset', 'connection_closed',
     ))
 
-    if is_reasoning_refusal:
+    if is_max_turns:
+        failure_code = 'max_agentic_turns'
+        failure_category = 'max_agentic_turns'
+        public_message = 'Claude Code 本轮工具调用次数达到配置上限，当前回复已停止。'
+        failure_class = 'TURN_LEVEL'
+        retryable = False
+    elif is_reasoning_refusal:
         failure_code = 'provider_refusal'
         failure_category = 'reasoning_extraction'
         public_message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
@@ -1634,7 +1741,7 @@ def compose_spawn_argv(
     model_args=(),
     effort_args=(),
     session_args=(),
-    max_turns='5',
+    max_turns=None,
 ):
     """Build the provider-visible Claude argv used by main-chat spawn paths.
 
@@ -1644,6 +1751,16 @@ def compose_spawn_argv(
     """
     from chat.cc_runtime import claude_cmd_for_version
     extra_session = [str(part) for part in session_args]
+    resume_snapshot_args = (
+        ['--system-prompt-snapshot', 'off']
+        if len(extra_session) == 2 and extra_session[0] == '--resume'
+        else []
+    )
+    max_turns = (
+        config_store.get_int('CC_MAX_AGENTIC_TURNS', 0)
+        if max_turns is None else int(max_turns or 0)
+    )
+    max_turn_args = ['--max-turns', str(max_turns)] if max_turns > 0 else []
     return claude_cmd_for_version(
         runtime_version,
         '-p',
@@ -1652,7 +1769,8 @@ def compose_spawn_argv(
         '--verbose',
         '--include-partial-messages',
         '--system-prompt', system_text,
-        '--max-turns', str(max_turns),
+        *resume_snapshot_args,
+        *max_turn_args,
         '--tools', tool_flags['tools'],
         '--thinking-display', 'summarized',
         '--exclude-dynamic-system-prompt-sections',
@@ -1664,10 +1782,13 @@ class ResidentSession:
     """One persistent `claude` subprocess. Not safe for concurrent turns —
     caller must serialize (gateway.py already does via _gen_acquire_or_wait)."""
 
-    def __init__(self, cwd, allowed_tools, mcp_config_path):
+    def __init__(
+        self, cwd, allowed_tools, mcp_config_path, *, formal_chat_continuity=False,
+    ):
         self._cwd = cwd
         self._allowed_tools = allowed_tools
         self._mcp_config_path = mcp_config_path
+        self._formal_chat_continuity = bool(formal_chat_continuity)
         self._proc = None
         self._system_text = None
         self._session_id = None
@@ -1703,6 +1824,8 @@ class ResidentSession:
         self._pending_deferred = None
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
+        self._cc_provider = 'claude_code'
+        self._cc_provider_identity = None
         # CC-CHAT-EFFORT-R1: identity of the effort argv this process was
         # started with. None preserves compatibility with pre-R1 fake fixtures.
         self._effort_identity = None
@@ -1744,6 +1867,10 @@ class ResidentSession:
             prepared['HOME'] = str(service_home(prepared))
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             prepared['UH_A0_TURN_LEASE_PATH'] = self._uh_a0_turn_lease_path
+        # Only the designated Chat continuity family owns these policies.
+        if self._formal_chat_continuity:
+            prepared['DISABLE_AUTO_COMPACT'] = '1'
+            prepared['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
         return prepared
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -1922,7 +2049,11 @@ class ResidentSession:
             if self._turn_active:
                 raise ResidentError('resident_turn_in_progress')
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        requested_provider = str((env or {}).get('HAYAGARDEN_CC_PROVIDER') or 'claude_code')
+        provider_identity = str((env or {}).get('HAYAGARDEN_CC_PROVIDER_IDENTITY') or '')
         env = self._prepare_spawn_env(env)
+        env.pop('HAYAGARDEN_CC_PROVIDER', None)
+        env.pop('HAYAGARDEN_CC_PROVIDER_IDENTITY', None)
         try:
             runtime_version = require_managed_claude_runtime(env=env, cwd=self._cwd)
         except ClaudeRuntimeError as exc:
@@ -1933,9 +2064,18 @@ class ResidentSession:
                 else 'claude_runtime_unavailable'
             )
             raise ResidentError('Claude Code runtime is unavailable', error_code=code) from exc
-        _model, model_identity, model_args = cc_model_snapshot()
+        if requested_provider == 'api_relay':
+            _model = str(env.get('ANTHROPIC_MODEL') or '').strip()
+            if not _model or _model.lower() == 'unknown':
+                raise ResidentError(
+                    '当前 API Relay 模型不可用',
+                    error_code='api_relay_model_unavailable',
+                )
+            _model, model_identity, model_args = cc_model_snapshot(_model)
+        else:
+            _model, model_identity, model_args = cc_model_snapshot()
         effort, effort_identity, effort_args = cc_effort_snapshot()
-        if _model:
+        if _model and requested_provider != 'api_relay':
             from chat.cc_model import cc_model_runtime_compatibility, CC_MODEL_RUNTIME_INCOMPATIBLE
             compatible, requirement = cc_model_runtime_compatibility(_model)
             if not compatible:
@@ -2006,6 +2146,8 @@ class ResidentSession:
         self._system_text = system_text
         self._runtime_identity = self._managed_runtime_identity(runtime_version)
         self._model_identity = model_identity
+        self._cc_provider = requested_provider
+        self._cc_provider_identity = provider_identity or None
         self._effort_identity = effort_identity
         self._effort_value = effort or None
         self._session_id = None
@@ -2101,7 +2243,12 @@ class ResidentSession:
         # identity. Fake/pre-1B alive fixtures keep _model_identity=None and must
         # still reach turn_limit / idle / system_changed contracts.
         stored_identity = getattr(self, '_model_identity', None)
-        if stored_identity is not None and cc_model_identity() != stored_identity:
+        stored_provider = str(getattr(self, '_cc_provider', 'claude_code') or 'claude_code')
+        if (
+            stored_identity is not None
+            and stored_provider != 'api_relay'
+            and cc_model_identity() != stored_identity
+        ):
             return 'model_changed'
         stored_effort_identity = getattr(self, '_effort_identity', None)
         if (
@@ -2752,6 +2899,7 @@ class ResidentSession:
             'feedback_ids': list(meta.get('feedback_ids') or []),
             'dream_id': meta.get('dream_id'),
             'wake_ids': list(meta.get('wake_ids') or []),
+            'pending_mail_ids': list(meta.get('pending_mail_ids') or []),
         }
 
     def peek_idle_seconds(self):
@@ -3110,6 +3258,8 @@ class ResidentSession:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
             self._turn_stdin_flushed = True
+            _mark_turn_stdin_flushed(getattr(self, '_cold_start_diagnostic', None),
+                                     getattr(self, '_cold_start_active_record', None))
         except (BrokenPipeError, OSError) as e:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)

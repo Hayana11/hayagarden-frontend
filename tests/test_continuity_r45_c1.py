@@ -700,6 +700,283 @@ class ProducerTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def _prepare_bridge_policy(self, *, target_size=16000):
+        self._prepare_target_store()
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            revision_id = conn.execute(
+                'SELECT active_revision_id FROM continuity_settings_authority '
+                'WHERE singleton_id=1'
+            ).fetchone()[0]
+            small_revision = f'continuity-settings-test-small-{target_size}'
+            conn.execute(
+                'INSERT INTO continuity_settings_revisions ('
+                'revision_id, revision_seq, created_at, created_by, source, lifecycle, '
+                'target_logical_size, max_completed_turns, provider, model_identity, '
+                'prompt_body, prompt_hash, prompt_revision, prompt_policy_version, '
+                'persona_body, persona_hash, persona_revision, persona_policy_version, '
+                'measurement_semantics, sealing_policy_version) '
+                'SELECT ?, (SELECT COALESCE(MAX(revision_seq),0)+1 '
+                'FROM continuity_settings_revisions), ?, ?, ?, lifecycle, ?, 30, '
+                'provider, model_identity, prompt_body, prompt_hash, prompt_revision, '
+                'prompt_policy_version, persona_body, persona_hash, persona_revision, '
+                'persona_policy_version, measurement_semantics, ? '
+                'FROM continuity_settings_revisions WHERE revision_id=?',
+                (
+                    small_revision,
+                    '2026-09-14T00:00:30+00:00',
+                    'test',
+                    'test_small_bridge',
+                    target_size,
+                    f'test_sealing_{target_size}_30',
+                    revision_id,
+                ),
+            )
+            conn.execute(
+                'UPDATE continuity_settings_authority SET active_revision_id=?, '
+                'pending_revision_id=NULL, pending_anchor_json=NULL WHERE singleton_id=1',
+                (small_revision,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _production_shaped_bridge_members(self):
+        rows = []
+        for count, start_id, size in ((12, 1, 2400), (1, 27, 52000), (8, 29, 2400)):
+            for source_row in self._turns(count, start_id=start_id):
+                row = list(source_row)
+                row[2] = 'x' * size
+                rows.append(tuple(row))
+        wake_runs = (
+            ('wake-25', 25, '2026-09-14 01:12:00'),
+            ('wake-26', 26, '2026-09-14 01:12:30'),
+            ('wake-45', 45, '2026-09-14 01:30:00'),
+            ('wake-46', 46, '2026-09-14 01:30:30'),
+        )
+        rows.extend(
+            _row(
+                message_id,
+                'assistant',
+                f'Wake event {run_id}',
+                created_at,
+                source_kind='wake',
+                cache_info=_wake_cache(run_id),
+            )
+            for run_id, message_id, created_at in wake_runs
+        )
+        self._write_source(
+            sorted(rows, key=lambda row: row[0]),
+            wakes=[
+                (run_id, self.identity['context_id'], self.identity['context_epoch'], 1)
+                for run_id, _message_id, _created_at in wake_runs
+            ],
+        )
+        members = self._canonical_members()
+        if len(members) != 25:
+            raise AssertionError(f'expected 25 canonical SourceMembers, got {len(members)}')
+        return members
+
+    def _seed_target_group(self, members, *, generation_jobs=False, ready_first=False):
+        from continuity.chunk_generation import (
+            GENERATOR_POLICY_VERSION,
+            PROMPT_POLICY_VERSION,
+            generate_continuity_chunk,
+        )
+        from continuity.producer import _snapshot_for_members, _source_rows_provider
+        from continuity.settings import (
+            binding_for_revision,
+            load_authority,
+            sealing_policy_for_revision,
+        )
+        from continuity.store import enqueue_generation_job, enqueue_job, materialize_job
+
+        conn = sqlite3.connect(str(self.store_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            ensure_schema(conn)
+            authority = load_authority(conn)
+            revision = authority['active_revision']
+            binding = binding_for_revision(conn, revision['revision_id'])
+            policy = sealing_policy_for_revision(revision)
+            target = tuple(replace(member, seq=index) for index, member in enumerate(members))
+            snapshot = _snapshot_for_members(
+                target,
+                identity=self.identity,
+                created_at='2026-09-14T00:01:00+00:00',
+            )
+            job = enqueue_job(conn, snapshot, policy, now='2026-09-14T00:01:00+00:00')
+            candidates = materialize_job(
+                conn,
+                job.job_id,
+                policy,
+                now='2026-09-14T00:01:00+00:00',
+                include_end_of_snapshot=True,
+                settings_binding=binding,
+            )
+            jobs = ()
+            if generation_jobs:
+                jobs = tuple(
+                    enqueue_generation_job(
+                        conn,
+                        candidate,
+                        snapshot,
+                        generator_policy_version=GENERATOR_POLICY_VERSION,
+                        prompt_policy_version=PROMPT_POLICY_VERSION,
+                        measurement_semantics=binding['measurement_semantics'],
+                        settings_binding=binding,
+                        now='2026-09-14T00:01:00+00:00',
+                    )
+                    for candidate in candidates
+                )
+            if ready_first:
+                generate_continuity_chunk(
+                    conn,
+                    jobs[0].generation_job_id,
+                    rows_provider=_source_rows_provider(self.source_path, snapshot),
+                    generate_fn=self._generate,
+                    request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+                    persona_text=PERSONA,
+                    source_db_path=str(self.source_path),
+                    now='2026-09-14T00:01:00+00:00',
+                )
+            return candidates, jobs
+        finally:
+            conn.close()
+
+    def _run_target(self, members, *, generate_fn=None, now='2026-09-14T00:02:00+00:00'):
+        return run_targeted_cold_bridge(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            chat_id='default',
+            context_id=self.identity['context_id'],
+            context_epoch=self.identity['context_epoch'],
+            bridge_members=members,
+            capture_authority=self._capture,
+            generate_fn=generate_fn or self._generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now=now,
+        )
+
+    def test_targeted_three_candidates_recovers_missing_jobs_and_seals_oversize_turn(self):
+        members = self._production_shaped_bridge_members()
+        self._prepare_bridge_policy()
+        candidates, jobs = self._seed_target_group(members)
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(jobs, ())
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
+        result = self._run_target(members)
+
+        self.assertEqual(result.status, 'ready', result)
+        self.assertEqual(result.model_call_count, 3)
+        self.assertEqual(self.model_calls, 3)
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            candidate_rows = conn.execute(
+                'SELECT oversize, close_reason FROM continuity_candidate_blocks '
+                'ORDER BY block_seq'
+            ).fetchall()
+            self.assertEqual(len(candidate_rows), 3)
+            self.assertEqual([row[0] for row in candidate_rows], [0, 1, 0])
+            member_counts = conn.execute(
+                'SELECT blocks.block_seq, COUNT(members.ordinal) '
+                'FROM continuity_candidate_blocks AS blocks '
+                'JOIN continuity_candidate_members AS members '
+                'ON members.candidate_id=blocks.candidate_id '
+                'GROUP BY blocks.block_seq ORDER BY blocks.block_seq'
+            ).fetchall()
+            self.assertEqual(member_counts, [(0, 14), (1, 1), (2, 10)])
+            self.assertEqual(candidate_rows[0][1], 'before_oversize')
+            self.assertEqual(candidate_rows[1][1], 'oversize_single_turn')
+            self.assertEqual(candidate_rows[2][1], 'end_of_snapshot')
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0],
+                3,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM continuity_chunks WHERE status='ready'").fetchone()[0],
+                3,
+            )
+        finally:
+            conn.close()
+
+    def test_targeted_three_candidates_reuses_one_ready_then_generates_two_pending(self):
+        members = self._production_shaped_bridge_members()
+        self._prepare_bridge_policy()
+        candidates, jobs = self._seed_target_group(
+            members,
+            generation_jobs=True,
+            ready_first=True,
+        )
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(len(jobs), 3)
+        self.assertEqual(self.model_calls, 1)
+
+        result = self._run_target(members)
+
+        self.assertEqual(result.status, 'ready', result)
+        self.assertEqual(result.model_call_count, 2)
+        self.assertEqual(self.model_calls, 3)
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM continuity_generation_jobs WHERE status='ready'").fetchone()[0],
+                3,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM continuity_chunks WHERE status='ready'").fetchone()[0],
+                3,
+            )
+        finally:
+            conn.close()
+
+    def test_candidate_group_rejects_gap_overlap_repeat_and_wrong_order(self):
+        from continuity.producer import _candidate_group_covers_target
+
+        self._write_source(self._turns(3))
+        members = tuple(
+            replace(member, seq=index, source_ref=f'turn:{10 + 2 * index}:{11 + 2 * index}',
+                    source_revision=f'revision-{index}')
+            for index, member in enumerate(self._canonical_members()[:3])
+        )
+        snapshot = SimpleNamespace(snapshot_id='snapshot')
+        def candidate(block_seq, seqs, refs=None, revisions=None):
+            return SimpleNamespace(
+                snapshot_id='snapshot',
+                block_seq=block_seq,
+                source_seqs=tuple(seqs),
+                source_refs=tuple(refs if refs is not None else (members[i].source_ref for i in seqs)),
+                source_revisions=tuple(revisions if revisions is not None else (members[i].source_revision for i in seqs)),
+            )
+
+        exact = (
+            candidate(0, (0,)),
+            candidate(1, (1,)),
+            candidate(2, (2,)),
+        )
+        self.assertTrue(_candidate_group_covers_target(snapshot, exact, members))
+        self.assertFalse(_candidate_group_covers_target(
+            snapshot, (candidate(0, (0,)), candidate(1, (2,))), members,
+        ))
+        self.assertFalse(_candidate_group_covers_target(
+            snapshot, (candidate(0, (0, 1)), candidate(1, (1, 2))), members,
+        ))
+        self.assertFalse(_candidate_group_covers_target(
+            snapshot, (candidate(0, (0,)), candidate(1, (1, 1)), candidate(2, (2,))), members,
+        ))
+        self.assertFalse(_candidate_group_covers_target(
+            snapshot, (candidate(0, (1,)), candidate(1, (0,)), candidate(2, (2,))), members,
+        ))
+
     def test_targeted_cold_bridge_rebases_nonzero_seq_and_replays_ready(self):
         self._write_source(self._turns(3))
         self._prepare_target_store(
@@ -739,8 +1016,8 @@ class ProducerTests(unittest.TestCase):
 
         self.assertEqual(first.status, 'ready', first)
         self.assertEqual(second.status, 'ready', second)
-        self.assertEqual(first.generated_chunk_id, second.generated_chunk_id)
-        self.assertEqual(first.materialization_close_reason, 'end_of_snapshot')
+        self.assertEqual(first.status, 'ready')
+        self.assertEqual(second.status, 'ready')
         self.assertEqual(first.model_call_count, 1)
         self.assertEqual(second.model_call_count, 0)
         self.assertEqual(self.model_calls, 1)
@@ -829,7 +1106,7 @@ class ProducerTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_targeted_cold_bridge_claim_without_ready_fails_without_duplicate(self):
+    def test_targeted_cold_bridge_resumes_failed_job_without_duplicate(self):
         self._write_source(self._turns(3))
         self._prepare_target_store()
         members = self._canonical_members()
@@ -865,12 +1142,9 @@ class ProducerTests(unittest.TestCase):
 
         self.assertEqual(first.status, 'failed')
         self.assertEqual(first.error_code, 'generation_error')
-        self.assertEqual(second.status, 'blocked')
-        self.assertEqual(
-            second.error_code,
-            'context_plan_cold_bridge_claimed_not_ready',
-        )
-        self.assertEqual(self.model_calls, 0)
+        self.assertEqual(second.status, 'ready')
+        self.assertEqual(second.model_call_count, 1)
+        self.assertEqual(self.model_calls, 1)
         conn = sqlite3.connect(str(self.store_path))
         try:
             self.assertEqual(

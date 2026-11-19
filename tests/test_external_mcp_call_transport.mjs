@@ -34,7 +34,7 @@ function callResult(text = 'ok', isError) {
 function fixtureFetch({ calls = [], result = callResult(), onCall, onInitialize, connectError, connectDelayMs = 0 } = {}) {
   return async (_url, init) => {
     const body = JSON.parse(init.body);
-    calls.push({ method: body.method, params: body.params, headers: init.headers, redirect: init.redirect, signal: init.signal });
+    calls.push({ method: body.method, params: body.params, headers: init.headers, redirect: init.redirect, signal: init.signal, dispatcher: init.dispatcher });
     if (body.method === 'initialize') {
       if (connectError) throw connectError;
       if (connectDelayMs) await new Promise((resolve) => setTimeout(resolve, connectDelayMs));
@@ -237,6 +237,20 @@ test('HTTP endpoint is rejected by the shared endpoint authority', async () => {
   const result = await invoke({ endpoint: 'http://public.example.test/mcp' });
   assert.equal(result.status, CALL_OUTCOME.NOT_INVOKED);
   assert.match(result.error.summary, /HTTPS/);
+});
+
+test('exact local mail MCP endpoint can be called without the public egress dispatcher', async () => {
+  const calls = [];
+  const result = await invokeExternalMcp({
+    endpoint: 'http://127.0.0.1:3457/mcp',
+    tool_name: 'list_recent',
+    tool_input: {},
+    fetchImpl: fixtureFetch({ calls }),
+    resolver: async () => { throw new Error('literal loopback must not use DNS'); },
+  });
+  assert.equal(result.status, CALL_OUTCOME.SUCCESS);
+  assert.equal(callCount(calls), 1);
+  assert.ok(calls.every((call) => call.dispatcher === undefined));
 });
 
 test('unsupported transport is rejected by the shared endpoint authority', async () => {

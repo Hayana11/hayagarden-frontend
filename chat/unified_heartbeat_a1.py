@@ -1,10 +1,10 @@
 """UH-A1 shared-resident transcript and delivery guards.
 
-A normal Wake Renderer turn is intentionally part of the same Claude session,
-but it is not a formal application Chat round and therefore has no
-``daily_message_contexts`` user/assistant pair. The Session Registry scan
-watermark must explicitly skip that provider-only range, otherwise the next
-formal Chat mapping pass sees an extra complete transcript round and blocks.
+A normal Wake turn is part of the same Claude session, but it is not a formal
+application Chat round and has no daily_message_contexts user/assistant pair.
+A delivered canonical Wake binds native events to its assistant message in the
+same transaction; provider-only ranges still use the Registry skip so formal
+Chat mapping remains aligned.
 
 If the application executor later cannot deliver/settle that generated Wake,
 the hot resident must not keep an undelivered assistant turn as conversational
@@ -159,9 +159,9 @@ def begin_shared_wake_delivery_fence(*, gateway: Any, resident: Any) -> SharedWa
     return fence
 
 
-def _read_complete_shared_transcript_end_offset(
+def _read_complete_shared_transcript_graph(
     watermark: SharedTranscriptWatermark,
-) -> int:
+) -> tuple[int, Any]:
     """Return EOF only after Reader proves one canonical terminal round."""
     from chat.claude_event_mapping import _assert_complete_terminal_round
     from chat.claude_transcript_reader import read_transcript_range
@@ -200,8 +200,14 @@ def _read_complete_shared_transcript_end_offset(
             # Claude may still be appending the canonical assistant row.
             last_error = 'uh_a1_watermark_transcript_round_incomplete'
             continue
-        return end_offset
+        return end_offset, graph
     raise RuntimeError(last_error)
+
+
+def _read_complete_shared_transcript_end_offset(
+    watermark: SharedTranscriptWatermark,
+) -> int:
+    return _read_complete_shared_transcript_graph(watermark)[0]
 
 
 def prepare_shared_transcript_watermark(
@@ -265,14 +271,10 @@ def prepare_shared_transcript_watermark(
         return None, 'watermark_prepare_error'
 
 
-def commit_shared_transcript_watermark(
+def _assert_shared_watermark_identity(
     watermark: SharedTranscriptWatermark,
     resident: Any,
-    *,
-    db_path: str,
-    jsonl_finality: Any,
-) -> dict[str, Any]:
-    """CAS-skip exactly one completed provider-only Wake transcript range."""
+) -> None:
     binding = dr.get_local_binding()
     if binding is None:
         raise RuntimeError('uh_a1_watermark_binding_missing')
@@ -292,6 +294,17 @@ def commit_shared_transcript_watermark(
         watermark.process_generation
     ):
         raise RuntimeError('uh_a1_watermark_process_generation_changed')
+
+
+def commit_shared_transcript_watermark(
+    watermark: SharedTranscriptWatermark,
+    resident: Any,
+    *,
+    db_path: str,
+    jsonl_finality: Any,
+) -> dict[str, Any]:
+    """CAS-skip exactly one completed provider-only Wake transcript range."""
+    _assert_shared_watermark_identity(watermark, resident)
 
     if not isinstance(jsonl_finality, Mapping):
         raise RuntimeError('uh_a1_watermark_jsonl_finality_missing')
@@ -322,6 +335,44 @@ def commit_shared_transcript_watermark(
         'start_offset': int(watermark.expected_offset),
         'end_offset': end_offset,
         'skipped_provider_round': True,
+    }
+
+
+def prepare_shared_transcript_native_binding(
+    watermark: SharedTranscriptWatermark,
+    resident: Any,
+    *,
+    jsonl_finality: Any,
+) -> dict[str, Any]:
+    """Prove and materialize one Wake range without writing mappings or cursor."""
+    _assert_shared_watermark_identity(watermark, resident)
+    if not isinstance(jsonl_finality, Mapping):
+        raise RuntimeError('uh_a1_watermark_jsonl_finality_missing')
+    if jsonl_finality.get('stream_totals_match') is not True:
+        raise RuntimeError('uh_a1_watermark_jsonl_not_final')
+
+    end_offset, graph = _read_complete_shared_transcript_graph(watermark)
+    from chat.claude_event_mapping import plan_shared_wake_native_event_mappings
+
+    events = plan_shared_wake_native_event_mappings(
+        graph,
+        context_id=int(watermark.context_id),
+        context_epoch=int(watermark.context_epoch),
+        resident_generation=int(watermark.resident_generation),
+        claude_session_id=str(watermark.claude_session_id),
+        start_offset=int(watermark.expected_offset),
+        end_offset=end_offset,
+    )
+    return {
+        'context_id': int(watermark.context_id),
+        'context_epoch': int(watermark.context_epoch),
+        'resident_generation': int(watermark.resident_generation),
+        'process_generation': int(watermark.process_generation),
+        'claude_session_id': str(watermark.claude_session_id),
+        'transcript_path': str(watermark.transcript_path),
+        'start_offset': int(watermark.expected_offset),
+        'end_offset': int(end_offset),
+        'events': events,
     }
 
 
