@@ -417,6 +417,64 @@ class ThinCapacityPrepareTests(unittest.TestCase):
 
 
 class ThinCapacityBootstrapTests(unittest.TestCase):
+    def test_history_image_resolution_does_not_change_raw_budget(self):
+        from PIL import Image
+
+        from continuity.context_plan import build_context_plan
+        from continuity.sources import row_logical_size
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            db_path = str(root / 'memories.db')
+            image_path = root / 'history.png'
+            image_ref = '/static/uploads/history.png'
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, '
+                    'content TEXT, created_at TEXT, source_kind TEXT, attachments TEXT)'
+                )
+                conn.executemany(
+                    'INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?)',
+                    [
+                        (123, 'hayana', '你看这张图', '2026-11-07 10:00:00', 'chat',
+                         json.dumps([{'type': 'image', 'url': image_ref}])),
+                        (124, 'assistant', '看到了', '2026-11-07 10:01:00', 'chat', '[]'),
+                    ],
+                )
+            plan = types.SimpleNamespace(db_path=db_path, user_message_id=125, assembly={})
+            budget_by_size = {}
+            for size in (384, 768, 2048):
+                with self.subTest(size=size):
+                    Image.new('RGB', (size, size)).save(image_path, 'PNG')
+                    with mock.patch.object(
+                        Image, 'open', side_effect=AssertionError('history image decoded'),
+                    ) as decode:
+                        rows = daily_runtime._load_context_source_rows({123, 124}, db_path=db_path)
+                        members = build_source_snapshot(
+                            turns=derive_completed_turns(list(rows.values())), events=(),
+                            local_day='2026-11-07', source_watermark=124,
+                            created_at='2026-11-07T10:01:00Z',
+                        ).members
+                        context_plan = build_context_plan(members)
+                        representation, = context_plan.representations
+                        blocks = daily_runtime._capacity_readable_raw_blocks(
+                            plan, context_plan=context_plan, chunk_bodies={},
+                            readable_ids=(representation.representation_id,),
+                        )
+                    decode.assert_not_called()
+                    self.assertEqual(representation.kind, 'raw')
+                    self.assertEqual(representation.estimated_tokens, members[0].logical_size)
+                    self.assertLess(representation.estimated_tokens, 512)
+                    budget_by_size[size] = (
+                        row_logical_size(rows[123]), members[0].logical_size,
+                        representation.estimated_tokens, context_plan.plan_hash,
+                    )
+                    self.assertEqual(
+                        blocks[0]['body'],
+                        '[TURN]\nUSER:\n你看这张图\n[历史图片 message_id=123]\n\nASSISTANT:\n看到了',
+                    )
+            self.assertEqual(len(set(budget_by_size.values())), 1)
+
     def test_case4_chunk_and_readable_raw_install_once_in_plan_order(self):
         members = _members()
         context_plan = _context_plan(members, chunk=True)
@@ -689,7 +747,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
         heartbeat = mock.Mock(failed=False)
         heartbeat.stop.return_value = False
         doors = iter([
-            {'requires_respawn': True, 'capacity_swap': True, 'reason': 'turn_limit'},
+            {'requires_respawn': True, 'capacity_swap': True, 'reason': 'soft_context'},
             {'requires_respawn': False},
         ])
         with mock.patch.object(daily_runtime, 'verify_epoch_token'), \
@@ -894,7 +952,7 @@ class FreshCapacityStagedColdTests(unittest.TestCase):
                     prepared = prepare_capacity_swap_for_context_plan(
                         plan=carrier_plan,
                         context_plan=context_plan,
-                        trigger_reason='turn_limit',
+                        trigger_reason='soft_context',
                         static_system='TARGET',
                     )
                 sent_carriers.append(prepared)

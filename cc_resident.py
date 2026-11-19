@@ -2241,7 +2241,7 @@ class ResidentSession:
             return 'tool_profile_changed'
         # MODEL-1B: only compare when this resident was actually spawned with an
         # identity. Fake/pre-1B alive fixtures keep _model_identity=None and must
-        # still reach turn_limit / idle / system_changed contracts.
+        # still reach idle / system_changed / context capacity checks.
         stored_identity = getattr(self, '_model_identity', None)
         stored_provider = str(getattr(self, '_cc_provider', 'claude_code') or 'claude_code')
         if (
@@ -2278,14 +2278,11 @@ class ResidentSession:
 
         hard = _cfg_int('CC_CONTEXT_HARD_LIMIT', 180_000)
         soft = _cfg_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
-        max_turns = _cfg_int('CC_MAX_RESIDENT_TURNS', 45)
         min_between = _cfg_int('CC_MIN_TURNS_BETWEEN_RESPAWNS', 5)
 
         if self._last_round_context >= hard:
             self._hard_context_pre_spawn_turns = int(self._turns_since_respawn or 0)
             return 'hard_context'
-        if self._resident_turn_count >= max_turns:
-            return 'turn_limit'
         if (
             self._last_round_context >= soft
             and self._turns_since_respawn >= min_between

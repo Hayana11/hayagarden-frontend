@@ -5123,7 +5123,6 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         ):
             self.assertEqual(cold_soft_limit(), 150000)
             self.assertEqual(cold_hard_limit(), 180000)
-            self.assertEqual(cc_resident._cfg_int('CC_MAX_RESIDENT_TURNS', 45), 45)
 
     def test_cold_planner_accepts_75k_plan_despite_legacy_guard(self):
         from continuity.context_plan import (
@@ -10931,7 +10930,7 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
             'native_tail_source_identity_duplicate',
         )
 
-    def test_capacity_turn_limit_uses_real_scope_proof(self):
+    def test_capacity_soft_context_uses_real_scope_proof(self):
         plan = self._plan()
         plan.worker_id = 'worker'
         plan.resident_key = 'daily:default:30:65'
@@ -10971,7 +10970,7 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
             provider='claude_code',
             system_text='',
             bound_tool_surface_fingerprint='surface',
-            peek_respawn_reason=lambda _system, *, tool_profile: 'turn_limit',
+            peek_respawn_reason=lambda _system, *, tool_profile: 'soft_context',
         )
         registry = {
             'context_id': 32,
@@ -11074,7 +11073,7 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
                 resident=resident,
                 static_system='STATIC',
                 env={},
-                trigger_reason='turn_limit',
+                trigger_reason='soft_context',
             )
             mismatch_plan = self._plan()
             mismatch_plan.worker_id = 'worker'

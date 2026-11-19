@@ -161,7 +161,6 @@ class StaleCacheGateTests(unittest.TestCase):
             "idle",
             "system_changed",
             "hard_context",
-            "turn_limit",
             "soft_context",
             "tool_profile_changed",
             "tool_surface_changed",

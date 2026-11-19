@@ -1869,11 +1869,8 @@ def core_page():
 def get_context_limits():
     """Expose the read-only resident limit authority to the frontend."""
     soft_limit = config_store.get_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
-    max_turns = config_store.get_int('CC_MAX_RESIDENT_TURNS', 45)
     return jsonify({
-        'ok': True,
         'context_soft_limit': soft_limit if soft_limit > 0 else 150_000,
-        'max_resident_turns': max_turns if max_turns > 0 else 45,
     })
 
 
