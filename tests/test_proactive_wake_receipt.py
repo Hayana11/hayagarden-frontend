@@ -262,6 +262,51 @@ class ColdWakeGenerationHandoffTests(_World):
             [(new_generation,)],
         )
 
+    def test_idle_registered_resident_reprepares_before_sending_wake(self):
+        ctx_id, epoch, generation = self.q(
+            'SELECT id, context_epoch, resident_generation FROM daily_contexts'
+        )[0]
+        key = dr.make_resident_key(
+            chat_id='default', context_epoch=epoch, resident_generation=generation,
+        )
+        self.exec_sql(
+            'INSERT INTO daily_resident_cursors '
+            '(context_id, resident_generation, history_cursor_message_id) VALUES (?, ?, ?)',
+            ctx_id, generation, self.latest,
+        )
+        dr.set_local_binding(dr.LocalResidentBinding(
+            resident_key=key, context_id=ctx_id, context_epoch=epoch,
+            resident_generation=generation, bound_cursor_message_id=self.latest,
+            process_generation=self.resident.generation, tool_profile=dr.DAILY_TOOL_PROFILE,
+            claude_session_id='old-session',
+        ))
+        self.ready = (False, 'resident_stale:idle')
+        self.resident._alive = True
+        self.resident._cold = False
+        self.resident.session_id = 'old-session'
+        kill = self.resident._kill
+
+        def retire(*args, **kwargs):
+            kill(*args, **kwargs)
+            self.resident.session_id = None
+            self.resident._cold = True
+            self.resident.generation += 1
+
+        with mock.patch.object(self.resident, '_kill', side_effect=retire), \
+             mock.patch.object(self.resident, 'peek_respawn_reason', return_value='idle'), \
+             mock.patch.object(dr, 'reprepare_after_registered_session_change',
+                               wraps=dr.reprepare_after_registered_session_change) as reprepare:
+            wake_id = self.spoken_cold_wake()
+
+        reprepare.assert_called_once()
+        self.assertEqual(len(self.resident.sent), 1)
+        self.assertEqual(self.resident.sent[0].count('【系统主动轮】'), 1)
+        self.assertEqual(self.resident.killed, 1)
+        self.assertEqual(
+            self.q('SELECT resident_generation FROM daily_message_contexts WHERE message_id=?', wake_id),
+            [(generation + 1,)],
+        )
+
     def test_cold_respawn_does_not_promote_across_epoch_change(self):
         def change_epoch():
             self.exec_sql(
@@ -276,6 +321,44 @@ class ColdWakeGenerationHandoffTests(_World):
             self.q("SELECT COUNT(*) FROM chat_messages WHERE source_kind='wake'"),
             [(0,)],
         )
+
+
+class ColdWakeGuardsAndDiagnosticsTests(_World):
+    def test_normal_wake_guards_stop_before_preparing(self):
+        from chat.interaction_state import InteractionClock, wake_guard_reason
+
+        with mock.patch.object(dr, 'prepare_proactive_cold_turn') as prepare:
+            with mock.patch.object(self.gw, '_wake_run_id_seen', return_value=True):
+                self.assertEqual(self.decide()['reason'], 'duplicate_wake_run_id')
+
+            clock = InteractionClock(NOW, None, 0.1, 0.1, True)
+            with mock.patch('chat.interaction_state.read_interaction_clock', return_value=clock), \
+                 mock.patch('chat.interaction_state.wake_guard_reason', side_effect=wake_guard_reason):
+                self.assertEqual(self.decide()['reason'], 'recent_interaction')
+
+            with mock.patch.object(self.gw, '_gen_acquire_or_wait', return_value=('busy', None)):
+                body = self.decide()
+            self.assertEqual(body['reason'], 'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP')
+            self.assertEqual(body['detail'], 'generation_lock_unavailable')
+            prepare.assert_not_called()
+        self.assertEqual(self.resident.sent, [])
+
+    def test_premodel_warning_keeps_runtime_code_without_exception_content(self):
+        error = dr.DailyRuntimeError(
+            'private request detail', error_code='resident_turn_lease_conflict', retryable=True,
+        )
+        with mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=error), \
+             self.assertLogs(self.gw.app.logger, level='WARNING') as logged:
+            body = self.decide()
+        self.assertEqual(body['reason'], 'NORMAL_WAKE_PRE_MODEL_FAILED')
+        self.assertEqual(body['detail'], error.error_code)
+        self.assertIn(error.error_code, '\n'.join(logged.output))
+        self.assertNotIn(str(error), '\n'.join(logged.output))
+        self.gw._wake_live_trace.assert_any_call(
+            'rid-w', 'FAILED', exception_type='DailyRuntimeError',
+            error_code=error.error_code, retryable=True,
+        )
+        self.assertEqual(self.resident.sent, [])
 
 
 class WakeTailProofTests(_World):
