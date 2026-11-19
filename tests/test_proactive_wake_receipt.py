@@ -21,6 +21,7 @@ import config_store
 from chat import daily_context as dc
 from chat import daily_runtime as dr
 from chat.capacity_swap_runtime import note_same_context_last_good
+from chat.interaction_state import InteractionClock, wake_guard_reason
 from chat.session_registry import register_context_claude_session
 from chat.mail_notice_store import peek_pending_mail_notice_ids, record_pending_mail_notice
 from tests.test_proactive_cold_prepare import NOW, TRIGGER, _ColdResident, _GatewayBase, _insert
@@ -325,8 +326,6 @@ class ColdWakeGenerationHandoffTests(_World):
 
 class ColdWakeGuardsAndDiagnosticsTests(_World):
     def test_normal_wake_guards_stop_before_preparing(self):
-        from chat.interaction_state import InteractionClock, wake_guard_reason
-
         with mock.patch.object(dr, 'prepare_proactive_cold_turn') as prepare:
             with mock.patch.object(self.gw, '_wake_run_id_seen', return_value=True):
                 self.assertEqual(self.decide()['reason'], 'duplicate_wake_run_id')
