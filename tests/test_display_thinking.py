@@ -1,8 +1,11 @@
 import ast
+from io import BytesIO
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from PIL import Image
 
 from chat.display_thinking import (
     AUTHORED_THINKING_INSTRUCTION,
@@ -23,6 +26,12 @@ from chat.display_thinking import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _png_fixture():
+    with BytesIO() as buffer:
+        Image.new('RGB', (1, 1)).save(buffer, format='PNG')
+        return buffer.getvalue(), 'image/png'
 
 
 def filtered(text_chunks, mode='auto', before=(), after=(), done_text=None):
@@ -511,7 +520,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             prepare_daily_display_thinking_plan(plan, mode)
             with mock.patch.object(
                 vb, 'resolve_image_bytes',
-                return_value=(b'png-bytes', 'image/png'),
+                return_value=_png_fixture(),
             ):
                 return plan, format_resident_turn_content(
                     assembly=plan.assembly,
@@ -566,7 +575,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             prepare_daily_display_thinking_plan(plan, mode)
             with mock.patch.object(
                 vb, 'resolve_image_bytes',
-                return_value=(b'png-bytes', 'image/png'),
+                return_value=_png_fixture(),
             ):
                 initial = dr.format_resident_turn_content(
                     assembly=plan.assembly,
