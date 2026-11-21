@@ -1912,6 +1912,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_context.enabled', return_value=True), \
                  mock.patch.object(gateway, 'DB_PATH', db), \
+                 mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'), \
                  mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
                      'persona': 'P', 'full_system': 'STATIC',
                  }), \
@@ -3730,7 +3731,10 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         reg = get_context_claude_session(
             plan.context_id, plan.resident_generation, db_path=self.db,
         )
-        self.assertIsNone(reg)
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['scan_status'], 'BLOCKED')
+        self.assertEqual(reg['scan_error_code'], 'candidate_user_missing')
+        self.assertEqual(int(reg['scan_offset']), int(plan.transcript_start_offset))
 
     def test_mapping_terminal_diagnostic_precedes_rollback(self):
         jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
