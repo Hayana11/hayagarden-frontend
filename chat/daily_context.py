@@ -3693,15 +3693,28 @@ def set_daily_assistant_verification_status(
             cache_info = {}
         if not isinstance(cache_info, dict):
             cache_info = {}
-        cache_info['transcript_verification_status'] = str(status)
+        status_value = str(status).upper()
+        cache_info['transcript_verification_status'] = status_value
         if error_code:
             cache_info['transcript_verification_error_code'] = str(error_code)
         else:
             cache_info.pop('transcript_verification_error_code', None)
-        conn.execute(
-            'UPDATE chat_messages SET cache_info=? WHERE id=?',
-            (json.dumps(cache_info, ensure_ascii=False), int(assistant_message_id)),
-        )
+        if status_value == 'UNVERIFIED':
+            conn.execute(
+                'UPDATE chat_messages SET cache_info=?, source_kind=? '
+                'WHERE id=? AND author=?',
+                (
+                    json.dumps(cache_info, ensure_ascii=False),
+                    SOURCE_KIND_CHAT,
+                    int(assistant_message_id),
+                    'assistant',
+                ),
+            )
+        else:
+            conn.execute(
+                'UPDATE chat_messages SET cache_info=? WHERE id=?',
+                (json.dumps(cache_info, ensure_ascii=False), int(assistant_message_id)),
+            )
         conn.commit()
     except Exception:
         conn.rollback()

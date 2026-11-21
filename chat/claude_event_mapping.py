@@ -96,6 +96,8 @@ class _AuthRound:
     user_message_id: int
     assistant_message_id: int
     incomplete: bool = False
+    verification_status: str = ''
+    assistant_content: str = ''
 
 
 def _assistant_row_incomplete(cache_info: Any) -> bool:
@@ -138,7 +140,7 @@ def _load_auth_rounds_after(
     }
     cache_sel = 'm.cache_info' if 'cache_info' in cols else "'' AS cache_info"
     rows = conn.execute(
-        f'''SELECT m.id AS id, dmc.role AS role, {cache_sel}
+        f'''SELECT m.id AS id, dmc.role AS role, {cache_sel}, m.content AS content
             FROM daily_message_contexts dmc
             JOIN chat_messages m ON m.id = dmc.message_id
             WHERE dmc.context_id=? AND dmc.context_epoch=?
@@ -170,10 +172,19 @@ def _load_auth_rounds_after(
                     f'auth assistant {mid} without preceding user',
                     error_code=ERROR_CATCHUP_AUTH_MISMATCH,
                 )
+            try:
+                assistant_cache = json.loads(str(row['cache_info'] or '{}'))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                assistant_cache = {}
             rounds.append(_AuthRound(
                 user_message_id=int(pending_user),
                 assistant_message_id=mid,
                 incomplete=_assistant_row_incomplete(row['cache_info']),
+                verification_status=(
+                    str(assistant_cache.get('transcript_verification_status') or '')
+                    if isinstance(assistant_cache, dict) else ''
+                ),
+                assistant_content=str(row['content'] or ''),
             ))
             pending_user = None
             continue
@@ -993,6 +1004,27 @@ def _phase1_plan_catchup(
             context_epoch=int(req.context_epoch),
             resident_generation=int(req.resident_generation),
         )
+        if auth.verification_status == 'UNVERIFIED':
+            from chat.canonical_turn import CanonicalTurnError, build_canonical_turn
+            try:
+                canonical = build_canonical_turn(
+                    transcript_path,
+                    start_offset=cursor,
+                    end_offset=round_end,
+                    session_id=sid,
+                    transcript_process_generation=registry.get('process_generation'),
+                )
+            except (CanonicalTurnError, OSError):
+                pass
+            else:
+                assistant_plan = next(
+                    row for row in planned if str(row['role']) == ROLE_ASSISTANT
+                )
+                assistant_plan['_unverified_verification'] = (
+                    'VERIFIED'
+                    if canonical.content == auth.assistant_content
+                    else 'MISMATCH'
+                )
         work.append((cursor, round_end, planned))
         cursor = round_end
         auth_i += 1
@@ -1112,6 +1144,39 @@ def _commit_mapping_work(
                     confirmed_existing.append(uid)
                 if str(row['role']) == ROLE_ASSISTANT:
                     last_mapped_asst = int(row['message_id'])
+                    verification = row.get('_unverified_verification')
+                    if verification:
+                        assistant = conn.execute(
+                            'SELECT cache_info FROM chat_messages '
+                            'WHERE id=? AND author=?',
+                            (last_mapped_asst, 'assistant'),
+                        ).fetchone()
+                        if assistant is not None:
+                            try:
+                                cache_info = json.loads(str(assistant['cache_info'] or '{}'))
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                cache_info = {}
+                            if (
+                                isinstance(cache_info, dict)
+                                and cache_info.get('transcript_verification_status') == 'UNVERIFIED'
+                            ):
+                                if verification == 'VERIFIED':
+                                    cache_info['transcript_verification_status'] = 'VERIFIED'
+                                    cache_info.pop('transcript_verification_error_code', None)
+                                else:
+                                    cache_info['transcript_verification_error_code'] = (
+                                        'canonical_projection_mismatch'
+                                    )
+                                conn.execute(
+                                    'UPDATE chat_messages SET cache_info=?, source_kind=? '
+                                    'WHERE id=? AND author=?',
+                                    (
+                                        json.dumps(cache_info, ensure_ascii=False),
+                                        dc.SOURCE_KIND_CHAT,
+                                        last_mapped_asst,
+                                        'assistant',
+                                    ),
+                                )
 
             cas_advance_scan_offset(
                 context_id=int(req.context_id),

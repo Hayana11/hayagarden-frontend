@@ -9326,9 +9326,6 @@ def ensure_resident_and_stream(
                     plan.terminal_receipt = receipt
                 yield evt, payload
                 if evt == 'done':
-                    # The frontend sees terminal completion before transcript
-                    # finality polling and mapping continue in the detached drain.
-                    _capture_transcript_end(plan, resident)
                     # Safety net: stream completed without on_stdin_flushed hook.
                     if getattr(plan, '_capacity_swap_install_state', None) is not None:
                         _commit_capacity_swap_after_stdin_flush(plan)
@@ -9973,6 +9970,8 @@ def stream_daily_resident_turn(
                     )
                 _clear_daily_provider_prompt_snapshots(plan, resident)
             yield event, payload
+            if event == 'done':
+                _capture_transcript_end(plan, resident)
     finally:
         _clear_daily_provider_prompt_snapshots(plan, resident)
 
