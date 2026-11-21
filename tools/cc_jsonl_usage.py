@@ -24,7 +24,7 @@ def _as_int(value: Any) -> int:
 
 def claude_project_slug(cwd: str) -> str:
     """Match Claude Code's project-directory encoding."""
-    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(str(cwd or "")))
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cwd or "")))
 
 
 def session_jsonl_path(

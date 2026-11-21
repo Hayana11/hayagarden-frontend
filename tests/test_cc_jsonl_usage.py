@@ -1225,5 +1225,19 @@ class ToolSurfaceFingerprintTests(unittest.TestCase):
         self.assertNotEqual(first, second)
 
 
+class ClaudeProjectSlugSymlinkTests(unittest.TestCase):
+    def test_project_slug_resolves_symlink_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "real" / "project"
+            target.mkdir(parents=True)
+            alias = root / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            self.assertEqual(
+                replay.claude_project_slug(str(alias)),
+                replay.claude_project_slug(str(target)),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

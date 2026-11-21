@@ -889,5 +889,24 @@ class SessionRegistryMappingTests(unittest.TestCase):
         self.assertEqual(int(row['scan_offset']), 100)
 
 
+class TerminalRoundShapeTests(unittest.TestCase):
+    def test_terminal_assistant_without_text_is_complete_with_max_tokens(self):
+        from types import SimpleNamespace
+        from chat.claude_event_mapping import _assert_complete_terminal_round
+        from chat.claude_transcript_model import EventRole
+
+        assistant = SimpleNamespace(
+            event_role=EventRole.ASSISTANT,
+            is_sidechain=False,
+            raw={"message": {"content": [], "stop_reason": "max_tokens"}},
+        )
+        candidate = SimpleNamespace(
+            has_assistant=True,
+            event_uuids=("assistant",),
+        )
+        graph = SimpleNamespace(by_uuid={"assistant": assistant})
+        _assert_complete_terminal_round(graph, candidate)
+
+
 if __name__ == '__main__':
     unittest.main()

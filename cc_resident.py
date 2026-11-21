@@ -3498,6 +3498,9 @@ class ResidentSession:
                 for line in raw.splitlines(keepends=True):
                     event_offset = offset
                     offset += len(line)
+                    if not line.endswith(b'\n'):
+                        continue
+                    event_end_offset = offset
                     try:
                         row = json.loads(line.decode('utf-8', errors='replace'))
                     except Exception:
@@ -3511,17 +3514,36 @@ class ResidentSession:
                         continue
                     message = row.get('message')
                     stop_reason = row.get('stop_reason')
+                    content = None
                     if isinstance(message, dict):
                         stop_reason = message.get('stop_reason') or stop_reason
+                        content = message.get('content')
+                    refusal = bool(
+                        row.get('isApiErrorMessage') is True
+                        or (
+                            isinstance(content, list)
+                            and any(
+                                isinstance(block, dict) and block.get('type') == 'refusal'
+                                for block in content
+                            )
+                        )
+                    )
                     last_main_chain_assistant = {
                         'event_offset': event_offset,
+                        'event_end_offset': event_end_offset,
                         'stop_reason': (
                             None if stop_reason is None else str(stop_reason)[:80]
                         ),
+                        'refusal': refusal,
                     }
                 if (
                     last_main_chain_assistant is None
-                    or last_main_chain_assistant['stop_reason'] != 'end_turn'
+                    or (
+                        last_main_chain_assistant['stop_reason'] not in {
+                            'end_turn', 'max_tokens', 'stop_sequence',
+                        }
+                        and not last_main_chain_assistant['refusal']
+                    )
                 ):
                     return None
                 return {
@@ -3531,8 +3553,12 @@ class ResidentSession:
                     'transcript_path_sha256': _diagnostic_path_hash(path),
                     'current_turn_start_offset': int(start_offset),
                     'event_offset': last_main_chain_assistant['event_offset'],
-                    'observed_end_offset': observed_end,
-                    'assistant_stop_reason': 'end_turn',
+                    'event_end_offset': last_main_chain_assistant['event_end_offset'],
+                    'file_observed_end_offset': observed_end,
+                    'observed_end_offset': last_main_chain_assistant['event_end_offset'],
+                    'assistant_stop_reason': (
+                        last_main_chain_assistant['stop_reason'] or 'refusal'
+                    ),
                     'detected_at': time.time(),
                     'provider_last_activity_at': terminal.last_provider_activity_at,
                 }

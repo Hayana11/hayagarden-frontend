@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools import capability_state
-from tools.capability_manifest import P1_RESERVED_CAPABILITY_IDS
+from tools.capability_manifest import P1_ENABLED_CAPABILITY_IDS, P1_RESERVED_CAPABILITY_IDS, get_capability
 from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface_names
 from tools.execution_fence import (
     build_approval_id,
@@ -527,30 +527,15 @@ class ExecutionFenceTests(unittest.TestCase):
             b = build_uh_a0_spawn_plan(cwd=tmp, turn_lease=second)
             self.assertEqual(a["physical_surface_fingerprint"], b["physical_surface_fingerprint"])
             self.assertEqual(a["spawn_extra_args"], b["spawn_extra_args"])
-        self.assertEqual(
-            set(physical_surface_names()),
-            {
-                "Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch",
-                "mcp__capability__memory_search", "mcp__capability__memory_write",
-                "mcp__capability__home_light_status",
-                "mcp__capability__diary_write",
-                "mcp__capability__task_timer_start",
-                "mcp__home__get_countdowns",
-                "mcp__home__xhs_status",
-                "mcp__home__xhs_read",
-                "mcp__home__x_state",
-                "mcp__home__x_read",
-                "mcp__home__x_post",
-                "mcp__capability__ledger_budget_read",
-                "mcp__capability__todo_read",
-                "mcp__capability__todo_write", "mcp__capability__ledger_read",
-                "mcp__capability__ledger_write",
-                "mcp__capability__gallery_save",
-                "mcp__capability__gallery_recall",
-                "mcp__capability__gallery_screenshot",
-                "mcp__internal__get.health",
-            },
-        )
+        expected_surface = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch"}
+        for cid in P1_ENABLED_CAPABILITY_IDS:
+            if cid in P1_RESERVED_CAPABILITY_IDS:
+                continue
+            entry = get_capability(cid) or {}
+            binding = (entry.get("provider_bindings") or {}).get("claude_code")
+            if isinstance(binding, str) and binding.strip():
+                expected_surface.add(binding.strip())
+        self.assertEqual(set(physical_surface_names()), expected_surface)
 
 
 if __name__ == "__main__":

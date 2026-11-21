@@ -65,32 +65,25 @@ NON_P3_HOME_MCP_TOOLS: tuple[str, ...] = (
     "mcp__home__collect_chat_moment",
 )
 
-HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
-    "countdown.read",
-    "xhs.status",
-    "xhs.read",
-    "x.state",
-    "x.read",
-    "x.write",
-)
+def _manifest_ids_for_claude_prefix(prefix: str) -> tuple[str, ...]:
+    from tools.capability_manifest import CAPABILITY_MANIFEST
+    out: list[str] = []
+    for entry in CAPABILITY_MANIFEST:
+        capability_id = str(entry.get("capability_id") or "")
+        binding = (entry.get("provider_bindings") or {}).get("claude_code")
+        if (
+            capability_id in P1_ENABLED_CAPABILITY_IDS
+            and capability_id not in P1_RESERVED_CAPABILITY_IDS
+            and isinstance(binding, str)
+            and binding.startswith(prefix)
+        ):
+            out.append(capability_id)
+    return tuple(out)
 
-INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read",)
 
-CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
-    "memory.search",
-    "memory.write",
-    "diary.write",
-    "task.timer.start",
-    "home.light.status",
-    "todo.read",
-    "todo.write",
-    "ledger.read",
-    "ledger.budget.read",
-    "ledger.write",
-    "gallery.save",
-    "gallery.recall",
-    "gallery.screenshot",
-)
+HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = _manifest_ids_for_claude_prefix("mcp__home__")
+INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = _manifest_ids_for_claude_prefix("mcp__internal__")
+CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = _manifest_ids_for_claude_prefix("mcp__capability__")
 
 INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.read",

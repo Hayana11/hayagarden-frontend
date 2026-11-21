@@ -79,6 +79,19 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "provider_bindings": {"claude_code": "mcp__capability__diary_write", "home_mcp": "mcp__home__write_diary"},
     },
     {
+        "capability_id": "system.status.read",
+        "display_name": "查看主机状态",
+        "kind": "read",
+        "side_effect": "none",
+        "autonomy_mode": "read_auto",
+        "trigger": "回答依赖当前 VPS 主机、CPU、内存、磁盘或运行时间时。",
+        "purpose": "读取当前主机的只读运行状态，不执行命令或修改系统。",
+        "deny_when": "当前问题不需要主机状态时。",
+        "failure_behavior": "说明状态读取失败，不得猜测机器规格。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__home__get_vps_status"},
+    },
+    {
         "capability_id": "home.light.status",
         "display_name": "查看灯光状态",
         "kind": "read",
@@ -423,36 +436,6 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
 )
 
 
-P1_ENABLED_CAPABILITY_IDS = frozenset(
-    {
-        "memory.search",
-        "memory.write",
-        "diary.write",
-        "home.light.status",
-        "todo.read",
-        "todo.write",
-        "task.timer.start",
-        "countdown.read",
-        "ledger.read",
-        "ledger.budget.read",
-        "ledger.write",
-        "files.read",
-        "files.find",
-        "code.search",
-        "web.search",
-        "web.read",
-        "xhs.status",
-        "xhs.read",
-        "x.state",
-        "x.read",
-        "x.write",
-        "health.read",
-        "gallery.save",
-        "gallery.recall",
-        "gallery.screenshot",
-    }
-)
-
 P1_RESERVED_CAPABILITY_IDS = frozenset(
     {
         "github.read",
@@ -460,6 +443,15 @@ P1_RESERVED_CAPABILITY_IDS = frozenset(
         "code.write",
         "workspace.execute",
     }
+)
+
+# A manifest entry is enabled by default unless it is explicitly reserved.
+# This removes the second hand-maintained allowlist that used to drift whenever
+# a new tool was added.
+P1_ENABLED_CAPABILITY_IDS = frozenset(
+    item["capability_id"]
+    for item in CAPABILITY_MANIFEST
+    if item["capability_id"] not in P1_RESERVED_CAPABILITY_IDS
 )
 
 _CAPABILITIES_BY_ID = {item["capability_id"]: item for item in CAPABILITY_MANIFEST}

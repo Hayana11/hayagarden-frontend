@@ -11683,3 +11683,72 @@ class HotLiveSystemIdentityCapacitySuffixTests(unittest.TestCase):
         })
         self.assertNotEqual(reason, 'live_system_identity_mismatch')
         self.assertEqual(reason, 'session_registry_missing')
+
+
+class TranscriptFinalityWaitTests(unittest.TestCase):
+    def test_waits_for_terminal_row_and_ends_at_its_line_end(self):
+        from chat.claude_event_mapping import MappingRejected
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            prefix = b'{"type":"user"}\n'
+            terminal = b'{"type":"assistant","stop_reason":"max_tokens"}\n'
+            trailing = b'{"type":"system","subtype":"post_turn"}\n'
+            path.write_bytes(prefix + terminal + trailing)
+            sid = "session-finality"
+            assistant = types.SimpleNamespace(byte_offset=len(prefix))
+            candidate = types.SimpleNamespace(event_uuids=("assistant",))
+            graph = types.SimpleNamespace(
+                events=[types.SimpleNamespace(session_id=sid)],
+                candidate_rounds=[candidate],
+                by_uuid={"assistant": assistant},
+            )
+            plan = types.SimpleNamespace(
+                transcript_observation_error_code=None,
+                transcript_claude_session_id=sid,
+                transcript_process_generation=4,
+                transcript_start_offset=len(prefix),
+                transcript_path=str(path),
+                transcript_cwd=tmp,
+                transcript_end_offset=None,
+            )
+            resident = types.SimpleNamespace(session_id=sid, generation=4)
+            with (
+                mock.patch.object(
+                    dr, "snapshot_session_jsonl",
+                    return_value={"path": str(path), "offset": path.stat().st_size},
+                ),
+                mock.patch(
+                    "chat.claude_transcript_reader.read_transcript_range",
+                    return_value=graph,
+                ),
+                mock.patch(
+                    "chat.claude_event_mapping._assert_complete_terminal_round",
+                    side_effect=[MappingRejected("still growing"), None],
+                ) as assert_complete,
+                mock.patch.object(dr.time, "monotonic", return_value=1.0),
+                mock.patch.object(dr.time, "sleep") as sleep,
+            ):
+                dr._capture_transcript_end(plan, resident)
+            self.assertEqual(assert_complete.call_count, 2)
+            sleep.assert_called_once_with(0.05)
+            self.assertEqual(plan.transcript_end_offset, len(prefix) + len(terminal))
+            self.assertLess(plan.transcript_end_offset, path.stat().st_size)
+
+    def test_unverified_preview_remains_in_backlog_candidate_set(self):
+        from chat.claude_event_mapping import _assistant_row_incomplete
+
+        plan = types.SimpleNamespace(
+            transcript_observation_error_code="transcript_not_final",
+            manifest={},
+        )
+        with mock.patch.object(dr, "persist_daily_assistant_for_plan", return_value=44) as persist:
+            assistant_id = dr.persist_partial_daily_stream_rescue(
+                plan, content="流出的预览", unverified=True,
+            )
+        self.assertEqual(assistant_id, 44)
+        cache_info = json.loads(persist.call_args.kwargs["cache_info"])
+        self.assertEqual(cache_info["transcript_verification_status"], "UNVERIFIED")
+        self.assertNotIn("partial_rescue", cache_info)
+        self.assertFalse(_assistant_row_incomplete(persist.call_args.kwargs["cache_info"]))
+        self.assertEqual(plan.manifest["transcript_verification_status"], "UNVERIFIED")

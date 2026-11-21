@@ -584,9 +584,28 @@ def _assert_complete_terminal_round(graph: TranscriptGraph, rnd) -> None:
             'candidate round does not end on main-chain assistant',
             error_code='incomplete_round_not_terminal_assistant',
         )
-    if not _content_has_text(last_evt):
+    raw = last_evt.raw
+    message = raw.get('message') if isinstance(raw, Mapping) else None
+    stop_reason = (
+        (message.get('stop_reason') if isinstance(message, Mapping) else None)
+        or raw.get('stop_reason')
+    ) if isinstance(raw, Mapping) else None
+    content = message.get('content') if isinstance(message, Mapping) else None
+    refusal = bool(
+        raw.get('isApiErrorMessage') is True
+        or (
+            isinstance(content, list)
+            and any(isinstance(block, Mapping) and block.get('type') == 'refusal'
+                    for block in content)
+        )
+    )
+    terminal_without_text = (
+        str(stop_reason or '') in {'end_turn', 'max_tokens', 'stop_sequence'}
+        or refusal
+    )
+    if not _content_has_text(last_evt) and not terminal_without_text:
         raise MappingRejected(
-            'terminal assistant has no non-empty text body',
+            'terminal assistant has no non-empty text body or terminal marker',
             error_code='incomplete_round_no_terminal_text',
         )
 

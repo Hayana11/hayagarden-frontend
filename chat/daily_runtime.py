@@ -6450,7 +6450,7 @@ def _capture_transcript_start(plan: DailyTurnPlan, resident: Any) -> None:
 
 
 def _capture_transcript_end(plan: DailyTurnPlan, resident: Any) -> None:
-    """Capture JSONL end offset on done, before yielding done upstream."""
+    """Freeze JSONL end only after the current transcript round is complete."""
     if plan.transcript_observation_error_code:
         return
     try:
@@ -6469,24 +6469,74 @@ def _capture_transcript_end(plan: DailyTurnPlan, resident: Any) -> None:
         if start_sid and start_sid != sid:
             plan.transcript_observation_error_code = 'transcript_session_id_changed'
             return
-        plan.transcript_claude_session_id = sid
-        snap = snapshot_session_jsonl(plan.transcript_cwd, sid)
-        if snap is None:
-            plan.transcript_observation_error_code = 'transcript_snapshot_failed'
-            return
-        end_path = str(snap.get('path') or '') or None
-        end_offset = int(snap.get('offset') or 0)
-        if plan.transcript_path and end_path and plan.transcript_path != end_path:
-            plan.transcript_observation_error_code = 'transcript_path_changed'
-            return
         if plan.transcript_start_offset is None:
             plan.transcript_observation_error_code = 'transcript_start_offset_missing'
             return
-        if end_offset < int(plan.transcript_start_offset):
-            plan.transcript_observation_error_code = 'transcript_offset_invalid'
-            return
-        plan.transcript_path = end_path
-        plan.transcript_end_offset = end_offset
+
+        plan.transcript_claude_session_id = sid
+        start_offset = int(plan.transcript_start_offset)
+        deadline = time.monotonic() + float(os.environ.get('HAYA_TRANSCRIPT_FINALITY_WAIT_S', '45'))
+        last_reason = 'transcript_not_grown'
+
+        from chat.claude_event_mapping import _assert_complete_terminal_round
+        from chat.claude_transcript_reader import read_transcript_range
+
+        while True:
+            snap = snapshot_session_jsonl(plan.transcript_cwd, sid)
+            if snap is None:
+                last_reason = 'transcript_snapshot_failed'
+            else:
+                end_path = str(snap.get('path') or '') or None
+                end_offset = int(snap.get('offset') or 0)
+                if plan.transcript_path and end_path and plan.transcript_path != end_path:
+                    plan.transcript_observation_error_code = 'transcript_path_changed'
+                    return
+                if end_offset < start_offset:
+                    plan.transcript_observation_error_code = 'transcript_offset_invalid'
+                    return
+                if end_path and end_offset > start_offset:
+                    try:
+                        graph = read_transcript_range(end_path, start_offset, end_offset)
+                        session_ids = {
+                            str(event.session_id or '').strip()
+                            for event in graph.events
+                            if str(event.session_id or '').strip()
+                        }
+                        if session_ids != {sid}:
+                            last_reason = 'transcript_session_mismatch'
+                        elif len(graph.candidate_rounds) != 1:
+                            last_reason = 'transcript_round_shape'
+                        else:
+                            candidate = graph.candidate_rounds[0]
+                            _assert_complete_terminal_round(graph, candidate)
+                            terminal_event = graph.by_uuid[candidate.event_uuids[-1]]
+                            if terminal_event.byte_offset is None:
+                                last_reason = 'transcript_terminal_offset_missing'
+                            else:
+                                with open(end_path, 'rb') as transcript:
+                                    transcript.seek(int(terminal_event.byte_offset))
+                                    terminal_line = transcript.readline()
+                                terminal_end = int(terminal_event.byte_offset) + len(terminal_line)
+                                if (
+                                    not terminal_line.endswith(b'\n')
+                                    or terminal_end > end_offset
+                                ):
+                                    last_reason = 'transcript_terminal_line_incomplete'
+                                else:
+                                    plan.transcript_path = end_path
+                                    plan.transcript_end_offset = terminal_end
+                                    return
+                    except Exception as exc:
+                        last_reason = str(getattr(exc, 'error_code', None) or type(exc).__name__)
+
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    'transcript finality wait expired reason=%s session_id=%s start_offset=%s',
+                    last_reason, sid, start_offset,
+                )
+                plan.transcript_observation_error_code = 'transcript_not_final'
+                return
+            time.sleep(0.05)
     except Exception:
         logger.warning('transcript end capture failed', exc_info=True)
         plan.transcript_observation_error_code = 'transcript_end_capture_failed'
@@ -9274,11 +9324,14 @@ def ensure_resident_and_stream(
                             error_code='provider_terminal_receipt_invalid',
                         )
                     plan.terminal_receipt = receipt
+                yield evt, payload
+                if evt == 'done':
+                    # The frontend sees terminal completion before transcript
+                    # finality polling and mapping continue in the detached drain.
                     _capture_transcript_end(plan, resident)
                     # Safety net: stream completed without on_stdin_flushed hook.
                     if getattr(plan, '_capacity_swap_install_state', None) is not None:
                         _commit_capacity_swap_after_stdin_flush(plan)
-                yield evt, payload
         except Exception as exc:
             # Post-flush: CURRENT user already sent → fail closed, never resend.
             if bool(getattr(plan, '_current_user_stdin_flushed', False)):
@@ -10181,6 +10234,7 @@ def persist_partial_daily_stream_rescue(
     content: str,
     thinking: str = '',
     tool_calls: str = '',
+    unverified: bool = False,
 ) -> int:
     """Classic-aligned interrupt rescue: persist visible assistant text only.
 
@@ -10194,11 +10248,16 @@ def persist_partial_daily_stream_rescue(
             error_code='empty_partial_rescue',
         )
     cache_info = json.dumps(
-        {
+        ({
+            'transcript_verification_status': 'UNVERIFIED',
+            'transcript_verification_error_code': str(
+                plan.transcript_observation_error_code or 'canonical_turn_unavailable'
+            ),
+        } if unverified else {
             'stream_interrupted': True,
             'turn_incomplete': True,
             'partial_rescue': True,
-        },
+        }),
         ensure_ascii=False,
     )
     aid = persist_daily_assistant_for_plan(
@@ -10211,8 +10270,12 @@ def persist_partial_daily_stream_rescue(
         source_kind=dc.SOURCE_KIND_CHAT,
         stage_hidden_flow=False,
     )
-    plan.manifest['partial_rescue'] = True
-    plan.manifest['partial_rescue_assistant_id'] = int(aid)
+    if unverified:
+        plan.manifest['transcript_verification_status'] = 'UNVERIFIED'
+        plan.manifest['unverified_assistant_id'] = int(aid)
+    else:
+        plan.manifest['partial_rescue'] = True
+        plan.manifest['partial_rescue_assistant_id'] = int(aid)
     return int(aid)
 
 
@@ -10419,16 +10482,21 @@ def handle_provider_success(
             mapping_scan_offset=mapping_failure['mapping_scan_offset'],
         )
         try:
-            _rollback_failed_terminalization(
-                plan,
+            dc.set_daily_assistant_verification_status(
                 assistant_message_id=int(assistant_message_id),
+                context_id=int(plan.context_id),
+                context_epoch=int(plan.context_epoch),
+                resident_generation=int(plan.resident_generation),
+                status='UNVERIFIED',
+                error_code=mapping_failure['mapping_error_code'],
+                db_path=plan.db_path,
             )
-        except Exception as exc:
-            _raise_terminal_rollback_unproven(
-                plan,
-                assistant_message_id=int(assistant_message_id),
-                cause=exc,
+        except Exception:
+            logger.exception(
+                'failed to mark persisted assistant UNVERIFIED message_id=%s',
+                assistant_message_id,
             )
+        plan.manifest['transcript_verification_status'] = 'UNVERIFIED'
         abort_daily_turn(
             plan,
             error_code=mapping_failure['mapping_error_code'],
@@ -10438,6 +10506,14 @@ def handle_provider_success(
             % mapping_failure['mapping_error_code'],
             error_code=mapping_failure['mapping_error_code'],
         )
+    dc.set_daily_assistant_verification_status(
+        assistant_message_id=int(assistant_message_id),
+        context_id=int(plan.context_id),
+        context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation),
+        status='VERIFIED',
+        db_path=plan.db_path,
+    )
     try:
         complete_daily_turn(
             plan,
