@@ -3701,22 +3701,24 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
 
         conn = sqlite3.connect(self.db)
         asst = conn.execute(
-            "SELECT id, content FROM chat_messages WHERE author='assistant'"
+            "SELECT id, content, source_kind, cache_info FROM chat_messages "
+            "WHERE author='assistant'"
         ).fetchone()
         formal_asst_count = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' AND source_kind='chat'"
-        ).fetchone()[0]
-        context_mapping_count = conn.execute(
-            'SELECT COUNT(*) FROM daily_message_contexts WHERE role=?',
-            ('assistant',),
         ).fetchone()[0]
         map_count = conn.execute(
             'SELECT COUNT(*) FROM chat_message_claude_events'
         ).fetchone()[0]
         conn.close()
-        self.assertIsNone(asst)
-        self.assertEqual(int(formal_asst_count), 0)
-        self.assertEqual(int(context_mapping_count), 0)
+        self.assertIsNotNone(asst)
+        self.assertEqual(int(asst[0]), aid)
+        self.assertEqual(asst[1], canonical.content)
+        self.assertEqual(asst[2], dc.SOURCE_KIND_CHAT)
+        self.assertEqual(
+            json.loads(asst[3])['transcript_verification_status'], 'UNVERIFIED',
+        )
+        self.assertEqual(int(formal_asst_count), 1)
         self.assertEqual(int(map_count), 0)
 
         self.assertIsNone(dc.get_resident_history_cursor(
@@ -3740,30 +3742,23 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self._stream_mapping_blocked_fixture(plan, resident)
         canonical, aid = _persist_canonical_for_plan(plan)
         events = []
-        real_rollback = dr._rollback_failed_terminalization
-
         def record_log(*args, **kwargs):
             rendered = ' '.join(str(value) for value in args)
             if 'TRANSCRIPT_MAPPING_TERMINAL_BLOCKED' in rendered:
                 events.append(('log', rendered))
 
-        def record_rollback(*args, **kwargs):
-            events.append(('rollback', ''))
-            return real_rollback(*args, **kwargs)
-
         with mock.patch.object(dr.logger, 'warning', side_effect=record_log), \
-             mock.patch.object(
-                 dr, '_rollback_failed_terminalization', side_effect=record_rollback,
-             ):
+             mock.patch.object(dr, '_rollback_failed_terminalization') as rollback:
             with self.assertRaises(dr.DailyRuntimeError) as ctx:
                 dr.handle_provider_success(
                     plan, assistant_message_id=aid, raw_text=canonical.content,
                 )
 
         self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], 'log')
         self.assertIn('candidate_user_missing', events[0][1])
-        self.assertEqual(events[1][0], 'rollback')
+        rollback.assert_not_called()
 
     def test_observation_mapping_diagnostic_preserves_exact_code(self):
         uid = _insert(self.db, 'hayana', 'observation-diagnostic', '2026-07-27 10:00:00')
