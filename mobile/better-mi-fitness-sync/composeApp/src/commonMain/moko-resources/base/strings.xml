@@ -206,4 +206,28 @@
     <string name="background_restricted">Background App Refresh is restricted on this device</string>
     <string name="background_unknown">Background App Refresh status unknown</string>
     <string name="background_unknown_status">Unknown</string>
+
+    <string name="settings_background_diagnostics">Background sync</string>
+    <string name="settings_auto_sync_disabled">Auto-sync is turned off.</string>
+    <string name="settings_battery_optimization">Battery optimization</string>
+    <string name="settings_battery_exempt">Allowed to run in the background</string>
+    <string name="settings_battery_not_exempt">Not allowed to run freely</string>
+    <string name="settings_battery_unavailable">Unavailable on this Android version</string>
+    <string name="settings_request_battery_exemption">Allow background running</string>
+    <string name="settings_work_manager_state">Worker state</string>
+    <string name="settings_worker_last_started">Last worker start</string>
+    <string name="settings_worker_last_finished">Last worker finish</string>
+    <string name="settings_worker_last_result">Last worker result</string>
+    <string name="settings_worker_last_error">Last worker error</string>
+    <string name="settings_worker_retrying">Retry scheduled</string>
+    <string name="settings_worker_unknown">Unknown</string>
+    <string name="settings_worker_state_unknown">Unknown</string>
+    <string name="settings_worker_state_enqueued">Scheduled</string>
+    <string name="settings_worker_state_running">Running</string>
+    <string name="settings_worker_state_blocked">Waiting</string>
+    <string name="settings_worker_state_succeeded">Completed</string>
+    <string name="settings_worker_state_failed">Failed</string>
+    <string name="settings_worker_state_cancelled">Cancelled</string>
+    <string name="settings_worker_state_not_scheduled">Not scheduled</string>
+
 </resources>

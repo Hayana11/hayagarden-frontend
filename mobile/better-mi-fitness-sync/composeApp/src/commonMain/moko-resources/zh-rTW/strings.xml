@@ -206,4 +206,28 @@
     <string name="background_restricted">此裝置上背景 App 重新整理受到限制</string>
     <string name="background_unknown">背景 App 重新整理狀態未知</string>
     <string name="background_unknown_status">未知</string>
+
+    <string name="settings_background_diagnostics">背景同步</string>
+    <string name="settings_auto_sync_disabled">自動同步已關閉。</string>
+    <string name="settings_battery_optimization">電池最佳化</string>
+    <string name="settings_battery_exempt">已允許背景持續執行</string>
+    <string name="settings_battery_not_exempt">尚未允許</string>
+    <string name="settings_battery_unavailable">目前 Android 版本不支援</string>
+    <string name="settings_request_battery_exemption">允許背景持續執行</string>
+    <string name="settings_work_manager_state">Worker 狀態</string>
+    <string name="settings_worker_last_started">最近啟動</string>
+    <string name="settings_worker_last_finished">最近完成</string>
+    <string name="settings_worker_last_result">最近結果</string>
+    <string name="settings_worker_last_error">最近錯誤</string>
+    <string name="settings_worker_retrying">將重試</string>
+    <string name="settings_worker_unknown">未知</string>
+    <string name="settings_worker_state_unknown">未知</string>
+    <string name="settings_worker_state_enqueued">已排入佇列</string>
+    <string name="settings_worker_state_running">執行中</string>
+    <string name="settings_worker_state_blocked">等待中</string>
+    <string name="settings_worker_state_succeeded">已完成</string>
+    <string name="settings_worker_state_failed">失敗</string>
+    <string name="settings_worker_state_cancelled">已取消</string>
+    <string name="settings_worker_state_not_scheduled">未排程</string>
+
 </resources>
