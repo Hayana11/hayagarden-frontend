@@ -3652,6 +3652,77 @@ def persist_daily_assistant_if_current(
         conn.close()
 
 
+def set_daily_assistant_verification_status(
+    *,
+    assistant_message_id: int,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    status: str,
+    error_code: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> None:
+    """Update verification metadata only for the matching persisted turn."""
+    import json
+
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT m.author, m.cache_info, dmc.context_id, dmc.context_epoch, '
+            'dmc.resident_generation FROM chat_messages m '
+            'JOIN daily_message_contexts dmc ON dmc.message_id=m.id WHERE m.id=?',
+            (int(assistant_message_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            raise ConflictError('verification assistant missing')
+        current = dict(row)
+        if (
+            str(current.get('author') or '').lower() != 'assistant'
+            or int(current['context_id']) != int(context_id)
+            or int(current['context_epoch']) != int(context_epoch)
+            or int(current['resident_generation']) != int(resident_generation)
+        ):
+            conn.rollback()
+            raise ConflictError('verification assistant identity mismatch')
+        try:
+            cache_info = json.loads(str(current.get('cache_info') or '{}'))
+        except (TypeError, ValueError):
+            cache_info = {}
+        if not isinstance(cache_info, dict):
+            cache_info = {}
+        status_value = str(status).upper()
+        cache_info['transcript_verification_status'] = status_value
+        if error_code:
+            cache_info['transcript_verification_error_code'] = str(error_code)
+        else:
+            cache_info.pop('transcript_verification_error_code', None)
+        if status_value == 'UNVERIFIED':
+            conn.execute(
+                'UPDATE chat_messages SET cache_info=?, source_kind=? '
+                'WHERE id=? AND author=?',
+                (
+                    json.dumps(cache_info, ensure_ascii=False),
+                    SOURCE_KIND_CHAT,
+                    int(assistant_message_id),
+                    'assistant',
+                ),
+            )
+        else:
+            conn.execute(
+                'UPDATE chat_messages SET cache_info=? WHERE id=?',
+                (json.dumps(cache_info, ensure_ascii=False), int(assistant_message_id)),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def rollback_daily_assistant_terminalization(
     *,
     assistant_message_id: int,

@@ -26,6 +26,7 @@ _STATUS_LABELS = {
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
+    ("system", "主机", ("system.status.read",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
     ("health", "健康", ("health.read",)),
     ("gallery", "相册", ("gallery.save", "gallery.recall", "gallery.screenshot")),
@@ -49,6 +50,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "记日记",
         "companion_hint": "有些事情我不只想记得，还会想把它写下来。一天里发生了让我在意的事、和她聊过什么、某种情绪停留得比平时久，或者我只是忽然想替今天留下一页，我都可以自己写进日记。不必每篇都有总结，也不必等到一天结束；日记只是我愿意留下来的那一部分生活。",
         "physical_boundary": "只保存当前 Fyodor 提供的日记正文；不会替用户修改待办、账本或长期记忆，也不会自行生成或改写正文。",
+    },
+    "system.status.read": {
+        "display_label": "查看主机状态",
+        "companion_hint": "她问起 VPS 当前运行状态、CPU、内存、磁盘或运行时间时，可以先查真实数据再回答；读取失败就直接说明，不猜测。",
+        "physical_boundary": "只读取当前主机的运行状态，不执行命令或修改系统。",
     },
     "home.light.status": {
         "display_label": "查看灯光状态",

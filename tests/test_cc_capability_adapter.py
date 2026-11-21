@@ -85,15 +85,22 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         conn.close()
 
     def test_a_bindings_come_from_capability_manifest(self):
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
+        expected_home_ids = tuple(
+            cid for cid in P1_ENABLED_CAPABILITY_IDS
+            if isinstance((get_capability(cid) or {}).get("provider_bindings", {}).get("claude_code"), str)
+            and (get_capability(cid)["provider_bindings"]["claude_code"]).startswith("mcp__home__")
+        )
+        self.assertEqual(set(HOME_MCP_CAPABILITY_IDS), set(expected_home_ids))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
             ("health.read",),
         )
-        self.assertEqual(
-            CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "gallery.save", "gallery.recall", "gallery.screenshot"),
-        )
+        expected_proxy_ids = {
+            cid for cid in P1_ENABLED_CAPABILITY_IDS
+            if isinstance((get_capability(cid) or {}).get("provider_bindings", {}).get("claude_code"), str)
+            and get_capability(cid)["provider_bindings"]["claude_code"].startswith("mcp__capability__")
+        }
+        self.assertEqual(set(CAPABILITY_PROXY_CAPABILITY_IDS), expected_proxy_ids)
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
             ("mcp__internal__get.health",),
@@ -210,18 +217,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 6)
-        self.assertEqual(
-            set(home),
-            {
-                "mcp__home__get_countdowns",
-                "mcp__home__xhs_status",
-                "mcp__home__xhs_read",
-                "mcp__home__x_state",
-                "mcp__home__x_read",
-                "mcp__home__x_post",
-            },
-        )
+        expected_home = {
+            get_capability(cid)["provider_bindings"]["claude_code"]
+            for cid in HOME_MCP_CAPABILITY_IDS
+        }
+        self.assertEqual(set(home), expected_home)
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config(env={})
@@ -725,6 +725,21 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(plan["built_in_tools"], ())
         self.assertEqual(plan["home_mcp_tools"], ())
         self.assertEqual(plan["surface_allowlist"], ())
+
+
+    def test_reserved_code_write_and_workspace_execute_stay_closed(self):
+        plan = self._plan()
+        for capability_id in ("code.write", "workspace.execute"):
+            capability = get_capability(capability_id)
+            self.assertIn(capability["kind"], {"write", "execute"})
+            self.assertIn(capability_id, P1_RESERVED_CAPABILITY_IDS)
+            self.assertNotIn(capability_id, P1_ENABLED_CAPABILITY_IDS)
+            binding = capability["provider_bindings"].get("claude_code")
+            if isinstance(binding, str):
+                self.assertNotIn(binding, plan["surface_allowlist"])
+            elif isinstance(binding, (list, tuple)):
+                for tool in binding:
+                    self.assertNotIn(tool, plan["surface_allowlist"])
 
 
 if __name__ == "__main__":

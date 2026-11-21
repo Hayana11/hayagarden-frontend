@@ -201,6 +201,32 @@ function buildServer({ uhA0Profile = false, turnLeasePath = '' } = {}) {
   const server = new McpServer({ name: 'home-mcp', version: '1.0.0' });
 
   server.tool(
+    'get_vps_status',
+    {},
+    async () => {
+      try {
+        const cpuModel = (os.cpus()[0] && os.cpus()[0].model) || 'unknown';
+        const cpuCount = os.cpus().length;
+        const totalMemGiB = (os.totalmem() / 1024 ** 3).toFixed(1);
+        const freeMemGiB = (os.freemem() / 1024 ** 3).toFixed(1);
+        const disk = execFileSync('df', ['-h', '--output=size,used,avail,pcent', '/'], { encoding: 'utf-8' })
+          .trim().split(/\n/).slice(-1)[0].trim().replace(/\s+/g, ' ');
+        const uptimeHours = (os.uptime() / 3600).toFixed(1);
+        const text = [
+          `主机：${os.hostname()}`,
+          `CPU：${cpuCount} vCPU · ${cpuModel}`,
+          `内存：${totalMemGiB} GiB（当前空闲 ${freeMemGiB} GiB）`,
+          `系统盘：${disk}`,
+          `已运行：${uptimeHours} 小时`,
+        ].join('\n');
+        return { content: [{ type: 'text', text }] };
+      } catch (e) {
+        return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
+      }
+    }
+  );
+
+  server.tool(
     'exec_vps',
     { command: z.string().describe('Shell command to execute on the VPS') },
     async ({ command }) => {

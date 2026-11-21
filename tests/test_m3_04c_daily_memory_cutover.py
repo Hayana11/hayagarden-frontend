@@ -45,7 +45,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
                 "home_mcp": HOME_MEMORY,
             },
         )
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("system.status.read", "countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
         self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ("health.read",))
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -67,7 +67,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
 
     def test_normal_surface_has_only_internal_memory(self):
         plan = self.plan()
-        self.assertEqual(set(uh_a0_home_mcp_tools()), {"mcp__home__get_countdowns", "mcp__home__xhs_status", "mcp__home__xhs_read", "mcp__home__x_state", "mcp__home__x_read", "mcp__home__x_post"})
+        self.assertEqual(set(uh_a0_home_mcp_tools()), {"mcp__home__get_vps_status", "mcp__home__get_countdowns", "mcp__home__xhs_status", "mcp__home__xhs_read", "mcp__home__x_state", "mcp__home__x_read", "mcp__home__x_post"})
         self.assertIn(INTERNAL_MEMORY, uh_a0_capability_proxy_tools())
         self.assertIn(INTERNAL_MEMORY, plan["surface_allowlist"])
         self.assertNotIn(HOME_MEMORY, plan["surface_allowlist"])

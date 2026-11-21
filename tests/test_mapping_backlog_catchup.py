@@ -121,6 +121,7 @@ def _line(
         'parentUuid': parent,
         'cwd': '/tmp/synth',
         'sessionId': session,
+        'timestamp': '2026-07-30T12:00:00+08:00',
         'message': {'role': 'user' if typ == 'user' else 'assistant', 'content': content},
     }
     return json.dumps(obj, ensure_ascii=False)

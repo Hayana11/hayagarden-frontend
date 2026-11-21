@@ -1912,6 +1912,7 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             with mock.patch.object(config_store, 'get_bool', return_value=True), \
                  mock.patch('chat.daily_context.enabled', return_value=True), \
                  mock.patch.object(gateway, 'DB_PATH', db), \
+                 mock.patch.object(gateway, 'CC_TOKEN', 'test-oauth-token'), \
                  mock.patch('chat.system_builder.build_cc_daily_static_parts', return_value={
                      'persona': 'P', 'full_system': 'STATIC',
                  }), \
@@ -1920,7 +1921,11 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                  mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False), \
                  mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False):
                 gen = gateway._stream_cc_daily_soft_window({'user_message_id': uid}, 'gen-close')
-                _ = next(gen)
+                for chunk in gen:
+                    if isinstance(chunk, str) and '"t": "text"' in chunk:
+                        break
+                else:
+                    self.fail('provider text was not emitted before disconnect')
                 gen.close()
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
@@ -2223,10 +2228,14 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
                 self._success_stream_patches(db, uid, resident)
             )
             abort_mock = mock.Mock(wraps=dr.abort_daily_turn)
+            capture_mock = mock.Mock()
             with contextlib.ExitStack() as stack:
                 for p in patches:
                     stack.enter_context(p)
                 stack.enter_context(mock.patch.object(dr, 'abort_daily_turn', abort_mock))
+                stack.enter_context(mock.patch.object(
+                    dr, '_capture_transcript_end', capture_mock,
+                ))
                 client = gateway.app.test_client()
                 resp = client.post('/chat/stream', json={'content': 'hi'})
                 self.assertEqual(resp.status_code, 200)
@@ -2234,11 +2243,13 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
                 for chunk in body_iter:
                     for evt in _sse_events_from_chunks([chunk]):
                         if evt.get('t') == 'done' and evt.get('ok') is True:
+                            capture_mock.assert_not_called()
                             body_iter.close()
                             break
                     else:
                         continue
                     break
+                capture_mock.assert_called_once()
 
             ctx_after = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
             conn = sqlite3.connect(db)
@@ -2435,9 +2446,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 if chunk.startswith('data: '):
                     events.append(json.loads(chunk[6:].strip()))
             terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
-            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
-            self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
+            self.assertEqual([e.get('t') for e in terminal_events], ['done'])
+            self.assertTrue(terminal_events[0].get('persist_pending'))
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
@@ -2451,7 +2461,7 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
     def setUpClass(cls):
         os.makedirs('/opt/workspace/tools', exist_ok=True)
 
-    def test_chat_stream_cas_conflict_gen_release_none_only(self):
+    def test_chat_stream_cas_conflict_gen_release_keeps_persisted_reply(self):
         import json
         import gateway
 
@@ -2528,12 +2538,9 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                 if line.startswith('data: '):
                     events.append(json.loads(line[6:].strip()))
             terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
-            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
-            self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
-            self.assertEqual(gen_release_calls, [None])
-            success_tuples = [c for c in gen_release_calls if isinstance(c, tuple)]
-            self.assertEqual(success_tuples, [])
+            self.assertEqual([e.get('t') for e in terminal_events], ['done'])
+            self.assertTrue(terminal_events[0].get('persist_pending'))
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
@@ -2693,6 +2700,29 @@ def _jsonl_line(
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _terminal_assistant_line(uuid: str, *, session: str, parent: str | None, content: Any) -> str:
+    event = json.loads(_jsonl_line(
+        uuid, 'assistant', session=session, parent=parent, content=content,
+    ))
+    event['message']['stop_reason'] = 'end_turn'
+    return json.dumps(event, ensure_ascii=False)
+
+
+def _resident_usage(session_id: str, generation: int, turn_identity: str, **usage):
+    return cc_resident.ResidentTurnUsage(
+        usage,
+        terminal_receipt=cc_resident.ProviderTerminalReceipt(
+            terminal_kind='provider_result',
+            source='resident_live_stdout',
+            turn_identity=turn_identity,
+            process_generation=generation,
+            claude_session_id=session_id,
+            result_is_error=False,
+            result_stop_reason='end_turn',
+        ),
+    )
+
+
 def _jsonl_result_line(uuid: str, *, session: str, stop_reason: str = 'end_turn') -> str:
     return json.dumps({
         'type': 'result',
@@ -2750,14 +2780,14 @@ class _TranscriptHotResident(_FakeResident):
         self.sent_generations.append(int(self.generation))
         _append_jsonl(self._jsonl_path, [
             _jsonl_line('u-hot-1', 'user', session=self.session_id, parent=None, content='hot-user'),
-            _jsonl_line(
-                'a-hot-1', 'assistant', session=self.session_id, parent='u-hot-1',
+            _terminal_assistant_line(
+                'a-hot-1', session=self.session_id, parent='u-hot-1',
                 content=[{'type': 'text', 'text': 'hot-asst'}],
             ),
             _jsonl_result_line('r-hot-1', session=self.session_id),
         ])
         yield ('text', 'hot reply')
-        yield ('done', ('hot reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
+        yield ('done', ('hot reply', '', _resident_usage(self.session_id, self.generation, 'hot-turn', input_tokens=3, output_tokens=5), {}))
 
 
 class _TranscriptColdResident(_FakeResident):
@@ -2780,13 +2810,13 @@ class _TranscriptColdResident(_FakeResident):
         self.session_id = self._new_session_id
         _write_jsonl(self._jsonl_path, [
             _jsonl_line('u-cold-1', 'user', session=self.session_id, parent=None, content='cold-user'),
-            _jsonl_line(
-                'a-cold-1', 'assistant', session=self.session_id, parent='u-cold-1',
+            _terminal_assistant_line(
+                'a-cold-1', session=self.session_id, parent='u-cold-1',
                 content=[{'type': 'text', 'text': 'cold-asst'}],
             ),
             _jsonl_result_line('r-cold-1', session=self.session_id),
         ])
-        yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+        yield ('done', ('cold reply', '', _resident_usage(self.session_id, self.generation, 'cold-turn', input_tokens=2, output_tokens=4), {}))
 
 
 class _TranscriptBacklogResident(_FakeResident):
@@ -2829,8 +2859,8 @@ class _TranscriptBacklogResident(_FakeResident):
                     'content': f'tool-result-{index}',
                 }],
             ),
-            _jsonl_line(
-                f'a-back-{index}-final', 'assistant', session=self.session_id,
+            _terminal_assistant_line(
+                f'a-back-{index}-final', session=self.session_id,
                 parent=f't-back-{index}',
                 content=[{'type': 'text', 'text': f'back-asst-{index}'}],
             ),
@@ -2842,7 +2872,7 @@ class _TranscriptBacklogResident(_FakeResident):
             _append_jsonl(self._jsonl_path, lines)
         self._turn_count += 1
         yield ('text', 'back reply')
-        yield ('done', ('back reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+        yield ('done', ('back reply', '', _resident_usage(self.session_id, self.generation, f'back-turn-{index}', input_tokens=2, output_tokens=4), {}))
 
 
 class _RegisteredRespawnResident(_FakeResident):
@@ -2883,13 +2913,13 @@ class _RegisteredRespawnResident(_FakeResident):
         self.session_id = self._new_session_id
         _write_jsonl(self._jsonl_path, [
             _jsonl_line('u-rs-1', 'user', session=self.session_id, parent=None, content='rs-user'),
-            _jsonl_line(
-                'a-rs-1', 'assistant', session=self.session_id, parent='u-rs-1',
+            _terminal_assistant_line(
+                'a-rs-1', session=self.session_id, parent='u-rs-1',
                 content=[{'type': 'text', 'text': 'rs-asst'}],
             ),
             _jsonl_result_line('r-rs-1', session=self.session_id),
         ])
-        yield ('done', ('after-respawn', '', {'input_tokens': 1, 'output_tokens': 2}, {}))
+        yield ('done', ('after-respawn', '', _resident_usage(self.session_id, self.generation, 'respawn-turn', input_tokens=1, output_tokens=2), {}))
 
 
 class _MappingBlockedResident(_TranscriptColdResident):
@@ -2902,13 +2932,13 @@ class _MappingBlockedResident(_TranscriptColdResident):
         self.session_id = self._new_session_id
         # Assistant-only event: mapping rejects (candidate_user_missing).
         _write_jsonl(self._jsonl_path, [
-            _jsonl_line(
-                'a-only-1', 'assistant', session=self.session_id, parent=None,
+            _terminal_assistant_line(
+                'a-only-1', session=self.session_id, parent=None,
                 content=[{'type': 'text', 'text': 'orphan'}],
             ),
             _jsonl_result_line('r-only-1', session=self.session_id),
         ])
-        yield ('done', ('blocked-map reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
+        yield ('done', ('blocked-map reply', '', _resident_usage(self.session_id, self.generation, 'blocked-map-turn', input_tokens=1, output_tokens=1), {}))
 
 
 class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
@@ -2935,6 +2965,22 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         path = session_jsonl_path(self.cwd, session_id)
         assert path is not None
         return Path(path)
+
+    def _stream_mapping_blocked_fixture(self, plan, resident):
+        def set_fixture_range(plan_arg, resident_arg):
+            plan_arg.transcript_path = str(resident_arg._jsonl_path)
+            plan_arg.transcript_claude_session_id = resident_arg.session_id
+            plan_arg.transcript_start_offset = 0
+            plan_arg.transcript_end_offset = resident_arg._jsonl_path.stat().st_size
+            plan_arg.transcript_process_generation = int(resident_arg.generation)
+            plan_arg.transcript_observation_error_code = None
+
+        with mock.patch.object(
+            dr, '_capture_transcript_end', side_effect=set_fixture_range,
+        ):
+            return list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
 
     def test_hot_path_maps_only_current_turn_range(self):
         """1) Hot: start=EOF before write; map only this turn; manifest=MAPPED."""
@@ -3065,6 +3111,157 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         roles = {r[0]: r[1] for r in rows}
         self.assertEqual(roles.get('user'), uid)
         self.assertEqual(roles.get('assistant'), aid)
+
+    def test_blocked_mapping_keeps_one_formal_reply_and_catches_up(self):
+        from chat import daily_history
+        from chat.claude_event_mapping import attempt_mapping_catchup_through
+
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', '先保存预览', '2026-07-27 10:00:00')
+
+        class _TerminalTranscriptResident(_TranscriptColdResident):
+            def send_turn(self, content, commit_meta=None, turn_lease=None):
+                self.sent.append(str(content))
+                self.session_id = self._new_session_id
+                assistant = json.loads(_jsonl_line(
+                    'a-cold-1', 'assistant', session=self.session_id,
+                    parent='u-cold-1',
+                    content=[{'type': 'text', 'text': '流出的完整回复'}],
+                ))
+                assistant['message']['stop_reason'] = 'end_turn'
+                _write_jsonl(jsonl_path, [
+                    _jsonl_line(
+                        'u-cold-1', 'user', session=self.session_id,
+                        parent=None, content='先保存预览',
+                    ),
+                    json.dumps(assistant, ensure_ascii=False),
+                    _jsonl_result_line('r-cold-1', session=self.session_id),
+                ])
+                yield ('text', '流出的完整回复')
+                yield ('done', ('流出的完整回复', '', _resident_usage(
+                    self.session_id, self.generation, 'blocked-catchup-turn',
+                    input_tokens=2, output_tokens=4,
+                ), {}))
+
+        resident = _TerminalTranscriptResident(
+            cwd=self.cwd,
+            new_session_id=_MAP_SESSION_COLD,
+            jsonl_path=jsonl_path,
+        )
+        with mock.patch.object(dr, '_context_plan_consumer_enabled', return_value=False):
+            plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical = _attach_successful_canonical(
+            plan, content='流出的完整回复',
+        )
+        aid = dr.persist_daily_assistant_for_plan(
+            plan,
+            content=canonical.content,
+            thinking=canonical.thinking,
+            display_segments=canonical.display_segments,
+        )
+        cursor_before = dc.get_resident_history_cursor(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        transcript_bytes = jsonl_path.read_bytes()
+        jsonl_path.unlink()
+        try:
+            with mock.patch.object(dc, 'respawn_daily_resident'):
+                with self.assertRaises(dr.DailyRuntimeError):
+                    dr.handle_provider_success(
+                        plan,
+                        assistant_message_id=aid,
+                        raw_text=canonical.content,
+                    )
+        finally:
+            jsonl_path.write_bytes(transcript_bytes)
+
+        conn = sqlite3.connect(self.db)
+        rows = conn.execute(
+            "SELECT id, content, source_kind, cache_info FROM chat_messages "
+            "WHERE author='assistant' ORDER BY id",
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(int(rows[0][0]), aid)
+        self.assertEqual(rows[0][1], '流出的完整回复')
+        self.assertEqual(rows[0][2], dc.SOURCE_KIND_CHAT)
+        self.assertEqual(
+            json.loads(rows[0][3])['transcript_verification_status'], 'UNVERIFIED',
+        )
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan.context_id, plan.resident_generation, db_path=self.db,
+            ),
+            cursor_before,
+        )
+        registry = get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(registry)
+        self.assertEqual(registry['scan_status'], 'BLOCKED')
+        self.assertEqual(int(registry['scan_offset']), int(plan.transcript_start_offset))
+
+        next_uid = _insert(
+            self.db, 'hayana', '下一轮提问', '2026-07-27 10:01:00',
+        )
+        context = dc.get_context_for_local_day(
+            plan.chat_id, plan.local_day, db_path=self.db,
+        )
+        next_turn = daily_history.build_daily_window_context(
+            chat_id=plan.chat_id,
+            daily_context=context,
+            current_user_message_id=next_uid,
+            static_system='STATIC',
+            is_cold=True,
+            db_path=self.db,
+        )
+        self.assertIn(
+            {'message_id': aid, 'role': 'assistant', 'content': '流出的完整回复'},
+            [
+                {
+                    'message_id': int(item['message_id']),
+                    'role': item['role'],
+                    'content': item['content'],
+                }
+                for item in next_turn['current_day_history']
+            ],
+        )
+
+        recovered = attempt_mapping_catchup_through(
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=plan.resident_generation,
+            chat_id=plan.chat_id,
+            through_assistant_id=aid,
+            through_user_message_id=uid,
+            db_path=self.db,
+        )
+        self.assertTrue(recovered.ok, recovered.error_code)
+        registry_after = get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        )
+        self.assertEqual(registry_after['scan_status'], 'READY')
+        self.assertEqual(int(registry_after['scan_offset']), len(transcript_bytes))
+        self.assertEqual(int(registry_after['last_mapped_message_id']), aid)
+        conn = sqlite3.connect(self.db)
+        final_rows = conn.execute(
+            "SELECT id, content, source_kind, cache_info FROM chat_messages "
+            "WHERE author='assistant' ORDER BY id",
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(final_rows), 1)
+        self.assertEqual(
+            json.loads(final_rows[0][3])['transcript_verification_status'], 'VERIFIED',
+        )
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan.context_id, plan.resident_generation, db_path=self.db,
+            ),
+            cursor_before,
+        )
 
     def test_current_turn_mapping_rows_rollback_after_cursor_conflict(self):
         jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
@@ -3474,9 +3671,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             '【邮箱提示】\n有新的邮件。\nmessage id: daily-map-failure'
         )
         plan.assembly['pending_mail_ids'] = ['daily-map-failure']
-        list(dr.stream_daily_resident_turn(
-            plan, resident=resident, env={}, static_system='STATIC',
-        ))
+        self._stream_mapping_blocked_fixture(plan, resident)
         self.assertIn('message id: daily-map-failure', resident.sent[-1])
         self.assertEqual(
             resident.last_commit_meta['pending_mail_ids'],
@@ -3507,22 +3702,24 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
 
         conn = sqlite3.connect(self.db)
         asst = conn.execute(
-            "SELECT id, content FROM chat_messages WHERE author='assistant'"
+            "SELECT id, content, source_kind, cache_info FROM chat_messages "
+            "WHERE author='assistant'"
         ).fetchone()
         formal_asst_count = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' AND source_kind='chat'"
-        ).fetchone()[0]
-        context_mapping_count = conn.execute(
-            'SELECT COUNT(*) FROM daily_message_contexts WHERE role=?',
-            ('assistant',),
         ).fetchone()[0]
         map_count = conn.execute(
             'SELECT COUNT(*) FROM chat_message_claude_events'
         ).fetchone()[0]
         conn.close()
-        self.assertIsNone(asst)
-        self.assertEqual(int(formal_asst_count), 0)
-        self.assertEqual(int(context_mapping_count), 0)
+        self.assertIsNotNone(asst)
+        self.assertEqual(int(asst[0]), aid)
+        self.assertEqual(asst[1], canonical.content)
+        self.assertEqual(asst[2], dc.SOURCE_KIND_CHAT)
+        self.assertEqual(
+            json.loads(asst[3])['transcript_verification_status'], 'UNVERIFIED',
+        )
+        self.assertEqual(int(formal_asst_count), 1)
         self.assertEqual(int(map_count), 0)
 
         self.assertIsNone(dc.get_resident_history_cursor(
@@ -3534,7 +3731,10 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         reg = get_context_claude_session(
             plan.context_id, plan.resident_generation, db_path=self.db,
         )
-        self.assertIsNone(reg)
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['scan_status'], 'BLOCKED')
+        self.assertEqual(reg['scan_error_code'], 'candidate_user_missing')
+        self.assertEqual(int(reg['scan_offset']), int(plan.transcript_start_offset))
 
     def test_mapping_terminal_diagnostic_precedes_rollback(self):
         jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
@@ -3543,35 +3743,26 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
         )
         plan = self._prepare(uid, resident=resident)
-        list(dr.stream_daily_resident_turn(
-            plan, resident=resident, env={}, static_system='STATIC',
-        ))
+        self._stream_mapping_blocked_fixture(plan, resident)
         canonical, aid = _persist_canonical_for_plan(plan)
         events = []
-        real_rollback = dr._rollback_failed_terminalization
-
         def record_log(*args, **kwargs):
             rendered = ' '.join(str(value) for value in args)
             if 'TRANSCRIPT_MAPPING_TERMINAL_BLOCKED' in rendered:
                 events.append(('log', rendered))
 
-        def record_rollback(*args, **kwargs):
-            events.append(('rollback', ''))
-            return real_rollback(*args, **kwargs)
-
         with mock.patch.object(dr.logger, 'warning', side_effect=record_log), \
-             mock.patch.object(
-                 dr, '_rollback_failed_terminalization', side_effect=record_rollback,
-             ):
+             mock.patch.object(dr, '_rollback_failed_terminalization') as rollback:
             with self.assertRaises(dr.DailyRuntimeError) as ctx:
                 dr.handle_provider_success(
                     plan, assistant_message_id=aid, raw_text=canonical.content,
                 )
 
         self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], 'log')
         self.assertIn('candidate_user_missing', events[0][1])
-        self.assertEqual(events[1][0], 'rollback')
+        rollback.assert_not_called()
 
     def test_observation_mapping_diagnostic_preserves_exact_code(self):
         uid = _insert(self.db, 'hayana', 'observation-diagnostic', '2026-07-27 10:00:00')
@@ -3732,6 +3923,11 @@ class SendTurnStdinFlushAckTests(unittest.TestCase):
 class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
     def setUp(self):
         dr.reset_bindings_for_tests()
+        verification_patch = mock.patch.object(
+            dc, 'set_daily_assistant_verification_status',
+        )
+        verification_patch.start()
+        self.addCleanup(verification_patch.stop)
 
     def _prepare(self, db, *, feedback=([], [])):
         _init_chat_messages(db)
@@ -11683,3 +11879,72 @@ class HotLiveSystemIdentityCapacitySuffixTests(unittest.TestCase):
         })
         self.assertNotEqual(reason, 'live_system_identity_mismatch')
         self.assertEqual(reason, 'session_registry_missing')
+
+
+class TranscriptFinalityWaitTests(unittest.TestCase):
+    def test_waits_for_terminal_row_and_ends_at_its_line_end(self):
+        from chat.claude_event_mapping import MappingRejected
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            prefix = b'{"type":"user"}\n'
+            terminal = b'{"type":"assistant","stop_reason":"max_tokens"}\n'
+            trailing = b'{"type":"system","subtype":"post_turn"}\n'
+            path.write_bytes(prefix + terminal + trailing)
+            sid = "session-finality"
+            assistant = types.SimpleNamespace(byte_offset=len(prefix))
+            candidate = types.SimpleNamespace(event_uuids=("assistant",))
+            graph = types.SimpleNamespace(
+                events=[types.SimpleNamespace(session_id=sid)],
+                candidate_rounds=[candidate],
+                by_uuid={"assistant": assistant},
+            )
+            plan = types.SimpleNamespace(
+                transcript_observation_error_code=None,
+                transcript_claude_session_id=sid,
+                transcript_process_generation=4,
+                transcript_start_offset=len(prefix),
+                transcript_path=str(path),
+                transcript_cwd=tmp,
+                transcript_end_offset=None,
+            )
+            resident = types.SimpleNamespace(session_id=sid, generation=4)
+            with (
+                mock.patch.object(
+                    dr, "snapshot_session_jsonl",
+                    return_value={"path": str(path), "offset": path.stat().st_size},
+                ),
+                mock.patch(
+                    "chat.claude_transcript_reader.read_transcript_range",
+                    return_value=graph,
+                ),
+                mock.patch(
+                    "chat.claude_event_mapping._assert_complete_terminal_round",
+                    side_effect=[MappingRejected("still growing"), None],
+                ) as assert_complete,
+                mock.patch.object(dr.time, "monotonic", return_value=1.0),
+                mock.patch.object(dr.time, "sleep") as sleep,
+            ):
+                dr._capture_transcript_end(plan, resident)
+            self.assertEqual(assert_complete.call_count, 2)
+            sleep.assert_called_once_with(0.05)
+            self.assertEqual(plan.transcript_end_offset, len(prefix) + len(terminal))
+            self.assertLess(plan.transcript_end_offset, path.stat().st_size)
+
+    def test_unverified_preview_remains_in_backlog_candidate_set(self):
+        from chat.claude_event_mapping import _assistant_row_incomplete
+
+        plan = types.SimpleNamespace(
+            transcript_observation_error_code="transcript_not_final",
+            manifest={},
+        )
+        with mock.patch.object(dr, "persist_daily_assistant_for_plan", return_value=44) as persist:
+            assistant_id = dr.persist_partial_daily_stream_rescue(
+                plan, content="流出的预览", unverified=True,
+            )
+        self.assertEqual(assistant_id, 44)
+        cache_info = json.loads(persist.call_args.kwargs["cache_info"])
+        self.assertEqual(cache_info["transcript_verification_status"], "UNVERIFIED")
+        self.assertNotIn("partial_rescue", cache_info)
+        self.assertFalse(_assistant_row_incomplete(persist.call_args.kwargs["cache_info"]))
+        self.assertEqual(plan.manifest["transcript_verification_status"], "UNVERIFIED")

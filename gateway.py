@@ -12,7 +12,8 @@ from tools import workspace_agent
 from tools import workspace_jobs
 from tools import workspace_apps
 from tools import ombre_adapter
-from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, proxy_target
+import workspace_app_routes
+import brain_routes
 from chat.display_segments import (
     DisplaySegmentAccumulator,
     extract_save_markers,
@@ -4700,6 +4701,7 @@ CC_ALLOWED_TOOLS = ','.join([
     'mcp__brain__breath', 'mcp__brain__grow', 'mcp__brain__hold',
     'mcp__brain__pulse', 'mcp__brain__trace',
     'mcp__codebase',
+    'mcp__home__get_vps_status',
     'mcp__home__light_on', 'mcp__home__light_off', 'mcp__home__get_light_status',
     'mcp__home__light_bedside_warm', 'mcp__home__light_bedside_neutral',
     'mcp__home__get_todos', 'mcp__home__add_todo', 'mcp__home__get_countdowns',
@@ -8209,9 +8211,10 @@ def _stream_cc_daily_soft_window(
     assistant_persisted = False
     cc_tool_calls = []
     _client_detached = False
+    _frontend_done_sent = False
     _record_daily_cancel = _record_daily_stream_cancellation
 
-    def _rescue_and_abort(error_code, *, respawn=True):
+    def _rescue_and_abort(error_code, *, respawn=True, unverified=False):
         nonlocal assistant_persisted, turn_terminal
         if turn_terminal:
             return {'partial_rescue_performed': False, 'lease_released': False}
@@ -8232,15 +8235,22 @@ def _stream_cc_daily_soft_window(
                             ensure_ascii=False,
                         )
                     try:
-                        _daily_rt.persist_partial_daily_stream_rescue(
+                        rescued_id = _daily_rt.persist_partial_daily_stream_rescue(
                             _daily_plan,
                             content=partial_text,
                             thinking=''.join(think_acc),
                             tool_calls=partial_tools,
+                            unverified=unverified,
                         )
                         assistant_persisted = True
-                        partial_rescue = True
-                        _turn_data['_daily_partial_rescued'] = True
+                        if unverified:
+                            _turn_data['_daily_detached_persisted'] = True
+                            _turn_data['_daily_detached_assistant_id'] = rescued_id
+                            _turn_data['_daily_detached_content'] = partial_text
+                            _turn_data['_daily_detached_thinking'] = ''.join(think_acc)
+                        else:
+                            partial_rescue = True
+                            _turn_data['_daily_partial_rescued'] = True
                         if partial_unexpected:
                             _daily_plan.manifest['unexpected_save_marker'] = True
                     except Exception:
@@ -8383,7 +8393,7 @@ def _stream_cc_daily_soft_window(
             nonlocal _recall_shown, _birth_shown
             nonlocal deferred_payload, cache_refresh_candidate
             nonlocal cc_usage, text, thinking, unexpected_save
-            nonlocal _daily_done_seen, turn_terminal
+            nonlocal _daily_done_seen, turn_terminal, _frontend_done_sent
             heartbeat_sse = _daily_heartbeat_sse(evt)
             if heartbeat_sse is not None:
                 yield heartbeat_sse
@@ -8501,6 +8511,11 @@ def _stream_cc_daily_soft_window(
                         'cache_creation': cc_cache_create,
                     }
                 text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
+                if str(text or '').strip() and not _frontend_done_sent:
+                    _frontend_done_sent = True
+                    yield _sse_json({
+                        't': 'done', 'ok': True, 'persist_pending': True,
+                    })
 
         _filtered_daily_events = filter_display_thinking_events(
             _daily_events,
@@ -8703,7 +8718,7 @@ def _stream_cc_daily_soft_window(
                 json.dumps(exc.manifest, ensure_ascii=False),
             )
             turn_terminal = True
-            if not _client_detached:
+            if not _client_detached and not _frontend_done_sent:
                 yield 'data: ' + json.dumps({
                     't': 'err',
                     'd': 'cursor CAS conflict after assistant persist',
@@ -8823,7 +8838,7 @@ def _stream_cc_daily_soft_window(
                         _usage_evt[_k] = cc_usage[_k]
             if not _client_detached:
                 yield 'data: ' + json.dumps(_usage_evt) + SSE_END
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'done',
                 'ok': True,
@@ -8832,14 +8847,11 @@ def _stream_cc_daily_soft_window(
             }) + SSE_END
         return None
     except CanonicalTurnError as exc:
+        error_code = str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable')
         if _daily_plan:
-            _daily_rt.handle_provider_failure(
-                _daily_plan,
-                error_code=str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
-                resident=_CC_RESIDENT,
-            )
+            _rescue_and_abort(error_code, respawn=True, unverified=True)
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': str(exc),
@@ -8849,7 +8861,7 @@ def _stream_cc_daily_soft_window(
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
             }) + SSE_END
@@ -8858,7 +8870,7 @@ def _stream_cc_daily_soft_window(
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
             }) + SSE_END
@@ -8867,14 +8879,14 @@ def _stream_cc_daily_soft_window(
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
             }) + SSE_END
         return None
     except _daily_rt.FirstTurnFinalizePendingError as exc:
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': str(exc),
@@ -8891,7 +8903,7 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
             }) + SSE_END
@@ -8904,7 +8916,7 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
             }) + SSE_END
@@ -8918,7 +8930,7 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
             }) + SSE_END
@@ -8934,7 +8946,7 @@ def _stream_cc_daily_soft_window(
         turn_terminal = True
         _usage = getattr(exc, 'usage', None) or {}
         if isinstance(_usage, dict) and _usage.get('cold_budget_overflow') is not None:
-            if not _client_detached:
+            if not _client_detached and not _frontend_done_sent:
                 yield 'data: ' + json.dumps({'t': 'usage', **{
                     k: _usage.get(k) for k in (
                         'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
@@ -8942,7 +8954,7 @@ def _stream_cc_daily_soft_window(
                         'cold_budget_mode',
                     ) if k in _usage
                 }}) + SSE_END
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': str(exc),
@@ -8978,7 +8990,7 @@ def _stream_cc_daily_soft_window(
                 abort_requested=True,
                 respawn_requested=True,
             )
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield _sse_json(_chat_stream_failure_event(
                 exc,
                 partial_rescue=bool(cleanup.get('partial_rescue_performed')),
@@ -9346,7 +9358,19 @@ def chat_stream():
                                     )
                                 continue
                             if _chat_sse_terminal_kind(_chunk):
-                                if not _released[0]:
+                                pending_persist = False
+                                if isinstance(_chunk, str) and 'persist_pending' in _chunk:
+                                    try:
+                                        event_data = json.loads(
+                                            _chunk.split('data:', 1)[1].split('\n', 1)[0]
+                                        )
+                                        pending_persist = bool(
+                                            isinstance(event_data, dict)
+                                            and event_data.get('persist_pending') is True
+                                        )
+                                    except (IndexError, TypeError, ValueError):
+                                        pending_persist = False
+                                if not _released[0] and not pending_persist:
                                     _released[0] = True
                                     if _turn_data.get('_daily_partial_rescued'):
                                         _persisted[0] = True
@@ -9765,105 +9789,20 @@ def workspace_job_events():
     return jsonify({'events': events})
 
 
-_WS_PROXY_HOP_BY_HOP = {
-    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-    'te', 'trailer', 'transfer-encoding', 'upgrade',
-}
-_WS_PROXY_REQ_DENY = _WS_PROXY_HOP_BY_HOP | {'host', 'content-length'}
-_WS_PROXY_RESP_DENY = _WS_PROXY_HOP_BY_HOP | {'content-length'}
-
-
-def _workspace_proxy_request_headers():
-    return {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in _WS_PROXY_REQ_DENY
-    }
-
-
-def _workspace_proxy_response_headers(headers, *, app_id: str, upstream: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    proxy_base = f"/api/gw/workspace/apps/{app_id}/proxy"
-    for key, value in headers:
-        lower = key.lower()
-        if lower in _WS_PROXY_RESP_DENY:
-            continue
-        if lower == 'location':
-            if value.startswith(upstream):
-                value = proxy_base + value[len(upstream):]
-            elif value.startswith('/'):
-                value = proxy_base + value
-        out[key] = value
-    return out
-
-
 @app.route('/workspace/apps', methods=['GET'])
 def workspace_apps_list():
-    return jsonify({'apps': workspace_apps.list_apps()})
+    return workspace_app_routes.workspace_apps_list()
 
 
 @app.route('/workspace/apps/<app_id>', methods=['GET'])
 def workspace_app_detail(app_id):
-    try:
-        return jsonify(workspace_apps.app_status(app_id))
-    except WorkspaceAppError as exc:
-        return jsonify({'error': exc.code, 'detail': exc.detail}), exc.status_code
+    return workspace_app_routes.workspace_app_detail(app_id)
 
 
 @app.route('/workspace/apps/<app_id>/proxy/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'])
 @app.route('/workspace/apps/<app_id>/proxy/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'])
 def workspace_app_proxy(app_id, path):
-    """Reverse proxy to loopback workspace app (127.0.0.1 only)."""
-    import http.client
-    from flask import Response, stream_with_context
-    try:
-        upstream = verified_proxy_upstream(app_id)
-    except WorkspaceAppError as exc:
-        return jsonify({'error': exc.code, 'detail': exc.detail}), exc.status_code
-
-    query = request.query_string.decode('utf-8', errors='replace')
-    target = proxy_target(upstream, path, query)
-    parsed = urllib.parse.urlparse(target)
-    body = request.get_data()
-    req_headers = _workspace_proxy_request_headers()
-    conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=60)
-    try:
-        req_path = parsed.path or '/'
-        if parsed.query:
-            req_path += '?' + parsed.query
-        conn.request(request.method, req_path, body=body, headers=req_headers)
-        upstream_resp = conn.getresponse()
-        resp_headers = _workspace_proxy_response_headers(
-            upstream_resp.getheaders(), app_id=app_id, upstream=upstream,
-        )
-
-        def generate():
-            try:
-                while True:
-                    chunk = upstream_resp.read(8192)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                try:
-                    upstream_resp.close()
-                finally:
-                    conn.close()
-
-        return Response(
-            stream_with_context(generate()),
-            status=upstream_resp.status,
-            headers=resp_headers,
-        )
-    except Exception as exc:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        return jsonify({
-            'error': 'workspace_app_upstream_unavailable',
-            'detail': str(exc)[:240],
-        }), 502
+    return workspace_app_routes.workspace_app_proxy(app_id, path)
 
 
 WAKE_TOOLS = [
@@ -11667,167 +11606,22 @@ def api_summarize():
 # ── 白夜 API ──────────────────────────────────────────
 @app.route('/api/brain/emotions', methods=['GET'])
 def brain_emotions():
-    """情绪状态 - 返回真实emotion_state + 历史趋势"""
-    try:
-        import emotion_engine as _ee
-        state = _ee.get_state()
-        longing = _ee.get_longing()
-        # 历史：取最近chat_messages里情绪相关的节点（以updated_at粒度）
-        conn = get_db()
-        hist = conn.execute(
-            "SELECT updated_at, pa, na, valence, arousal, mood_word FROM emotion_state WHERE id=1"
-        ).fetchall()
-        conn.close()
-        current = {
-            'pa': state.get('pa', 0.5),
-            'na': state.get('na', 0.2),
-            'valence': state.get('valence', 0.6),
-            'arousal': state.get('arousal', 0.3),
-            'mood_word': state.get('mood_word', '平静'),
-            'longing': longing,
-            'updated_at': state.get('updated_at', ''),
-        }
-        return jsonify({'ok': True, 'current': current})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    return brain_routes.brain_emotions(get_db)
+
 
 @app.route('/api/brain/dreams', methods=['GET'])
 def brain_dreams():
-    """梦 - 返回存储的梦（支持 limit/before 分页）"""
-    try:
-        from tools.dream_meta import fetch_dream_page
-
-        try:
-            limit = int(request.args.get('limit', 20))
-        except (TypeError, ValueError):
-            limit = 20
-        before_raw = request.args.get('before')
-        before = None
-        if before_raw not in (None, ''):
-            try:
-                before = int(before_raw)
-            except (TypeError, ValueError):
-                return jsonify({'ok': False, 'error': 'invalid before'}), 400
-
-        conn = get_db()
-        page = fetch_dream_page(conn, limit=limit, before=before, include_id=False)
-        conn.close()
-        return jsonify({
-            'ok': True,
-            'items': page['items'],
-            'has_more': page['has_more'],
-            'next_before': page['next_before'],
-        })
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-def _brain_posts_page(type_name: str, *, limit_default=20, limit_max=50, order_by='id'):
-    """通用 posts 分页：limit + before(id)。返回 (rows, has_more, next_before, err)。"""
-    try:
-        limit = int(request.args.get('limit', limit_default))
-    except (TypeError, ValueError):
-        limit = limit_default
-    limit = max(1, min(limit, limit_max))
-    before_raw = request.args.get('before')
-    before = None
-    if before_raw not in (None, ''):
-        try:
-            before = int(before_raw)
-        except (TypeError, ValueError):
-            return None, None, None, 'invalid before'
-    conn = get_db()
-    if order_by == 'created_at':
-        if before is not None:
-            rows = conn.execute(
-                "SELECT id, author, content, created_at FROM posts "
-                "WHERE type=? AND id < ? ORDER BY created_at DESC, id DESC LIMIT ?",
-                (type_name, before, limit + 1),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, author, content, created_at FROM posts "
-                "WHERE type=? ORDER BY created_at DESC, id DESC LIMIT ?",
-                (type_name, limit + 1),
-            ).fetchall()
-    else:
-        if before is not None:
-            rows = conn.execute(
-                "SELECT id, author, content, created_at FROM posts "
-                "WHERE type=? AND id < ? ORDER BY id DESC LIMIT ?",
-                (type_name, before, limit + 1),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, author, content, created_at FROM posts "
-                "WHERE type=? ORDER BY id DESC LIMIT ?",
-                (type_name, limit + 1),
-            ).fetchall()
-    conn.close()
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    next_before = int(rows[-1]['id']) if has_more and rows else None
-    return rows, has_more, next_before, None
+    return brain_routes.brain_dreams(get_db)
 
 
 @app.route('/api/brain/thoughts', methods=['GET'])
 def brain_thoughts():
-    """深夜想法 - posts THOUGHT（支持 limit/before 分页）"""
-    try:
-        rows, has_more, next_before, err = _brain_posts_page('THOUGHT', limit_default=20)
-        if err:
-            return jsonify({'ok': False, 'error': err}), 400
-        items = []
-        for r in rows:
-            created_at = r['created_at'] or ''
-            items.append({
-                'id': int(r['id']),
-                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
-                'created_at': created_at,
-                'time': created_at[11:16] if created_at else '—',
-                'content': (r['content'] or ''),
-            })
-        return jsonify({
-            'ok': True,
-            'items': items,
-            'has_more': bool(has_more and next_before is not None),
-            'next_before': next_before,
-        })
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    return brain_routes.brain_thoughts(get_db)
 
 
 @app.route('/api/brain/diary', methods=['GET'])
 def brain_diary():
-    """日摘要 - 费奥多尔的日记归档（支持 limit/before 分页）"""
-    try:
-        rows, has_more, next_before, err = _brain_posts_page(
-            'DAILY_SUMMARY', limit_default=20, order_by='created_at',
-        )
-        if err:
-            return jsonify({'ok': False, 'error': err}), 400
-        items = []
-        seen = set()
-        for r in rows:
-            c = (r['content'] or '').strip()
-            if not c or c in seen:
-                continue
-            seen.add(c)
-            created_at = r['created_at'] or ''
-            items.append({
-                'id': int(r['id']),
-                'author': (r['author'] or 'fyodor').strip() or 'fyodor',
-                'created_at': created_at,
-                'date': created_at[:10] if created_at else '—',
-                'content': c,
-            })
-        return jsonify({
-            'ok': True,
-            'items': items,
-            'has_more': bool(has_more and next_before is not None),
-            'next_before': next_before,
-        })
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    return brain_routes.brain_diary(get_db)
 
 
 @app.route('/api/debug/provider', methods=['GET'])

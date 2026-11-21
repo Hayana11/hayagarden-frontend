@@ -1648,6 +1648,7 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
         }
         plan.user_content = "CURRENT_USER"
         plan.resident_generation = 48
+        plan.transcript_observation_error_code = "transcript_fixture_unavailable"
         plan.is_cold = kind == "cold"
         plan.is_respawn = kind == "respawn"
         plan._provider_prompt_system_snapshot = "STATIC_SYSTEM"
