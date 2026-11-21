@@ -2441,9 +2441,8 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 if chunk.startswith('data: '):
                     events.append(json.loads(chunk[6:].strip()))
             terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
-            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
-            self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
+            self.assertEqual([e.get('t') for e in terminal_events], ['done'])
+            self.assertTrue(terminal_events[0].get('persist_pending'))
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
@@ -2534,9 +2533,8 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                 if line.startswith('data: '):
                     events.append(json.loads(line[6:].strip()))
             terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
-            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
-            self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
+            self.assertEqual([e.get('t') for e in terminal_events], ['done'])
+            self.assertTrue(terminal_events[0].get('persist_pending'))
             self.assertEqual(gen_release_calls, [None])
             success_tuples = [c for c in gen_release_calls if isinstance(c, tuple)]
             self.assertEqual(success_tuples, [])
