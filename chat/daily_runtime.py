@@ -9970,8 +9970,6 @@ def stream_daily_resident_turn(
                     )
                 _clear_daily_provider_prompt_snapshots(plan, resident)
             yield event, payload
-            if event == 'done':
-                _capture_transcript_end(plan, resident)
     finally:
         _clear_daily_provider_prompt_snapshots(plan, resident)
 
