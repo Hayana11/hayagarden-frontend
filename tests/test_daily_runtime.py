@@ -1920,7 +1920,11 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                  mock.patch('gateway._retire_cc_resident_for_provider_change', return_value=False), \
                  mock.patch('chat.daily_runtime._context_plan_consumer_enabled', return_value=False):
                 gen = gateway._stream_cc_daily_soft_window({'user_message_id': uid}, 'gen-close')
-                _ = next(gen)
+                for chunk in gen:
+                    if isinstance(chunk, str) and '"t": "text"' in chunk:
+                        break
+                else:
+                    self.fail('provider text was not emitted before disconnect')
                 gen.close()
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
@@ -2456,7 +2460,7 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
     def setUpClass(cls):
         os.makedirs('/opt/workspace/tools', exist_ok=True)
 
-    def test_chat_stream_cas_conflict_gen_release_none_only(self):
+    def test_chat_stream_cas_conflict_gen_release_keeps_persisted_reply(self):
         import json
         import gateway
 
@@ -2535,9 +2539,7 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
             terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
             self.assertEqual([e.get('t') for e in terminal_events], ['done'])
             self.assertTrue(terminal_events[0].get('persist_pending'))
-            self.assertEqual(gen_release_calls, [None])
-            success_tuples = [c for c in gen_release_calls if isinstance(c, tuple)]
-            self.assertEqual(success_tuples, [])
+            self.assertEqual(gen_release_calls, [('daily reply', '')])
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
@@ -2962,6 +2964,22 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         path = session_jsonl_path(self.cwd, session_id)
         assert path is not None
         return Path(path)
+
+    def _stream_mapping_blocked_fixture(self, plan, resident):
+        def set_fixture_range(plan_arg, resident_arg):
+            plan_arg.transcript_path = str(resident_arg._jsonl_path)
+            plan_arg.transcript_claude_session_id = resident_arg.session_id
+            plan_arg.transcript_start_offset = 0
+            plan_arg.transcript_end_offset = resident_arg._jsonl_path.stat().st_size
+            plan_arg.transcript_process_generation = int(resident_arg.generation)
+            plan_arg.transcript_observation_error_code = None
+
+        with mock.patch.object(
+            dr, '_capture_transcript_end', side_effect=set_fixture_range,
+        ):
+            return list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
 
     def test_hot_path_maps_only_current_turn_range(self):
         """1) Hot: start=EOF before write; map only this turn; manifest=MAPPED."""
@@ -3652,9 +3670,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             '【邮箱提示】\n有新的邮件。\nmessage id: daily-map-failure'
         )
         plan.assembly['pending_mail_ids'] = ['daily-map-failure']
-        list(dr.stream_daily_resident_turn(
-            plan, resident=resident, env={}, static_system='STATIC',
-        ))
+        self._stream_mapping_blocked_fixture(plan, resident)
         self.assertIn('message id: daily-map-failure', resident.sent[-1])
         self.assertEqual(
             resident.last_commit_meta['pending_mail_ids'],
@@ -3721,9 +3737,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
         )
         plan = self._prepare(uid, resident=resident)
-        list(dr.stream_daily_resident_turn(
-            plan, resident=resident, env={}, static_system='STATIC',
-        ))
+        self._stream_mapping_blocked_fixture(plan, resident)
         canonical, aid = _persist_canonical_for_plan(plan)
         events = []
         real_rollback = dr._rollback_failed_terminalization
@@ -3910,6 +3924,11 @@ class SendTurnStdinFlushAckTests(unittest.TestCase):
 class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
     def setUp(self):
         dr.reset_bindings_for_tests()
+        verification_patch = mock.patch.object(
+            dc, 'set_daily_assistant_verification_status',
+        )
+        verification_patch.start()
+        self.addCleanup(verification_patch.stop)
 
     def _prepare(self, db, *, feedback=([], [])):
         _init_chat_messages(db)
