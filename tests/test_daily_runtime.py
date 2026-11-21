@@ -2697,6 +2697,29 @@ def _jsonl_line(
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _terminal_assistant_line(uuid: str, *, session: str, parent: str | None, content: Any) -> str:
+    event = json.loads(_jsonl_line(
+        uuid, 'assistant', session=session, parent=parent, content=content,
+    ))
+    event['message']['stop_reason'] = 'end_turn'
+    return json.dumps(event, ensure_ascii=False)
+
+
+def _resident_usage(session_id: str, generation: int, turn_identity: str, **usage):
+    return cc_resident.ResidentTurnUsage(
+        usage,
+        terminal_receipt=cc_resident.ProviderTerminalReceipt(
+            terminal_kind='provider_result',
+            source='resident_live_stdout',
+            turn_identity=turn_identity,
+            process_generation=generation,
+            claude_session_id=session_id,
+            result_is_error=False,
+            result_stop_reason='end_turn',
+        ),
+    )
+
+
 def _jsonl_result_line(uuid: str, *, session: str, stop_reason: str = 'end_turn') -> str:
     return json.dumps({
         'type': 'result',
@@ -2754,14 +2777,14 @@ class _TranscriptHotResident(_FakeResident):
         self.sent_generations.append(int(self.generation))
         _append_jsonl(self._jsonl_path, [
             _jsonl_line('u-hot-1', 'user', session=self.session_id, parent=None, content='hot-user'),
-            _jsonl_line(
-                'a-hot-1', 'assistant', session=self.session_id, parent='u-hot-1',
+            _terminal_assistant_line(
+                'a-hot-1', session=self.session_id, parent='u-hot-1',
                 content=[{'type': 'text', 'text': 'hot-asst'}],
             ),
             _jsonl_result_line('r-hot-1', session=self.session_id),
         ])
         yield ('text', 'hot reply')
-        yield ('done', ('hot reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
+        yield ('done', ('hot reply', '', _resident_usage(self.session_id, self.generation, 'hot-turn', input_tokens=3, output_tokens=5), {}))
 
 
 class _TranscriptColdResident(_FakeResident):
@@ -2784,13 +2807,13 @@ class _TranscriptColdResident(_FakeResident):
         self.session_id = self._new_session_id
         _write_jsonl(self._jsonl_path, [
             _jsonl_line('u-cold-1', 'user', session=self.session_id, parent=None, content='cold-user'),
-            _jsonl_line(
-                'a-cold-1', 'assistant', session=self.session_id, parent='u-cold-1',
+            _terminal_assistant_line(
+                'a-cold-1', session=self.session_id, parent='u-cold-1',
                 content=[{'type': 'text', 'text': 'cold-asst'}],
             ),
             _jsonl_result_line('r-cold-1', session=self.session_id),
         ])
-        yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+        yield ('done', ('cold reply', '', _resident_usage(self.session_id, self.generation, 'cold-turn', input_tokens=2, output_tokens=4), {}))
 
 
 class _TranscriptBacklogResident(_FakeResident):
@@ -2833,8 +2856,8 @@ class _TranscriptBacklogResident(_FakeResident):
                     'content': f'tool-result-{index}',
                 }],
             ),
-            _jsonl_line(
-                f'a-back-{index}-final', 'assistant', session=self.session_id,
+            _terminal_assistant_line(
+                f'a-back-{index}-final', session=self.session_id,
                 parent=f't-back-{index}',
                 content=[{'type': 'text', 'text': f'back-asst-{index}'}],
             ),
@@ -2846,7 +2869,7 @@ class _TranscriptBacklogResident(_FakeResident):
             _append_jsonl(self._jsonl_path, lines)
         self._turn_count += 1
         yield ('text', 'back reply')
-        yield ('done', ('back reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+        yield ('done', ('back reply', '', _resident_usage(self.session_id, self.generation, f'back-turn-{index}', input_tokens=2, output_tokens=4), {}))
 
 
 class _RegisteredRespawnResident(_FakeResident):
@@ -2887,13 +2910,13 @@ class _RegisteredRespawnResident(_FakeResident):
         self.session_id = self._new_session_id
         _write_jsonl(self._jsonl_path, [
             _jsonl_line('u-rs-1', 'user', session=self.session_id, parent=None, content='rs-user'),
-            _jsonl_line(
-                'a-rs-1', 'assistant', session=self.session_id, parent='u-rs-1',
+            _terminal_assistant_line(
+                'a-rs-1', session=self.session_id, parent='u-rs-1',
                 content=[{'type': 'text', 'text': 'rs-asst'}],
             ),
             _jsonl_result_line('r-rs-1', session=self.session_id),
         ])
-        yield ('done', ('after-respawn', '', {'input_tokens': 1, 'output_tokens': 2}, {}))
+        yield ('done', ('after-respawn', '', _resident_usage(self.session_id, self.generation, 'respawn-turn', input_tokens=1, output_tokens=2), {}))
 
 
 class _MappingBlockedResident(_TranscriptColdResident):
@@ -2906,13 +2929,13 @@ class _MappingBlockedResident(_TranscriptColdResident):
         self.session_id = self._new_session_id
         # Assistant-only event: mapping rejects (candidate_user_missing).
         _write_jsonl(self._jsonl_path, [
-            _jsonl_line(
-                'a-only-1', 'assistant', session=self.session_id, parent=None,
+            _terminal_assistant_line(
+                'a-only-1', session=self.session_id, parent=None,
                 content=[{'type': 'text', 'text': 'orphan'}],
             ),
             _jsonl_result_line('r-only-1', session=self.session_id),
         ])
-        yield ('done', ('blocked-map reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
+        yield ('done', ('blocked-map reply', '', _resident_usage(self.session_id, self.generation, 'blocked-map-turn', input_tokens=1, output_tokens=1), {}))
 
 
 class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
@@ -3096,9 +3119,10 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
                     _jsonl_result_line('r-cold-1', session=self.session_id),
                 ])
                 yield ('text', '流出的完整回复')
-                yield ('done', ('流出的完整回复', '', {
-                    'input_tokens': 2, 'output_tokens': 4,
-                }, {}))
+                yield ('done', ('流出的完整回复', '', _resident_usage(
+                    self.session_id, self.generation, 'blocked-catchup-turn',
+                    input_tokens=2, output_tokens=4,
+                ), {}))
 
         resident = _TerminalTranscriptResident(
             cwd=self.cwd,
