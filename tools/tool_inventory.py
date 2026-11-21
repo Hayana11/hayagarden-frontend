@@ -120,6 +120,7 @@ from tools.capability_manifest import get_capability
 from tools.cc_capability_adapter import physical_surface_names
 
 _LEGACY_CAPABILITY_ALIASES = {
+  "location.read": "get_location",
   "memory.search": "search_memories",
   "memory.write": "save_memory",
   "diary.write": "write_diary",

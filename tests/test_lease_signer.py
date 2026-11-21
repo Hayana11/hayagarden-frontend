@@ -47,6 +47,7 @@ CHAT_WAKE_DEFAULTS = (
     "x.read",
     "x.write",
     "health.read",
+    "location.read",
     "gallery.save",
     "gallery.recall",
     "gallery.screenshot",

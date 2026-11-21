@@ -88,7 +88,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read", "xhs.status", "xhs.read", "x.state", "x.read", "x.write"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("health.read",),
+            ("health.read", "location.read"),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
@@ -96,7 +96,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
-            ("mcp__internal__get.health",),
+            ("mcp__internal__get.health", "mcp__internal__get_location"),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -130,7 +130,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_a_health_internal_surface_schema_matches_get_health_contract(self):
         name = "mcp__internal__get.health"
-        self.assertEqual(uh_a0_internal_mcp_tools(), (name,))
+        self.assertEqual(uh_a0_internal_mcp_tools(), (name, "mcp__internal__get_location"))
         self.assertEqual(
             {
                 tool_name

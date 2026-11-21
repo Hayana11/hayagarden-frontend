@@ -44,6 +44,9 @@ class ToolInventoryTest(unittest.TestCase):
             },
             set(P1_ENABLED_CAPABILITY_IDS),
         )
+        self.assertIn(self.t["location.read"], self.groups["home"]["tools"])
+        self.assertTrue(self.t["location.read"]["available"])
+        self.assertNotIn("get_location", self.t)
         self.assertIn("health.read", self.t)
         self.assertFalse(self.t["health.read"]["available"])
         self.assertEqual(self.t["health.read"]["reason_code"], "runtime_disabled")

@@ -3020,50 +3020,11 @@ def _github_browse(query=None, repo=None, sort=None):
 
 
 def _get_location():
-    """读哈娅手机 App 后台上报的最近位置（geo_log）。created_at 按 +8 时区存，
-    年龄也用 +8 基准算，否则 UTC 服务器上会差 8 小时。"""
+    from tools.location_reader import read_location
     try:
-        conn = get_db()
-        row = conn.execute(
-            "SELECT lat_gcj, lon_gcj, accuracy, address, poi, city, created_at, "
-            "CAST((julianday('now','+8 hours')-julianday(created_at))*86400 AS INT) AS age_sec "
-            "FROM geo_log ORDER BY id DESC LIMIT 1").fetchone()
-        conn.close()
-    except Exception as e:
-        return f'读取位置失败：{e}'
-    if not row:
-        return '还没有位置记录——她手机 App 的后台定位可能没开或没授权。'
-    d = dict(row)
-    age = int(d.get('age_sec') or 0)
-    if age < 0:
-        age = 0
-    if age < 60:
-        ago = '刚刚'
-    elif age < 3600:
-        ago = '%d 分钟前' % (age // 60)
-    elif age < 86400:
-        ago = '%d 小时前' % (age // 3600)
-    else:
-        ago = '%d 天前' % (age // 86400)
-    addr = d.get('address') or d.get('city') or '未知位置'
-    lines = ['📍 ' + addr]
-    poi = (d.get('poi') or '').strip()
-    if poi and poi != addr and poi not in addr:
-        lines.append('附近 · ' + poi)
-    meta = []
-    if d.get('city'):
-        meta.append(d['city'])
-    if d.get('accuracy'):
-        meta.append('精度约 %d 米' % int(d['accuracy']))
-    if meta:
-        lines.append('🏙 ' + ' · '.join(meta))
-    lines.append('🕐 %s（%s）' % (d.get('created_at', ''), ago))
-    if d.get('lat_gcj') and d.get('lon_gcj'):
-        lines.append('🔗 https://uri.amap.com/marker?position=%.6f,%.6f&name=%s' % (
-            d['lon_gcj'], d['lat_gcj'], urllib.parse.quote((d.get('poi') or addr)[:30])))
-    if age >= 3600:
-        lines.append('（这是 %s 的定位，可能不是她此刻的位置）' % ago)
-    return '\n'.join(lines)
+        return read_location(DB_PATH)
+    except sqlite3.Error as exc:
+        return f'读取位置失败：{exc}'
 
 
 DEVICE_STATUS_STALE_AFTER_SEC = 10 * 60
