@@ -8586,9 +8586,6 @@ def _stream_cc_daily_soft_window(
         if deferred_payload is not None:
             return
 
-        if _daily_done_seen:
-            _daily_rt._capture_transcript_end(_daily_plan, _CC_RESIDENT)
-
         canonical = _daily_rt.build_canonical_turn_for_plan(
             _daily_plan,
             mode=_display_thinking_mode,
