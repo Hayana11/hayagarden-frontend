@@ -31,6 +31,7 @@ CHAT_WAKE_DEFAULTS = (
     "memory.search",
     "memory.write",
     "diary.write",
+    "system.status.read",
     "home.light.status",
     "todo.read",
     "todo.write",
