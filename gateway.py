@@ -8586,6 +8586,9 @@ def _stream_cc_daily_soft_window(
         if deferred_payload is not None:
             return
 
+        if _daily_done_seen:
+            _daily_rt._capture_transcript_end(_daily_plan, _CC_RESIDENT)
+
         canonical = _daily_rt.build_canonical_turn_for_plan(
             _daily_plan,
             mode=_display_thinking_mode,
@@ -8718,7 +8721,7 @@ def _stream_cc_daily_soft_window(
                 json.dumps(exc.manifest, ensure_ascii=False),
             )
             turn_terminal = True
-            if not _client_detached:
+            if not _client_detached and not _frontend_done_sent:
                 yield 'data: ' + json.dumps({
                     't': 'err',
                     'd': 'cursor CAS conflict after assistant persist',
@@ -8861,7 +8864,7 @@ def _stream_cc_daily_soft_window(
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
             }) + SSE_END
@@ -8870,7 +8873,7 @@ def _stream_cc_daily_soft_window(
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
             }) + SSE_END
@@ -8879,14 +8882,14 @@ def _stream_cc_daily_soft_window(
         if _daily_plan:
             _daily_rt._release_lease(_daily_plan)
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
             }) + SSE_END
         return None
     except _daily_rt.FirstTurnFinalizePendingError as exc:
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': str(exc),
@@ -8903,7 +8906,7 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
             }) + SSE_END
@@ -8916,7 +8919,7 @@ def _stream_cc_daily_soft_window(
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
             }) + SSE_END
@@ -8930,7 +8933,7 @@ def _stream_cc_daily_soft_window(
                 respawn=False,
             )
         turn_terminal = True
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
             }) + SSE_END
@@ -8946,7 +8949,7 @@ def _stream_cc_daily_soft_window(
         turn_terminal = True
         _usage = getattr(exc, 'usage', None) or {}
         if isinstance(_usage, dict) and _usage.get('cold_budget_overflow') is not None:
-            if not _client_detached:
+            if not _client_detached and not _frontend_done_sent:
                 yield 'data: ' + json.dumps({'t': 'usage', **{
                     k: _usage.get(k) for k in (
                         'respawn_reason', 'cold_budget_overflow', 'cold_prompt_estimate',
@@ -8954,7 +8957,7 @@ def _stream_cc_daily_soft_window(
                         'cold_budget_mode',
                     ) if k in _usage
                 }}) + SSE_END
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield 'data: ' + json.dumps({
                 't': 'err',
                 'd': str(exc),
@@ -8990,7 +8993,7 @@ def _stream_cc_daily_soft_window(
                 abort_requested=True,
                 respawn_requested=True,
             )
-        if not _client_detached:
+        if not _client_detached and not _frontend_done_sent:
             yield _sse_json(_chat_stream_failure_event(
                 exc,
                 partial_rescue=bool(cleanup.get('partial_rescue_performed')),
